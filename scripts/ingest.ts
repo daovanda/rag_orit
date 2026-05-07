@@ -189,6 +189,17 @@ async function main() {
     const chunks = chunkMarkdown(text, file);
     console.log(`  ${file} → ${chunks.length} chunk(s)`);
     allChunks.push(...chunks);
+
+    // ─── Log chi tiết từng chunk ──────────────────────────────────────────────
+    console.log(`\n📄 ${file} — ${chunks.length} chunk(s):`);
+    for (const chunk of chunks) {
+    const chars = chunk.text.length;
+    const estTokens = Math.round(chars / 3); // ước tính: 1 token ≈ 3 ký tự tiếng Anh
+    console.log(
+        `  [${chunk.id}] heading="${chunk.metadata.heading}" | ${chars} chars | ~${estTokens} tokens`
+    );
+    console.log(`    preview: ${chunk.text.slice(0, 80).replace(/\n/g, " ")}...`);
+    }
   }
 
   console.log(`Total chunks: ${allChunks.length}`);

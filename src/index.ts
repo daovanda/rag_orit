@@ -219,6 +219,7 @@ Be concise and specific.`
   ];
 
   for (let i = 0; i < MAX_ITERATIONS; i++) {
+	console.log(`[LOOP] Iteration ${i + 1}`);
 
     const response = await env.AI.run(CHAT_MODEL, {
       messages,
@@ -234,18 +235,19 @@ Be concise and specific.`
 
     // No tool calls → LLM is done, return final answer
     if (!response.tool_calls || response.tool_calls.length === 0) {
+	  console.log(`[LOOP] No tool calls → returning final answer`);
       return response.response ?? "No response generated.";
     }
 
     // Execute each tool call and collect results
     for (const toolCall of response.tool_calls) {
-
+	  console.log(`[TOOL] Calling: ${toolCall.name}`, toolCall.arguments);
       const toolResult = await executeTool(
         { name: toolCall.name, arguments: toolCall.arguments },
         env,
         screenContext
       );
-
+	  console.log(`[TOOL] Result length: ${toolResult.length} chars`);
       // Append assistant tool call and tool result to message history
       messages.push({
         role: "assistant",
