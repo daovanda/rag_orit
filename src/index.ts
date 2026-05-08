@@ -4,7 +4,7 @@ export interface Env {
   AI: Ai;
   VECTORIZE: VectorizeIndex;
   CHUNKS: KVNamespace;
-  ZILCODE_API_TOKEN: string; // set via: wrangler secret put ZILCODE_API_TOKEN
+  ZILCODE_API_TOKEN: string;
 }
 
 // ─── Models ───────────────────────────────────────────────────────────────────
@@ -12,7 +12,15 @@ export interface Env {
 const CHAT_MODEL = "@cf/meta/llama-3.1-8b-instruct";
 const EMBEDDING_MODEL = "@cf/baai/bge-m3";
 
-// ─── Tool definitions (sent to LLM) ──────────────────────────────────────────
+// ─── CORS ─────────────────────────────────────────────────────────────────────
+
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+};
+
+// ─── Tool definitions ─────────────────────────────────────────────────────────
 
 const TOOLS = [
   {
@@ -71,12 +79,10 @@ async function executeTool(
 
   switch (tool.name) {
 
-    // ── rag_search ────────────────────────────────────────────────────────────
     case "rag_search": {
       const query = tool.arguments.query;
       if (!query) return "Error: query is required";
 
-      // 1. Embed the query
       const embeddingResult = await env.AI.run(
         EMBEDDING_MODEL,
         { text: [query] }
@@ -84,7 +90,6 @@ async function executeTool(
 
       const queryVector = embeddingResult.data[0];
 
-      // 2. Search Vectorize (top 5 most relevant chunks)
       const matches = await env.VECTORIZE.query(queryVector, {
         topK: 5,
         returnMetadata: "all"
@@ -94,7 +99,6 @@ async function executeTool(
         return "No relevant documentation found.";
       }
 
-      // 3. Fetch chunk text from KV and assemble context
       const results: string[] = [];
       for (const match of matches.matches) {
         const raw = await env.CHUNKS.get(`chunk:${match.id}`);
@@ -104,9 +108,7 @@ async function executeTool(
             module: string;
             heading: string;
           };
-          results.push(
-            `[${chunk.module} — ${chunk.heading}]\n${chunk.text}`
-          );
+          results.push(`[${chunk.module} — ${chunk.heading}]\n${chunk.text}`);
         }
       }
 
@@ -115,7 +117,6 @@ async function executeTool(
         : "No chunk text found.";
     }
 
-    // ── get_workflow ──────────────────────────────────────────────────────────
     case "get_workflow": {
       const id = tool.arguments.id;
       if (!id) return "Error: id is required";
@@ -126,7 +127,6 @@ async function executeTool(
       // });
       // return await res.text();
 
-      // Mock response
       return JSON.stringify({
         _mock: true,
         id,
@@ -151,14 +151,10 @@ async function executeTool(
       }, null, 2);
     }
 
-    // ── get_screen_context ────────────────────────────────────────────────────
     case "get_screen_context": {
-      // screenContext is passed in from the request body by the Zilcode UI
       if (screenContext) {
         return JSON.stringify(screenContext, null, 2);
       }
-
-      // Mock fallback when UI doesn't send context
       return JSON.stringify({
         _mock: true,
         screen: "workflow-editor",
@@ -182,26 +178,24 @@ interface ScreenContext {
 
 interface ChatRequest {
   message: string;
-  context?: ScreenContext; // sent by Zilcode UI
+  context?: ScreenContext;
 }
 
-// Workers AI message format
 interface AIMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: string;
-  // tool_call_id is used when role === "tool"
   tool_call_id?: string;
 }
 
 // ─── Agentic loop ─────────────────────────────────────────────────────────────
 
-const MAX_ITERATIONS = 6; // safety cap — prevent infinite loops
+const MAX_ITERATIONS = 6;
 
 async function runAgenticLoop(
   userMessage: string,
   env: Env,
   screenContext?: ScreenContext
-): Promise<string> {
+): Promise<{ answer: string; toolsCalled: string[] }> {
 
   const messages: AIMessage[] = [
     {
@@ -218,8 +212,10 @@ Be concise and specific.`
     }
   ];
 
+  const toolsCalled: string[] = [];
+
   for (let i = 0; i < MAX_ITERATIONS; i++) {
-	console.log(`[LOOP] Iteration ${i + 1}`);
+    console.log(`[LOOP] Iteration ${i + 1}`);
 
     const response = await env.AI.run(CHAT_MODEL, {
       messages,
@@ -233,22 +229,26 @@ Be concise and specific.`
       }>;
     };
 
-    // No tool calls → LLM is done, return final answer
     if (!response.tool_calls || response.tool_calls.length === 0) {
-	  console.log(`[LOOP] No tool calls → returning final answer`);
-      return response.response ?? "No response generated.";
+      console.log(`[LOOP] No tool calls → returning final answer`);
+      return {
+        answer: response.response ?? "No response generated.",
+        toolsCalled
+      };
     }
 
-    // Execute each tool call and collect results
     for (const toolCall of response.tool_calls) {
-	  console.log(`[TOOL] Calling: ${toolCall.name}`, toolCall.arguments);
+      console.log(`[TOOL] Calling: ${toolCall.name}`, toolCall.arguments);
+      toolsCalled.push(toolCall.name);
+
       const toolResult = await executeTool(
         { name: toolCall.name, arguments: toolCall.arguments },
         env,
         screenContext
       );
-	  console.log(`[TOOL] Result length: ${toolResult.length} chars`);
-      // Append assistant tool call and tool result to message history
+
+      console.log(`[TOOL] Result length: ${toolResult.length} chars`);
+
       messages.push({
         role: "assistant",
         content: JSON.stringify({
@@ -265,7 +265,10 @@ Be concise and specific.`
     }
   }
 
-  return "Reached maximum tool call iterations without a final answer.";
+  return {
+    answer: "Reached maximum tool call iterations without a final answer.",
+    toolsCalled
+  };
 }
 
 // ─── Worker handler ───────────────────────────────────────────────────────────
@@ -275,35 +278,43 @@ export default {
 
     const url = new URL(request.url);
 
+    // ── OPTIONS — CORS preflight ─────────────────────────────────────────────
+    if (request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: CORS });
+    }
+
     // ── GET / — health check ─────────────────────────────────────────────────
     if (url.pathname === "/") {
       return Response.json({
         success: true,
         message: "Workers AI running",
         tools: TOOLS.map(t => t.name)
-      });
+      }, { headers: CORS });
     }
 
     // ── POST /chat — agentic chat ────────────────────────────────────────────
     if (url.pathname === "/chat" && request.method === "POST") {
       try {
-
         const body = await request.json() as ChatRequest;
 
         if (!body.message) {
           return Response.json(
             { success: false, error: "message is required" },
-            { status: 400 }
+            { status: 400, headers: CORS }
           );
         }
 
-        const answer = await runAgenticLoop(
+        const { answer, toolsCalled } = await runAgenticLoop(
           body.message,
           env,
           body.context
         );
 
-        return Response.json({ success: true, response: answer });
+        return Response.json({
+          success: true,
+          response: answer,
+          tools_called: toolsCalled
+        }, { headers: CORS });
 
       } catch (error) {
         return Response.json(
@@ -311,26 +322,25 @@ export default {
             success: false,
             error: error instanceof Error ? error.message : "Unknown error"
           },
-          { status: 500 }
+          { status: 500, headers: CORS }
         );
       }
     }
 
-    // ── POST /embed — raw embedding (utility endpoint) ───────────────────────
+    // ── POST /embed — raw embedding ──────────────────────────────────────────
     if (url.pathname === "/embed" && request.method === "POST") {
       try {
-
         const body = await request.json() as { text?: string };
 
         if (!body.text) {
           return Response.json(
             { success: false, error: "text is required" },
-            { status: 400 }
+            { status: 400, headers: CORS }
           );
         }
 
         const embedding = await env.AI.run(EMBEDDING_MODEL, { text: body.text });
-        return Response.json({ success: true, embedding });
+        return Response.json({ success: true, embedding }, { headers: CORS });
 
       } catch (error) {
         return Response.json(
@@ -338,11 +348,11 @@ export default {
             success: false,
             error: error instanceof Error ? error.message : "Unknown error"
           },
-          { status: 500 }
+          { status: 500, headers: CORS }
         );
       }
     }
 
-    return new Response("Not Found", { status: 404 });
+    return new Response("Not Found", { status: 404, headers: CORS });
   }
 };

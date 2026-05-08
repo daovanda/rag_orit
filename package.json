@@ -17,6 +17,9 @@
     "wrangler": "^4.88.0"
   },
   "dependencies": {
-    "@cloudflare/ai": "^1.2.2"
+    "@cloudflare/ai": "^1.2.2",
+    "dotenv": "^17.4.2",
+    "pdf2pic": "^3.2.0",
+    "sharp": "^0.34.5"
   }
 }

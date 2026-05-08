@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Zilcode AI Chat</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #f5f5f3;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    color: #1a1a1a;
+  }
+
+  header {
+    background: #fff;
+    border-bottom: 0.5px solid #e0e0dc;
+    padding: 14px 20px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  header .logo {
+    width: 32px; height: 32px;
+    background: #1a1a1a;
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    color: #fff;
+    font-weight: 600;
+    font-size: 14px;
+  }
+
+  header h1 { font-size: 15px; font-weight: 500; }
+  header span { font-size: 13px; color: #888; margin-left: 4px; }
+
+  .worker-url {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .worker-url input {
+    font-size: 12px;
+    border: 0.5px solid #ddd;
+    border-radius: 6px;
+    padding: 5px 10px;
+    width: 300px;
+    background: #fafaf8;
+    color: #1a1a1a;
+  }
+
+  .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: #ccc;
+    flex-shrink: 0;
+  }
+  .dot.online { background: #3d9e6e; }
+
+  #messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .msg {
+    display: flex;
+    flex-direction: column;
+    max-width: 720px;
+    width: 100%;
+  }
+
+  .msg.user { align-self: flex-end; align-items: flex-end; }
+  .msg.assistant { align-self: flex-start; align-items: flex-start; }
+
+  .bubble {
+    padding: 10px 14px;
+    border-radius: 12px;
+    font-size: 14px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .msg.user .bubble {
+    background: #1a1a1a;
+    color: #fff;
+    border-radius: 12px 12px 2px 12px;
+  }
+
+  .msg.assistant .bubble {
+    background: #fff;
+    border: 0.5px solid #e0e0dc;
+    border-radius: 2px 12px 12px 12px;
+    color: #1a1a1a;
+  }
+
+  .tool-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    background: #f0f0ec;
+    border: 0.5px solid #ddd;
+    border-radius: 20px;
+    padding: 3px 10px;
+    color: #555;
+    margin-bottom: 6px;
+  }
+
+  .tool-badge .icon {
+    width: 14px; height: 14px;
+    border-radius: 3px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+  }
+
+  .tool-badge.rag_search .icon { background: #dbeafe; color: #1d4ed8; }
+  .tool-badge.get_workflow .icon { background: #dcfce7; color: #166534; }
+  .tool-badge.get_screen_context .icon { background: #fef9c3; color: #854d0e; }
+
+  .tool-badge .spinner {
+    width: 10px; height: 10px;
+    border: 1.5px solid #aaa;
+    border-top-color: #555;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    display: inline-block;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .typing {
+    display: flex;
+    gap: 4px;
+    padding: 12px 14px;
+    background: #fff;
+    border: 0.5px solid #e0e0dc;
+    border-radius: 2px 12px 12px 12px;
+    width: fit-content;
+  }
+
+  .typing span {
+    width: 7px; height: 7px;
+    background: #aaa;
+    border-radius: 50%;
+    animation: bounce 1.2s infinite;
+  }
+
+  .typing span:nth-child(2) { animation-delay: 0.2s; }
+  .typing span:nth-child(3) { animation-delay: 0.4s; }
+
+  @keyframes bounce {
+    0%, 60%, 100% { transform: translateY(0); }
+    30% { transform: translateY(-5px); }
+  }
+
+  .empty-state {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    color: #aaa;
+  }
+
+  .empty-state .big { font-size: 32px; }
+  .empty-state p { font-size: 14px; }
+
+  .suggestions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    justify-content: center;
+    margin-top: 8px;
+  }
+
+  .suggestion-btn {
+    font-size: 12px;
+    border: 0.5px solid #ddd;
+    background: #fff;
+    border-radius: 20px;
+    padding: 6px 14px;
+    cursor: pointer;
+    color: #555;
+    transition: all 0.15s;
+  }
+
+  .suggestion-btn:hover {
+    background: #f0f0ec;
+    border-color: #bbb;
+    color: #1a1a1a;
+  }
+
+  .input-area {
+    background: #fff;
+    border-top: 0.5px solid #e0e0dc;
+    padding: 14px 20px;
+  }
+
+  .input-row {
+    display: flex;
+    align-items: flex-end;
+    gap: 10px;
+    max-width: 760px;
+    margin: 0 auto;
+    background: #fafaf8;
+    border: 0.5px solid #ddd;
+    border-radius: 12px;
+    padding: 10px 14px;
+  }
+
+  #userInput {
+    flex: 1;
+    border: none;
+    background: transparent;
+    font-size: 14px;
+    resize: none;
+    outline: none;
+    line-height: 1.5;
+    max-height: 120px;
+    font-family: inherit;
+    color: #1a1a1a;
+  }
+
+  #sendBtn {
+    width: 32px; height: 32px;
+    border-radius: 8px;
+    background: #1a1a1a;
+    border: none;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    transition: opacity 0.15s;
+  }
+
+  #sendBtn:hover { opacity: 0.8; }
+  #sendBtn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+  #sendBtn svg { width: 16px; height: 16px; fill: #fff; }
+
+  .error-bubble {
+    background: #fef2f2;
+    border: 0.5px solid #fca5a5;
+    color: #b91c1c;
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-size: 13px;
+  }
+
+  .timestamp {
+    font-size: 11px;
+    color: #bbb;
+    margin-top: 4px;
+    padding: 0 2px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">Z</div>
+  <h1>Zilcode AI</h1>
+  <span>RAG Chat</span>
+  <div class="worker-url">
+    <div class="dot" id="statusDot"></div>
+    <input type="text" id="workerUrl" value="https://ragorit.daovanda2405.workers.dev" placeholder="Worker URL..." />
+    <button class="suggestion-btn" onclick="checkHealth()">Ping</button>
+  </div>
+</header>
+
+<div id="messages">
+  <div class="empty-state" id="emptyState">
+    <div class="big">⚡</div>
+    <p>Hỏi bất kỳ điều gì về Zilcode</p>
+    <div class="suggestions">
+      <button class="suggestion-btn" onclick="send('Zilcode là gì?')">Zilcode là gì?</button>
+      <button class="suggestion-btn" onclick="send('z-Flow hoạt động như thế nào?')">z-Flow hoạt động thế nào?</button>
+      <button class="suggestion-btn" onclick="send('Show me workflow wf-001')">Show workflow wf-001</button>
+      <button class="suggestion-btn" onclick="send('Tính năng z-Admin gồm những gì?')">Tính năng z-Admin</button>
+    </div>
+  </div>
+</div>
+
+<div class="input-area">
+  <div class="input-row">
+    <textarea id="userInput" rows="1" placeholder="Nhập câu hỏi..." onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
+    <button id="sendBtn" onclick="sendMessage()" title="Gửi">
+      <svg viewBox="0 0 24 24"><path d="M2 21l21-9L2 3v7l15 2-15 2v7z"/></svg>
+    </button>
+  </div>
+</div>
+
+<script>
+  const TOOL_META = {
+    rag_search: { label: 'rag_search', icon: '🔍', cls: 'rag_search' },
+    get_workflow: { label: 'get_workflow', icon: '⚙', cls: 'get_workflow' },
+    get_screen_context: { label: 'get_screen_context', icon: '🖥', cls: 'get_screen_context' },
+  };
+
+  function getUrl() {
+    return document.getElementById('workerUrl').value.replace(/\/$/, '');
+  }
+
+  async function checkHealth() {
+    const dot = document.getElementById('statusDot');
+    dot.className = 'dot';
+    try {
+      const res = await fetch(getUrl() + '/');
+      const data = await res.json();
+      dot.className = data.success ? 'dot online' : 'dot';
+    } catch {
+      dot.className = 'dot';
+    }
+  }
+
+  function autoResize(el) {
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+  }
+
+  function handleKey(e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  }
+
+  function send(text) {
+    document.getElementById('userInput').value = text;
+    sendMessage();
+  }
+
+  function now() {
+    return new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' });
+  }
+
+  function appendMessage(role, content, tools = []) {
+    const empty = document.getElementById('emptyState');
+    if (empty) empty.remove();
+
+    const container = document.getElementById('messages');
+    const msg = document.createElement('div');
+    msg.className = `msg ${role}`;
+
+    if (role === 'assistant' && tools.length > 0) {
+      tools.forEach(tool => {
+        const meta = TOOL_META[tool] || { label: tool, icon: '🔧', cls: '' };
+        const badge = document.createElement('div');
+        badge.className = `tool-badge ${meta.cls}`;
+        badge.innerHTML = `<span class="icon">${meta.icon}</span>${meta.label}`;
+        msg.appendChild(badge);
+      });
+    }
+
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.textContent = content;
+    msg.appendChild(bubble);
+
+    const ts = document.createElement('div');
+    ts.className = 'timestamp';
+    ts.textContent = now();
+    msg.appendChild(ts);
+
+    container.appendChild(msg);
+    container.scrollTop = container.scrollHeight;
+    return msg;
+  }
+
+  function appendTyping() {
+    const empty = document.getElementById('emptyState');
+    if (empty) empty.remove();
+
+    const container = document.getElementById('messages');
+    const msg = document.createElement('div');
+    msg.className = 'msg assistant';
+    msg.id = 'typing-indicator';
+
+    const typing = document.createElement('div');
+    typing.className = 'typing';
+    typing.innerHTML = '<span></span><span></span><span></span>';
+    msg.appendChild(typing);
+
+    container.appendChild(msg);
+    container.scrollTop = container.scrollHeight;
+  }
+
+  function removeTyping() {
+    const el = document.getElementById('typing-indicator');
+    if (el) el.remove();
+  }
+
+  function appendToolBadge(toolName) {
+    const container = document.getElementById('messages');
+    const wrapper = document.createElement('div');
+    wrapper.className = 'msg assistant';
+    wrapper.id = `tool-badge-${toolName}`;
+
+    const meta = TOOL_META[toolName] || { label: toolName, icon: '🔧', cls: '' };
+    const badge = document.createElement('div');
+    badge.className = `tool-badge ${meta.cls}`;
+    badge.innerHTML = `<span class="spinner"></span><span class="icon">${meta.icon}</span>calling ${meta.label}...`;
+    wrapper.appendChild(badge);
+    container.appendChild(wrapper);
+    container.scrollTop = container.scrollHeight;
+  }
+
+  function removeToolBadges() {
+    document.querySelectorAll('[id^="tool-badge-"]').forEach(el => el.remove());
+  }
+
+  async function sendMessage() {
+    const input = document.getElementById('userInput');
+    const text = input.value.trim();
+    if (!text) return;
+
+    const btn = document.getElementById('sendBtn');
+    btn.disabled = true;
+    input.value = '';
+    input.style.height = 'auto';
+
+    appendMessage('user', text);
+    appendTyping();
+
+    try {
+      const res = await fetch(getUrl() + '/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text })
+      });
+
+      removeTyping();
+
+      const data = await res.json();
+
+      if (data.success) {
+        appendMessage('assistant', data.response, data.tools_called || []);
+      } else {
+        const msg = document.createElement('div');
+        msg.className = 'msg assistant';
+        const err = document.createElement('div');
+        err.className = 'error-bubble';
+        err.textContent = '❌ ' + (data.error || 'Unknown error');
+        msg.appendChild(err);
+        document.getElementById('messages').appendChild(msg);
+      }
+
+    } catch (err) {
+      removeTyping();
+      const container = document.getElementById('messages');
+      const msg = document.createElement('div');
+      msg.className = 'msg assistant';
+      const errEl = document.createElement('div');
+      errEl.className = 'error-bubble';
+      errEl.textContent = '❌ Không kết nối được Worker. Kiểm tra URL và CORS.';
+      msg.appendChild(errEl);
+      container.appendChild(msg);
+    }
+
+    btn.disabled = false;
+    input.focus();
+  }
+
+  checkHealth();
+</script>
+</body>
+</html>
