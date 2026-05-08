@@ -9,7 +9,7 @@ export interface Env {
 
 // ─── Models ───────────────────────────────────────────────────────────────────
 
-const CHAT_MODEL = "@cf/zai-org/glm-4.7-flash";
+const CHAT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 const EMBEDDING_MODEL = "@cf/baai/bge-m3";
 
 // ─── CORS ─────────────────────────────────────────────────────────────────────
