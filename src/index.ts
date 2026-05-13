@@ -249,8 +249,21 @@ const MAX_ITERATIONS = 6;
 
 function formatToolResultsForFinalAnswer(toolResults: ToolResultRecord[]): string {
   return toolResults
-    .map((result, index) => `### ${index + 1}. ${result.name}\n${result.content}`)
+    .map((result, index) => [
+      `[KET_QUA_CONG_CU ${index + 1}: ${result.name}]`,
+      result.content,
+      `[HET_KET_QUA_CONG_CU ${index + 1}]`
+    ].join("\n"))
     .join("\n\n");
+}
+
+function cleanMarkdownArtifacts(answer: string): string {
+  return answer
+    .replace(/^\s*#{1,6}\s+/gm, "")
+    .replace(/^\s*[-*+]\s+/gm, "")
+    .replace(/\*\*([^*\n]+)\*\*/g, "$1")
+    .replace(/`([^`\n]+)`/g, "$1")
+    .trim();
 }
 
 async function createFinalAnswerFromRag(
@@ -270,6 +283,7 @@ Dựa chủ yếu vào kết quả rag_search trong ngữ cảnh được cung c
 Nếu có kết quả general_chat trong ngữ cảnh, chỉ xem là thông tin phụ; không dùng nó để phủ định hoặc thay thế tài liệu Zilcode.
 Nếu tài liệu không đủ thông tin, hãy nói rõ phần nào chưa tìm thấy trong tài liệu hiện có.
 Không nhắc đến tool/function nội bộ.
+Tài liệu nguồn có thể chứa cú pháp Markdown như ###, -, +, ** hoặc dấu backtick. Không sao chép các ký tự định dạng đó vào câu trả lời cuối; hãy chuyển thành văn bản sạch, tự nhiên.
 Trả lời đúng mức chi tiết theo yêu cầu của người dùng. Nếu người dùng yêu cầu chi tiết, hãy chia thành các phần/bước rõ ràng; nếu không yêu cầu chi tiết, hãy trả lời gọn.`
       },
       { role: "user", content: userMessage },
@@ -280,7 +294,7 @@ Trả lời đúng mức chi tiết theo yêu cầu của người dùng. Nếu 
     ]
   }) as { response?: string };
 
-  return response.response ?? "Không tạo được câu trả lời.";
+  return cleanMarkdownArtifacts(response.response ?? "Không tạo được câu trả lời.");
 }
 
 async function runAgenticLoop(
