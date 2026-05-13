@@ -261,25 +261,76 @@ function defaultRouteDecision(reason: string): RouteDecision {
   };
 }
 
-function extractJsonObject(raw: string): string {
+function extractJsonObjects(raw: string): string[] {
   const cleaned = raw
-    .replace(/^```json\s*/i, "")
-    .replace(/^```\s*/i, "")
-    .replace(/```$/i, "")
+    .replace(/```json/gi, "")
+    .replace(/```/g, "")
     .trim();
 
-  const start = cleaned.indexOf("{");
-  const end = cleaned.lastIndexOf("}");
+  const objects: string[] = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
 
-  if (start === -1 || end === -1 || end <= start) {
+  for (let i = 0; i < cleaned.length; i++) {
+    const char = cleaned[i];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === "\"") {
+      inString = true;
+      continue;
+    }
+
+    if (char === "{") {
+      if (depth === 0) start = i;
+      depth++;
+      continue;
+    }
+
+    if (char === "}") {
+      depth--;
+      if (depth === 0 && start !== -1) {
+        objects.push(cleaned.slice(start, i + 1));
+        start = -1;
+      }
+    }
+  }
+
+  if (objects.length === 0) {
     throw new Error("Router response does not contain a JSON object");
   }
 
-  return cleaned.slice(start, end + 1);
+  return objects;
 }
 
 function parseRouteDecision(raw: string): RouteDecision {
-  const parsed = JSON.parse(extractJsonObject(raw)) as Partial<RouteDecision>;
+  const candidates = extractJsonObjects(raw);
+  let parsed: Partial<RouteDecision> | null = null;
+
+  for (let i = candidates.length - 1; i >= 0; i--) {
+    try {
+      parsed = JSON.parse(candidates[i]) as Partial<RouteDecision>;
+      break;
+    } catch {
+      // Try the previous JSON-looking block.
+    }
+  }
+
+  if (!parsed) {
+    throw new Error("Router response contains JSON-like blocks but none are valid JSON");
+  }
+
   const validIntents: RouteIntent[] = [
     "direct_chat",
     "rag_search",
@@ -313,6 +364,50 @@ function parseRouteDecision(raw: string): RouteDecision {
   };
 }
 
+function fallbackRouteFromMessage(userMessage: string, reason: string): RouteDecision {
+  const text = userMessage.toLowerCase();
+
+  if (
+    text.includes("zilcode") ||
+    text.includes("z-admin") ||
+    text.includes("z-flow") ||
+    text.includes("z-data") ||
+    text.includes("z-report") ||
+    text.includes("sql cloud") ||
+    text.includes("app builder")
+  ) {
+    return {
+      intent: "rag_search",
+      needs_tools: true,
+      tools: ["rag_search"],
+      search_query: userMessage,
+      reason: `${reason}; fallback semantic: câu hỏi nhắc đến Zilcode/tài liệu`
+    };
+  }
+
+  if (text.includes("workflow") && (text.includes("này") || text.includes("hiện tại"))) {
+    return {
+      intent: "screen_context",
+      needs_tools: true,
+      tools: ["get_screen_context", "get_workflow"],
+      search_query: null,
+      reason: `${reason}; fallback semantic: câu hỏi nhắc đến workflow hiện tại`
+    };
+  }
+
+  if (text.includes("workflow")) {
+    return {
+      intent: "workflow",
+      needs_tools: true,
+      tools: ["get_workflow"],
+      search_query: null,
+      reason: `${reason}; fallback semantic: câu hỏi nhắc đến workflow`
+    };
+  }
+
+  return defaultRouteDecision(reason);
+}
+
 async function routeMessage(userMessage: string, env: Env): Promise<RouteDecision> {
   try {
     const response = await env.AI.run(ROUTER_MODEL, {
@@ -326,10 +421,13 @@ async function routeMessage(userMessage: string, env: Env): Promise<RouteDecisio
     console.log(`[ROUTER] intent=${route.intent}; tools=${route.tools.join(",") || "none"}; reason=${route.reason}`);
     return route;
   } catch (error) {
+    const reason = `Router lỗi hoặc trả JSON không hợp lệ: ${
+      error instanceof Error ? error.message : "unknown error"
+    }`;
     console.log(
-      `[ROUTER] Fallback direct_chat: ${error instanceof Error ? error.message : "unknown error"}`
+      `[ROUTER] Fallback: ${reason}`
     );
-    return defaultRouteDecision("Router lỗi hoặc trả JSON không hợp lệ");
+    return fallbackRouteFromMessage(userMessage, reason);
   }
 }
 
