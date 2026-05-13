@@ -128,6 +128,7 @@
 
   .tool-badge.rag_search .icon { background: #dbeafe; color: #1d4ed8; }
   .tool-badge.general_chat .icon { background: #e5e7eb; color: #374151; }
+  .tool-badge.draw_chart .icon { background: #fae8ff; color: #86198f; }
   .tool-badge.get_workflow .icon { background: #dcfce7; color: #166534; }
   .tool-badge.get_screen_context .icon { background: #fef9c3; color: #854d0e; }
 
@@ -263,6 +264,16 @@
     font-size: 13px;
   }
 
+  .generated-image {
+    display: block;
+    max-width: 100%;
+    width: min(100%, 640px);
+    border: 0.5px solid #e0e0dc;
+    border-radius: 8px;
+    background: #fff;
+    margin-top: 8px;
+  }
+
   .timestamp {
     font-size: 11px;
     color: #bbb;
@@ -310,6 +321,7 @@
   const TOOL_META = {
     general_chat: { label: 'general_chat', icon: '💬', cls: 'general_chat' },
     rag_search: { label: 'rag_search', icon: '🔍', cls: 'rag_search' },
+    draw_chart: { label: 'draw_chart', icon: '📊', cls: 'draw_chart' },
     get_workflow: { label: 'get_workflow', icon: '⚙', cls: 'get_workflow' },
     get_screen_context: { label: 'get_screen_context', icon: '🖥', cls: 'get_screen_context' },
   };
@@ -351,7 +363,7 @@
     return new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' });
   }
 
-  function appendMessage(role, content, tools = []) {
+  function appendMessage(role, content, tools = [], images = []) {
     const empty = document.getElementById('emptyState');
     if (empty) empty.remove();
 
@@ -369,10 +381,23 @@
       });
     }
 
-    const bubble = document.createElement('div');
-    bubble.className = 'bubble';
-    bubble.textContent = content;
-    msg.appendChild(bubble);
+    if (content) {
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble';
+      bubble.textContent = content;
+      msg.appendChild(bubble);
+    }
+
+    if (role === 'assistant' && Array.isArray(images)) {
+      images.forEach(image => {
+        if (!image || !image.data_url) return;
+        const img = document.createElement('img');
+        img.className = 'generated-image';
+        img.src = image.data_url;
+        img.alt = image.prompt || 'Generated chart';
+        msg.appendChild(img);
+      });
+    }
 
     const ts = document.createElement('div');
     ts.className = 'timestamp';
@@ -451,7 +476,7 @@
       const data = await res.json();
 
       if (data.success) {
-        appendMessage('assistant', data.response, data.tools_called || []);
+        appendMessage('assistant', data.response, data.tools_called || [], data.images || []);
       } else {
         const msg = document.createElement('div');
         msg.className = 'msg assistant';

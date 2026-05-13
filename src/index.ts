@@ -12,10 +12,13 @@ export interface Env {
 const CHAT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 const GENERAL_CHAT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 const EMBEDDING_MODEL = "@cf/baai/bge-m3";
+const CHART_IMAGE_MODEL = "@cf/black-forest-labs/flux-2-klein-4b";
 
 const TOOL_SELECTION_MAX_TOKENS = 512;
 const GENERAL_CHAT_MAX_TOKENS = 1024;
 const RAG_FINAL_MAX_TOKENS = 2048;
+const DEFAULT_CHART_WIDTH = 1024;
+const DEFAULT_CHART_HEIGHT = 768;
 
 // ─── CORS ─────────────────────────────────────────────────────────────────────
 
@@ -59,6 +62,29 @@ const TOOLS = [
     }
   },
   {
+    name: "draw_chart",
+    description:
+      "Tạo ảnh biểu đồ, sơ đồ hoặc infographic trực quan bằng mô hình ảnh Flux. Dùng khi người dùng yêu cầu vẽ/tạo/minh họa biểu đồ, sơ đồ quy trình, sơ đồ khối, flowchart, mindmap, timeline, dashboard mockup, hoặc infographic. Phù hợp cho hình minh họa trực quan; không đảm bảo chữ nhỏ, số liệu hoặc nhãn trong ảnh chính xác tuyệt đối như biểu đồ dữ liệu được render bằng code. Nếu người dùng cung cấp số liệu, hãy đưa số liệu chính vào prompt thật rõ. Không dùng cho chào hỏi, chat thường, câu hỏi cần trả lời bằng văn bản, hoặc tra cứu tài liệu Zilcode.",
+    parameters: {
+      type: "object",
+      properties: {
+        prompt: {
+          type: "string",
+          description: "Mô tả ảnh biểu đồ/sơ đồ cần tạo. Nên nêu loại biểu đồ, dữ liệu chính, bố cục, phong cách, màu sắc và ngôn ngữ nhãn nếu có."
+        },
+        width: {
+          type: "string",
+          description: "Chiều rộng ảnh, mặc định 1024. Giá trị hợp lệ từ 256 đến 1920."
+        },
+        height: {
+          type: "string",
+          description: "Chiều cao ảnh, mặc định 768. Giá trị hợp lệ từ 256 đến 1920."
+        }
+      },
+      required: ["prompt"]
+    }
+  },
+  {
     name: "get_workflow",
     description:
       "Nguồn bổ sung để lấy thông tin một workflow Zilcode theo ID. Dùng khi người dùng nêu rõ workflow ID, hoặc khi đã có ngữ cảnh màn hình cho thấy tài nguyên hiện tại là workflow và người dùng đang hỏi về cấu trúc/debug workflow đó. Không dùng cho chào hỏi, câu hỏi tài liệu chung, hoặc câu hỏi không liên quan đến một workflow cụ thể.",
@@ -88,7 +114,81 @@ const TOOLS = [
 
 interface ToolCall {
   name: string;
-  arguments: Record<string, string>;
+  arguments: Record<string, unknown>;
+}
+
+function getStringArg(args: Record<string, unknown>, name: string): string {
+  const value = args[name];
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function getNumberArg(
+  args: Record<string, unknown>,
+  name: string,
+  fallback: number
+): number {
+  const value = args[name];
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(1920, Math.max(256, Math.round(parsed)));
+}
+
+function buildChartPrompt(prompt: string): string {
+  return [
+    prompt,
+    "Tạo ảnh dạng biểu đồ/sơ đồ sạch, dễ đọc, bố cục rõ ràng.",
+    "Phong cách: hiện đại, chuyên nghiệp, nền sáng, màu sắc cân bằng.",
+    "Nếu có chữ trong ảnh, dùng tiếng Việt tự nhiên và giữ nhãn ngắn gọn."
+  ].join("\n");
+}
+
+async function generateChartImage(
+  args: Record<string, unknown>,
+  env: Env
+): Promise<GeneratedImage> {
+  const prompt = getStringArg(args, "prompt");
+  if (!prompt) {
+    throw new Error("Bắt buộc phải có prompt để tạo biểu đồ.");
+  }
+
+  const width = getNumberArg(args, "width", DEFAULT_CHART_WIDTH);
+  const height = getNumberArg(args, "height", DEFAULT_CHART_HEIGHT);
+
+  const form = new FormData();
+  form.append("prompt", buildChartPrompt(prompt));
+  form.append("width", String(width));
+  form.append("height", String(height));
+
+  const formResponse = new Response(form);
+  const body = formResponse.body;
+  const contentType = formResponse.headers.get("content-type");
+
+  if (!body || !contentType) {
+    throw new Error("Không tạo được multipart body cho yêu cầu tạo ảnh.");
+  }
+
+  const response = await env.AI.run(CHART_IMAGE_MODEL, {
+    multipart: {
+      body,
+      contentType
+    }
+  }) as { image?: string };
+
+  if (!response.image) {
+    throw new Error("Mô hình ảnh không trả về dữ liệu image.");
+  }
+
+  const dataUrl = response.image.startsWith("data:")
+    ? response.image
+    : `data:image/png;base64,${response.image}`;
+
+  return {
+    mime_type: "image/png",
+    data_url: dataUrl,
+    prompt,
+    width,
+    height
+  };
 }
 
 async function executeTool(
@@ -100,7 +200,7 @@ async function executeTool(
   switch (tool.name) {
 
     case "general_chat": {
-      const message = tool.arguments.message;
+      const message = getStringArg(tool.arguments, "message");
       if (!message) return "Lỗi: bắt buộc phải có tin nhắn để trả lời.";
 
       const response = await env.AI.run(GENERAL_CHAT_MODEL, {
@@ -122,7 +222,7 @@ Trả lời ngắn gọn, tự nhiên, không nhắc đến function/tool nội 
     }
 
     case "rag_search": {
-      const query = tool.arguments.query;
+      const query = getStringArg(tool.arguments, "query");
       if (!query) return "Lỗi: bắt buộc phải có câu truy vấn.";
 
       const embeddingResult = await env.AI.run(
@@ -169,7 +269,7 @@ Trả lời ngắn gọn, tự nhiên, không nhắc đến function/tool nội 
     }
 
     case "get_workflow": {
-      const id = tool.arguments.id;
+      const id = getStringArg(tool.arguments, "id");
       if (!id) return "Lỗi: bắt buộc phải có ID workflow.";
 
       // TODO: thay mock bằng API Zilcode thật khi đã có token
@@ -230,6 +330,20 @@ interface ScreenContext {
 interface ChatRequest {
   message: string;
   context?: ScreenContext;
+}
+
+interface GeneratedImage {
+  mime_type: "image/png";
+  data_url: string;
+  prompt: string;
+  width: number;
+  height: number;
+}
+
+interface AgenticLoopResult {
+  answer: string;
+  toolsCalled: string[];
+  images?: GeneratedImage[];
 }
 
 interface AIMessage {
@@ -301,7 +415,7 @@ async function runAgenticLoop(
   userMessage: string,
   env: Env,
   screenContext?: ScreenContext
-): Promise<{ answer: string; toolsCalled: string[] }> {
+): Promise<AgenticLoopResult> {
 
   const messages: AIMessage[] = [
     {
@@ -312,6 +426,7 @@ Bạn có các công cụ để xử lý từng loại yêu cầu. Hãy chọn c
 Dùng general_chat cho chào hỏi, cảm ơn, trò chuyện thông thường, hỏi bạn là ai/có thể làm gì, hỏi bạn có trả lời ngoài Zilcode không, câu hỏi kiến thức chung, hoặc câu hỏi không liên quan đến Zilcode.
 Chỉ dùng rag_search khi câu hỏi cần thông tin cụ thể từ tài liệu Zilcode, ví dụ tính năng, khái niệm, hướng dẫn thao tác, hoặc cách sử dụng Zilcode.
 Nếu Zilcode là chủ đề chính cần giải thích, hoặc người dùng hỏi Zilcode là gì, tính năng/cách dùng/hướng dẫn thao tác trong Zilcode, hãy ưu tiên rag_search thay vì general_chat.
+Dùng draw_chart khi người dùng yêu cầu vẽ/tạo ảnh biểu đồ, sơ đồ, flowchart, timeline, mindmap, dashboard mockup hoặc infographic. Với biểu đồ cần số liệu chính xác tuyệt đối, hãy nói ngắn gọn rằng ảnh AI chỉ mang tính minh họa và vẫn có thể tạo ảnh nếu người dùng muốn.
 Khi dùng rag_search, thường chỉ gọi một lần với query tổng hợp tốt. Chỉ gọi lại nếu kết quả chưa đủ và query mới khác rõ ràng về ý định hoặc phạm vi; không gọi lại cùng query hoặc query tương đương.
 Chỉ dùng get_screen_context khi người dùng hỏi về đối tượng đang hiển thị/được chọn trong UI và câu trả lời phụ thuộc vào màn hình/node/tài nguyên hiện tại. Không dùng get_screen_context chỉ vì người dùng đang chat.
 Chỉ dùng get_workflow khi có workflow ID rõ ràng hoặc sau khi có screen context cho thấy tài nguyên hiện tại là workflow cần phân tích.
@@ -342,7 +457,7 @@ Trả lời đúng mức chi tiết theo yêu cầu của người dùng, cụ t
       response?: string;
       tool_calls?: Array<{
         name: string;
-        arguments: Record<string, string>;
+        arguments: Record<string, unknown>;
         id?: string;
       }>;
     };
@@ -365,6 +480,15 @@ Trả lời đúng mức chi tiết theo yêu cầu của người dùng, cụ t
     for (const toolCall of toolCallsToExecute) {
       console.log(`[CÔNG CỤ] Gọi: ${toolCall.name}`, toolCall.arguments);
       toolsCalled.push(toolCall.name);
+
+      if (toolCall.name === "draw_chart") {
+        const image = await generateChartImage(toolCall.arguments, env);
+        return {
+          answer: "Mình đã tạo biểu đồ theo yêu cầu. Lưu ý: ảnh do mô hình tạo sinh phù hợp để minh họa, không nên dùng làm biểu đồ số liệu cần độ chính xác tuyệt đối.",
+          toolsCalled,
+          images: [image]
+        };
+      }
 
       const toolResult = await executeTool(
         { name: toolCall.name, arguments: toolCall.arguments },
@@ -475,7 +599,7 @@ export default {
           );
         }
 
-        const { answer, toolsCalled } = await runAgenticLoop(
+        const { answer, toolsCalled, images } = await runAgenticLoop(
           body.message,
           env,
           body.context
@@ -484,7 +608,8 @@ export default {
         return Response.json({
           success: true,
           response: answer,
-          tools_called: toolsCalled
+          tools_called: toolsCalled,
+          images
         }, { headers: CORS });
 
       } catch (error) {
