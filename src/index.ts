@@ -26,13 +26,13 @@ const TOOLS = [
   {
     name: "rag_search",
     description:
-      "Tra cứu kho tài liệu Zilcode đã ingest, gồm Hướng dẫn người dùng và Hướng dẫn quản trị. Nên dùng khi câu hỏi cần thông tin cụ thể về thao tác hoặc khái niệm trong Zilcode: đăng nhập, vai trò, Desktop, Header, Window, toolbar, tìm kiếm/thêm/sửa/xóa/import/export dữ liệu, SQL Cloud, App Builder, Site, Service, User, Role, Organization, Application, Window/Tab/Field/MenuTool, Application Wizard. Khi tạo query, giữ lại thuật ngữ Zilcode gốc và thêm ngữ cảnh 'người dùng' hoặc 'quản trị' nếu câu hỏi thể hiện rõ đối tượng.",
+      "Tra cứu kho tài liệu Zilcode đã ingest, gồm Hướng dẫn người dùng và Hướng dẫn quản trị. Chỉ nên dùng khi câu hỏi cần kiểm tra thông tin cụ thể trong tài liệu Zilcode, ví dụ: đăng nhập, vai trò, Desktop, Header, Window, toolbar, tìm kiếm/thêm/sửa/xóa/import/export dữ liệu, SQL Cloud, App Builder, Site, Service, User, Role, Organization, Application, Window/Tab/Field/MenuTool, Application Wizard. Không dùng cho chào hỏi, cảm ơn, trò chuyện thông thường, hoặc câu hỏi kiến thức chung ngoài Zilcode. Thường chỉ cần gọi một lần với query tốt; chỉ gọi lại nếu kết quả chưa đủ và query mới thật sự bổ sung khía cạnh khác.",
     parameters: {
       type: "object",
       properties: {
         query: {
           type: "string",
-          description: "Câu truy vấn tìm kiếm tài liệu, nên gồm thuật ngữ Zilcode gốc và ngữ cảnh người dùng/quản trị nếu có"
+          description: "Câu truy vấn tìm kiếm tài liệu. Giữ thuật ngữ Zilcode gốc, thêm ngữ cảnh người dùng/quản trị nếu có, và tránh lặp lại query tương đương đã dùng trong cùng lượt trả lời."
         }
       },
       required: ["query"]
@@ -41,7 +41,7 @@ const TOOLS = [
   {
     name: "get_workflow",
     description:
-      "Lấy thông tin một workflow Zilcode theo ID. Dùng khi người dùng nhắc đến một workflow cụ thể, muốn debug workflow, hoặc muốn hiểu cấu trúc workflow.",
+      "Lấy thông tin một workflow Zilcode theo ID. Chỉ dùng khi người dùng nêu rõ workflow ID, hoặc khi đã có ngữ cảnh màn hình cho thấy tài nguyên hiện tại là workflow và người dùng đang hỏi về cấu trúc/debug workflow đó. Không dùng cho chào hỏi, câu hỏi tài liệu chung, hoặc câu hỏi không liên quan đến một workflow cụ thể.",
     parameters: {
       type: "object",
       properties: {
@@ -56,7 +56,7 @@ const TOOLS = [
   {
     name: "get_screen_context",
     description:
-      "Lấy ngữ cảnh màn hình hiện tại của giao diện: người dùng đang ở màn hình nào, node nào đang được chọn, và tài nguyên nào đang hoạt động. Dùng khi người dùng nói 'cái này', 'ở đây', 'hiện tại' mà không nêu ID cụ thể.",
+      "Lấy ngữ cảnh màn hình hiện tại của giao diện: người dùng đang ở màn hình nào, node nào đang được chọn, và tài nguyên nào đang hoạt động. Chỉ dùng khi đồng thời đúng cả hai điều kiện: người dùng đang hỏi về đối tượng đang hiển thị/được chọn trong UI, và câu trả lời phụ thuộc vào việc biết màn hình/node/tài nguyên hiện tại. Ví dụ nên dùng: 'workflow này lỗi ở đâu?', 'node này dùng để làm gì?', 'ở màn hình hiện tại tôi nên bấm gì?'. Không dùng cho 'xin chào', cảm ơn, trò chuyện thông thường, câu hỏi tài liệu chung, hoặc khi người dùng đã nêu rõ ID/tên đối tượng.",
     parameters: {
       type: "object",
       properties: {}
@@ -210,13 +210,16 @@ async function runAgenticLoop(
     {
       role: "system",
       content: `Bạn là trợ lý AI hỗ trợ người dùng nền tảng Zilcode.
-Bạn có quyền dùng công cụ để tìm kiếm tài liệu và đọc dữ liệu workflow.
+Bạn có quyền dùng công cụ để tìm kiếm tài liệu và đọc dữ liệu workflow, nhưng công cụ là tùy chọn.
 Luôn trả lời bằng tiếng Việt, trừ khi người dùng yêu cầu ngôn ngữ khác.
-Bạn được tự quyết định có cần dùng công cụ hay không.
+Trước khi gọi công cụ, hãy tự hỏi: kết quả công cụ có thật sự cần để trả lời đúng câu hỏi này không? Nếu không, hãy trả lời trực tiếp.
+Không gọi bất kỳ công cụ nào cho chào hỏi, cảm ơn, trò chuyện thông thường, hoặc câu hỏi kiến thức chung không cần dữ liệu Zilcode.
 Chỉ dùng rag_search khi câu hỏi cần thông tin cụ thể từ tài liệu Zilcode, ví dụ tính năng, khái niệm, hướng dẫn thao tác, hoặc cách sử dụng Zilcode.
-Không dùng rag_search cho chào hỏi, trò chuyện thông thường, câu hỏi kiến thức chung, hoặc câu hỏi không liên quan đến Zilcode.
-Khi người dùng nhắc đến "workflow này", "màn hình hiện tại", "cái này", hoặc "ở đây" mà không nêu ID cụ thể, hãy dùng get_screen_context trước.
+Khi dùng rag_search, thường chỉ gọi một lần với query tổng hợp tốt. Chỉ gọi lại nếu kết quả chưa đủ và query mới khác rõ ràng về ý định hoặc phạm vi; không gọi lại cùng query hoặc query tương đương.
+Chỉ dùng get_screen_context khi người dùng hỏi về đối tượng đang hiển thị/được chọn trong UI và câu trả lời phụ thuộc vào màn hình/node/tài nguyên hiện tại. Không dùng get_screen_context chỉ vì người dùng đang chat.
+Chỉ dùng get_workflow khi có workflow ID rõ ràng hoặc sau khi có screen context cho thấy tài nguyên hiện tại là workflow cần phân tích.
 Với câu hỏi ngoài phạm vi Zilcode, hãy trả lời như một trợ lý thông thường và không cần viện dẫn tài liệu Zilcode.
+Sau khi đã có đủ thông tin từ công cụ, hãy trả lời ngay thay vì tiếp tục gọi thêm công cụ.
 Khi đã dùng rag_search nhưng không tìm thấy thông tin phù hợp, hãy nói rõ là chưa tìm thấy trong tài liệu hiện có thay vì bịa nội dung.
 Trả lời ngắn gọn, cụ thể, ưu tiên các bước thao tác rõ ràng.`
     },
