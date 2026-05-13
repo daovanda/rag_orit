@@ -26,13 +26,13 @@ const TOOLS = [
   {
     name: "rag_search",
     description:
-      "Search the Zilcode documentation. Use this when the user asks about features, concepts, how-to guides, or anything that requires knowledge of the Zilcode platform (z-Win, z-Flow, z-Data, z-Report, z-Admin).",
+      "Tra cứu kho tài liệu Zilcode đã ingest, gồm Hướng dẫn người dùng và Hướng dẫn quản trị. Nên dùng khi câu hỏi cần thông tin cụ thể về thao tác hoặc khái niệm trong Zilcode: đăng nhập, vai trò, Desktop, Header, Window, toolbar, tìm kiếm/thêm/sửa/xóa/import/export dữ liệu, SQL Cloud, App Builder, Site, Service, User, Role, Organization, Application, Window/Tab/Field/MenuTool, Application Wizard. Khi tạo query, giữ lại thuật ngữ Zilcode gốc và thêm ngữ cảnh 'người dùng' hoặc 'quản trị' nếu câu hỏi thể hiện rõ đối tượng.",
     parameters: {
       type: "object",
       properties: {
         query: {
           type: "string",
-          description: "The search query, rephrased as a documentation search"
+          description: "Câu truy vấn tìm kiếm tài liệu, nên gồm thuật ngữ Zilcode gốc và ngữ cảnh người dùng/quản trị nếu có"
         }
       },
       required: ["query"]
@@ -41,13 +41,13 @@ const TOOLS = [
   {
     name: "get_workflow",
     description:
-      "Retrieve a Zilcode workflow by its ID. Use when the user refers to a specific workflow, asks to debug it, or wants to understand its structure.",
+      "Lấy thông tin một workflow Zilcode theo ID. Dùng khi người dùng nhắc đến một workflow cụ thể, muốn debug workflow, hoặc muốn hiểu cấu trúc workflow.",
     parameters: {
       type: "object",
       properties: {
         id: {
           type: "string",
-          description: "The workflow ID"
+          description: "ID của workflow"
         }
       },
       required: ["id"]
@@ -56,7 +56,7 @@ const TOOLS = [
   {
     name: "get_screen_context",
     description:
-      "Get the current UI screen context: which screen the user is on, what node is selected, and what resource is active. Use when the user says 'this', 'here', 'current' without specifying an ID.",
+      "Lấy ngữ cảnh màn hình hiện tại của giao diện: người dùng đang ở màn hình nào, node nào đang được chọn, và tài nguyên nào đang hoạt động. Dùng khi người dùng nói 'cái này', 'ở đây', 'hiện tại' mà không nêu ID cụ thể.",
     parameters: {
       type: "object",
       properties: {}
@@ -81,7 +81,7 @@ async function executeTool(
 
     case "rag_search": {
       const query = tool.arguments.query;
-      if (!query) return "Error: query is required";
+      if (!query) return "Lỗi: bắt buộc phải có câu truy vấn.";
 
       const embeddingResult = await env.AI.run(
         EMBEDDING_MODEL,
@@ -91,12 +91,12 @@ async function executeTool(
       const queryVector = embeddingResult.data[0];
 
       const matches = await env.VECTORIZE.query(queryVector, {
-        topK: 5,
+        topK: 6,
         returnMetadata: "all"
       });
 
       if (!matches.matches.length) {
-        return "No relevant documentation found.";
+        return "Không tìm thấy tài liệu liên quan.";
       }
 
       const results: string[] = [];
@@ -106,22 +106,31 @@ async function executeTool(
           const chunk = JSON.parse(raw) as {
             text: string;
             module: string;
+            title?: string;
+            doc_type?: string;
+            audience?: string;
             heading: string;
+            section_path?: string;
           };
-          results.push(`[${chunk.module} — ${chunk.heading}]\n${chunk.text}`);
+          const source = [
+            chunk.title ?? chunk.module,
+            chunk.audience,
+            chunk.section_path ?? chunk.heading
+          ].filter(Boolean).join(" | ");
+          results.push(`[Nguồn: ${source}]\n${chunk.text}`);
         }
       }
 
       return results.length
         ? results.join("\n\n---\n\n")
-        : "No chunk text found.";
+        : "Không tìm thấy nội dung chunk tương ứng.";
     }
 
     case "get_workflow": {
       const id = tool.arguments.id;
-      if (!id) return "Error: id is required";
+      if (!id) return "Lỗi: bắt buộc phải có ID workflow.";
 
-      // TODO: replace mock with real Zilcode API call when token is available
+      // TODO: thay mock bằng API Zilcode thật khi đã có token
       // const res = await fetch(`https://api.zilcode.io/workflows/${id}`, {
       //   headers: { Authorization: `Bearer ${env.ZILCODE_API_TOKEN}` }
       // });
@@ -131,17 +140,17 @@ async function executeTool(
         _mock: true,
         id,
         name: `Workflow ${id}`,
-        status: "active",
+        status: "đang hoạt động",
         nodes: [
-          { id: "start", type: "trigger", label: "Start" },
+          { id: "start", type: "trigger", label: "Bắt đầu" },
           {
             id: "condition-1",
             type: "condition",
-            label: "Check amount",
+            label: "Kiểm tra số tiền",
             config: { field: "amount", operator: ">", value: 1000 }
           },
-          { id: "send-mail", type: "action", label: "Send email" },
-          { id: "end", type: "end", label: "End" }
+          { id: "send-mail", type: "action", label: "Gửi email" },
+          { id: "end", type: "end", label: "Kết thúc" }
         ],
         edges: [
           { from: "start", to: "condition-1" },
@@ -164,7 +173,7 @@ async function executeTool(
     }
 
     default:
-      return `Unknown tool: ${tool.name}`;
+      return `Không nhận diện được công cụ: ${tool.name}`;
   }
 }
 
@@ -200,11 +209,16 @@ async function runAgenticLoop(
   const messages: AIMessage[] = [
     {
       role: "system",
-      content: `You are a helpful AI assistant for the Zilcode platform.
-You have access to tools to search documentation and read workflow data.
-Always use rag_search before answering questions about Zilcode features.
-When the user mentions "this workflow" or "current screen", use get_screen_context first.
-Be concise and specific.`
+      content: `Bạn là trợ lý AI hỗ trợ người dùng nền tảng Zilcode.
+Bạn có quyền dùng công cụ để tìm kiếm tài liệu và đọc dữ liệu workflow.
+Luôn trả lời bằng tiếng Việt, trừ khi người dùng yêu cầu ngôn ngữ khác.
+Bạn được tự quyết định có cần dùng công cụ hay không.
+Chỉ dùng rag_search khi câu hỏi cần thông tin cụ thể từ tài liệu Zilcode, ví dụ tính năng, khái niệm, hướng dẫn thao tác, hoặc cách sử dụng Zilcode.
+Không dùng rag_search cho chào hỏi, trò chuyện thông thường, câu hỏi kiến thức chung, hoặc câu hỏi không liên quan đến Zilcode.
+Khi người dùng nhắc đến "workflow này", "màn hình hiện tại", "cái này", hoặc "ở đây" mà không nêu ID cụ thể, hãy dùng get_screen_context trước.
+Với câu hỏi ngoài phạm vi Zilcode, hãy trả lời như một trợ lý thông thường và không cần viện dẫn tài liệu Zilcode.
+Khi đã dùng rag_search nhưng không tìm thấy thông tin phù hợp, hãy nói rõ là chưa tìm thấy trong tài liệu hiện có thay vì bịa nội dung.
+Trả lời ngắn gọn, cụ thể, ưu tiên các bước thao tác rõ ràng.`
     },
     {
       role: "user",
@@ -215,7 +229,7 @@ Be concise and specific.`
   const toolsCalled: string[] = [];
 
   for (let i = 0; i < MAX_ITERATIONS; i++) {
-    console.log(`[LOOP] Iteration ${i + 1}`);
+    console.log(`[VÒNG LẶP] Lần ${i + 1}`);
 
     const response = await env.AI.run(CHAT_MODEL, {
       messages,
@@ -230,15 +244,15 @@ Be concise and specific.`
     };
 
     if (!response.tool_calls || response.tool_calls.length === 0) {
-      console.log(`[LOOP] No tool calls → returning final answer`);
+      console.log(`[VÒNG LẶP] Không có tool call, trả về câu trả lời cuối cùng`);
       return {
-        answer: response.response ?? "No response generated.",
+        answer: response.response ?? "Không tạo được câu trả lời.",
         toolsCalled
       };
     }
 
     for (const toolCall of response.tool_calls) {
-      console.log(`[TOOL] Calling: ${toolCall.name}`, toolCall.arguments);
+      console.log(`[CÔNG CỤ] Gọi: ${toolCall.name}`, toolCall.arguments);
       toolsCalled.push(toolCall.name);
 
       const toolResult = await executeTool(
@@ -247,7 +261,7 @@ Be concise and specific.`
         screenContext
       );
 
-      console.log(`[TOOL] Result length: ${toolResult.length} chars`);
+      console.log(`[CÔNG CỤ] Độ dài kết quả: ${toolResult.length} ký tự`);
 
       messages.push({
         role: "assistant",
@@ -266,7 +280,7 @@ Be concise and specific.`
   }
 
   return {
-    answer: "Reached maximum tool call iterations without a final answer.",
+    answer: "Đã đạt số vòng gọi công cụ tối đa nhưng chưa tạo được câu trả lời cuối cùng.",
     toolsCalled
   };
 }
@@ -287,7 +301,7 @@ export default {
     if (url.pathname === "/") {
       return Response.json({
         success: true,
-        message: "Workers AI running",
+        message: "Workers AI đang chạy",
         tools: TOOLS.map(t => t.name)
       }, { headers: CORS });
     }
@@ -299,7 +313,7 @@ export default {
 
         if (!body.message) {
           return Response.json(
-            { success: false, error: "message is required" },
+            { success: false, error: "Bắt buộc phải có trường message." },
             { status: 400, headers: CORS }
           );
         }
@@ -320,7 +334,7 @@ export default {
         return Response.json(
           {
             success: false,
-            error: error instanceof Error ? error.message : "Unknown error"
+            error: error instanceof Error ? error.message : "Lỗi không xác định"
           },
           { status: 500, headers: CORS }
         );
@@ -334,7 +348,7 @@ export default {
 
         if (!body.text) {
           return Response.json(
-            { success: false, error: "text is required" },
+            { success: false, error: "Bắt buộc phải có trường text." },
             { status: 400, headers: CORS }
           );
         }
@@ -346,13 +360,13 @@ export default {
         return Response.json(
           {
             success: false,
-            error: error instanceof Error ? error.message : "Unknown error"
+            error: error instanceof Error ? error.message : "Lỗi không xác định"
           },
           { status: 500, headers: CORS }
         );
       }
     }
 
-    return new Response("Not Found", { status: 404, headers: CORS });
+    return new Response("Không tìm thấy", { status: 404, headers: CORS });
   }
 };
