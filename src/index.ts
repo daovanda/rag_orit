@@ -10,6 +10,7 @@ export interface Env {
 // ─── Models ───────────────────────────────────────────────────────────────────
 
 const CHAT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+const ROUTER_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 const EMBEDDING_MODEL = "@cf/baai/bge-m3";
 
 // ─── CORS ─────────────────────────────────────────────────────────────────────
@@ -63,6 +64,12 @@ const TOOLS = [
     }
   }
 ];
+
+type ToolDefinition = typeof TOOLS[number];
+type ToolName = "rag_search" | "get_workflow" | "get_screen_context";
+type RouteIntent = "direct_chat" | "rag_search" | "screen_context" | "workflow" | "mixed";
+
+const VALID_TOOL_NAMES: ToolName[] = ["rag_search", "get_workflow", "get_screen_context"];
 
 // ─── Tool executor ────────────────────────────────────────────────────────────
 
@@ -196,15 +203,162 @@ interface AIMessage {
   tool_call_id?: string;
 }
 
+interface RouteDecision {
+  intent: RouteIntent;
+  needs_tools: boolean;
+  tools: ToolName[];
+  search_query: string | null;
+  reason: string;
+}
+
 // ─── Agentic loop ─────────────────────────────────────────────────────────────
 
 const MAX_ITERATIONS = 6;
+
+const ROUTER_PROMPT = `Bạn là router intent cho chatbot Zilcode.
+Nhiệm vụ của bạn chỉ là phân loại tin nhắn người dùng để backend biết có cần bật công cụ hay không.
+Không trả lời người dùng. Không gọi công cụ. Chỉ trả về JSON hợp lệ, không markdown, không giải thích ngoài JSON.
+
+Intent:
+- "direct_chat": chào hỏi, cảm ơn, trò chuyện thông thường, câu hỏi về khả năng của trợ lý, câu hỏi kiến thức chung, hoặc câu hỏi không cần dữ liệu Zilcode.
+- "rag_search": cần tra cứu tài liệu Zilcode như hướng dẫn sử dụng, tính năng, thao tác, quản trị, SQL Cloud, App Builder, import/export, thêm/sửa/xóa dữ liệu.
+- "screen_context": hỏi về đối tượng/màn hình/node hiện tại như "cái này", "ở đây", "màn hình hiện tại", "node này", "workflow này" mà không có ID rõ ràng.
+- "workflow": hỏi về workflow có ID rõ ràng.
+- "mixed": cần nhiều hơn một loại dữ liệu.
+
+Tool mapping:
+- direct_chat -> []
+- rag_search -> ["rag_search"]
+- screen_context -> ["get_screen_context", "get_workflow"] nếu có thể cần đọc workflow sau khi biết ngữ cảnh; nếu không thì ["get_screen_context"]
+- workflow -> ["get_workflow"]
+- mixed -> danh sách các tool thật sự cần
+
+Trả về đúng schema:
+{
+  "intent": "direct_chat" | "rag_search" | "screen_context" | "workflow" | "mixed",
+  "needs_tools": boolean,
+  "tools": string[],
+  "search_query": string | null,
+  "reason": string
+}
+
+Ví dụ:
+User: "hello" -> {"intent":"direct_chat","needs_tools":false,"tools":[],"search_query":null,"reason":"Chào hỏi thông thường"}
+User: "xin chào, bạn là gì" -> {"intent":"direct_chat","needs_tools":false,"tools":[],"search_query":null,"reason":"Hỏi về trợ lý, không cần tài liệu"}
+User: "cách import dữ liệu trong Zilcode" -> {"intent":"rag_search","needs_tools":true,"tools":["rag_search"],"search_query":"import dữ liệu trong Zilcode hướng dẫn người dùng","reason":"Cần tra cứu tài liệu Zilcode"}
+User: "workflow này lỗi ở đâu" -> {"intent":"screen_context","needs_tools":true,"tools":["get_screen_context","get_workflow"],"search_query":null,"reason":"Cần biết workflow hiện tại trước khi phân tích"}
+User: "workflow wf-001 có những node gì" -> {"intent":"workflow","needs_tools":true,"tools":["get_workflow"],"search_query":null,"reason":"Có workflow ID rõ ràng"}`;
+
+function defaultRouteDecision(reason: string): RouteDecision {
+  return {
+    intent: "direct_chat",
+    needs_tools: false,
+    tools: [],
+    search_query: null,
+    reason
+  };
+}
+
+function extractJsonObject(raw: string): string {
+  const cleaned = raw
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/```$/i, "")
+    .trim();
+
+  const start = cleaned.indexOf("{");
+  const end = cleaned.lastIndexOf("}");
+
+  if (start === -1 || end === -1 || end <= start) {
+    throw new Error("Router response does not contain a JSON object");
+  }
+
+  return cleaned.slice(start, end + 1);
+}
+
+function parseRouteDecision(raw: string): RouteDecision {
+  const parsed = JSON.parse(extractJsonObject(raw)) as Partial<RouteDecision>;
+  const validIntents: RouteIntent[] = [
+    "direct_chat",
+    "rag_search",
+    "screen_context",
+    "workflow",
+    "mixed"
+  ];
+
+  const intent = validIntents.includes(parsed.intent as RouteIntent)
+    ? parsed.intent as RouteIntent
+    : "direct_chat";
+
+  const tools = Array.isArray(parsed.tools)
+    ? parsed.tools.filter((tool): tool is ToolName =>
+        VALID_TOOL_NAMES.includes(tool as ToolName)
+      )
+    : [];
+
+  if (intent === "direct_chat") {
+    return defaultRouteDecision(parsed.reason || "Router chọn trả lời trực tiếp");
+  }
+
+  return {
+    intent,
+    needs_tools: Boolean(parsed.needs_tools) && tools.length > 0,
+    tools,
+    search_query: typeof parsed.search_query === "string" && parsed.search_query.trim()
+      ? parsed.search_query.trim()
+      : null,
+    reason: parsed.reason || "Router không nêu lý do"
+  };
+}
+
+async function routeMessage(userMessage: string, env: Env): Promise<RouteDecision> {
+  try {
+    const response = await env.AI.run(ROUTER_MODEL, {
+      messages: [
+        { role: "system", content: ROUTER_PROMPT },
+        { role: "user", content: userMessage }
+      ]
+    }) as { response?: string };
+
+    const route = parseRouteDecision(response.response ?? "");
+    console.log(`[ROUTER] intent=${route.intent}; tools=${route.tools.join(",") || "none"}; reason=${route.reason}`);
+    return route;
+  } catch (error) {
+    console.log(
+      `[ROUTER] Fallback direct_chat: ${error instanceof Error ? error.message : "unknown error"}`
+    );
+    return defaultRouteDecision("Router lỗi hoặc trả JSON không hợp lệ");
+  }
+}
+
+function toolsForRoute(route: RouteDecision): ToolDefinition[] {
+  if (!route.needs_tools || route.tools.length === 0) return [];
+  return TOOLS.filter(tool => route.tools.includes(tool.name as ToolName));
+}
+
+function buildRouterContext(route: RouteDecision, selectedTools: ToolDefinition[]): string {
+  const selectedToolNames = selectedTools.map(tool => tool.name);
+
+  return [
+    "Quyết định router cho lượt này:",
+    `- intent: ${route.intent}`,
+    `- needs_tools: ${route.needs_tools}`,
+    `- tools được bật: ${selectedToolNames.length ? selectedToolNames.join(", ") : "không có"}`,
+    `- search_query gợi ý: ${route.search_query ?? "không có"}`,
+    `- lý do: ${route.reason}`,
+    "Chỉ dùng các công cụ đã được bật trong lượt này. Nếu không có công cụ nào được bật, hãy trả lời trực tiếp."
+  ].join("\n");
+}
 
 async function runAgenticLoop(
   userMessage: string,
   env: Env,
   screenContext?: ScreenContext
-): Promise<{ answer: string; toolsCalled: string[] }> {
+): Promise<{ answer: string; toolsCalled: string[]; route: RouteDecision }> {
+
+  const route = await routeMessage(userMessage, env);
+  const selectedTools = toolsForRoute(route);
+  const routerContext = buildRouterContext(route, selectedTools);
 
   const messages: AIMessage[] = [
     {
@@ -221,7 +375,9 @@ Chỉ dùng get_workflow khi có workflow ID rõ ràng hoặc sau khi có screen
 Với câu hỏi ngoài phạm vi Zilcode, hãy trả lời như một trợ lý thông thường.
 Sau khi đã có đủ thông tin từ công cụ, hãy trả lời ngay thay vì tiếp tục gọi thêm công cụ.
 Khi đã dùng rag_search nhưng không tìm thấy thông tin phù hợp, hãy nói rõ là chưa tìm thấy trong tài liệu hiện có thay vì bịa nội dung.
-Trả lời ngắn gọn, cụ thể, ưu tiên các bước thao tác rõ ràng.`
+Trả lời ngắn gọn, cụ thể, ưu tiên các bước thao tác rõ ràng.
+
+${routerContext}`
     },
     {
       role: "user",
@@ -231,12 +387,21 @@ Trả lời ngắn gọn, cụ thể, ưu tiên các bước thao tác rõ ràng
 
   const toolsCalled: string[] = [];
 
+  if (selectedTools.length === 0) {
+    const response = await env.AI.run(CHAT_MODEL, { messages }) as { response?: string };
+    return {
+      answer: response.response ?? "Không tạo được câu trả lời.",
+      toolsCalled,
+      route
+    };
+  }
+
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     console.log(`[VÒNG LẶP] Lần ${i + 1}`);
 
     const response = await env.AI.run(CHAT_MODEL, {
       messages,
-      tools: TOOLS
+      tools: selectedTools
     }) as {
       response?: string;
       tool_calls?: Array<{
@@ -250,7 +415,8 @@ Trả lời ngắn gọn, cụ thể, ưu tiên các bước thao tác rõ ràng
       console.log(`[VÒNG LẶP] Không có tool call, trả về câu trả lời cuối cùng`);
       return {
         answer: response.response ?? "Không tạo được câu trả lời.",
-        toolsCalled
+        toolsCalled,
+        route
       };
     }
 
@@ -284,7 +450,8 @@ Trả lời ngắn gọn, cụ thể, ưu tiên các bước thao tác rõ ràng
 
   return {
     answer: "Đã đạt số vòng gọi công cụ tối đa nhưng chưa tạo được câu trả lời cuối cùng.",
-    toolsCalled
+    toolsCalled,
+    route
   };
 }
 
@@ -321,7 +488,7 @@ export default {
           );
         }
 
-        const { answer, toolsCalled } = await runAgenticLoop(
+        const { answer, toolsCalled, route } = await runAgenticLoop(
           body.message,
           env,
           body.context
@@ -330,7 +497,14 @@ export default {
         return Response.json({
           success: true,
           response: answer,
-          tools_called: toolsCalled
+          tools_called: toolsCalled,
+          route: {
+            intent: route.intent,
+            needs_tools: route.needs_tools,
+            tools: route.tools,
+            search_query: route.search_query,
+            reason: route.reason
+          }
         }, { headers: CORS });
 
       } catch (error) {
