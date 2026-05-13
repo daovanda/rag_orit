@@ -220,8 +220,8 @@ Nhiệm vụ của bạn chỉ là phân loại tin nhắn người dùng để 
 Không trả lời người dùng. Không gọi công cụ. Chỉ trả về JSON hợp lệ, không markdown, không giải thích ngoài JSON.
 
 Intent:
-- "direct_chat": chào hỏi, cảm ơn, trò chuyện thông thường, câu hỏi về khả năng của trợ lý, câu hỏi kiến thức chung, hoặc câu hỏi không cần dữ liệu Zilcode.
-- "rag_search": cần tra cứu tài liệu Zilcode như hướng dẫn sử dụng, tính năng, thao tác, quản trị, SQL Cloud, App Builder, import/export, thêm/sửa/xóa dữ liệu.
+- "direct_chat": chào hỏi, cảm ơn, trò chuyện thông thường, câu hỏi về khả năng của trợ lý, câu hỏi kiến thức chung, hoặc câu hỏi không cần dữ liệu Zilcode. Nếu người dùng hỏi "bạn là gì" thì là direct_chat; nếu hỏi "Zilcode là gì" thì không phải direct_chat.
+- "rag_search": cần tra cứu tài liệu Zilcode như Zilcode là gì, giới thiệu Zilcode, nền tảng Zilcode, hướng dẫn sử dụng, tính năng, thao tác, quản trị, SQL Cloud, App Builder, import/export, thêm/sửa/xóa dữ liệu.
 - "screen_context": hỏi về đối tượng/màn hình/node hiện tại như "cái này", "ở đây", "màn hình hiện tại", "node này", "workflow này" mà không có ID rõ ràng.
 - "workflow": hỏi về workflow có ID rõ ràng.
 - "mixed": cần nhiều hơn một loại dữ liệu.
@@ -245,6 +245,8 @@ Trả về đúng schema:
 Ví dụ:
 User: "hello" -> {"intent":"direct_chat","needs_tools":false,"tools":[],"search_query":null,"reason":"Chào hỏi thông thường"}
 User: "xin chào, bạn là gì" -> {"intent":"direct_chat","needs_tools":false,"tools":[],"search_query":null,"reason":"Hỏi về trợ lý, không cần tài liệu"}
+User: "Zilcode là gì" -> {"intent":"rag_search","needs_tools":true,"tools":["rag_search"],"search_query":"Zilcode là gì nền tảng mở nocode Việt Nam","reason":"Hỏi định nghĩa/giới thiệu về Zilcode nên cần tra cứu tài liệu"}
+User: "giới thiệu về Zilcode" -> {"intent":"rag_search","needs_tools":true,"tools":["rag_search"],"search_query":"giới thiệu Zilcode nền tảng nocode","reason":"Hỏi thông tin về Zilcode nên cần tra cứu tài liệu"}
 User: "cách import dữ liệu trong Zilcode" -> {"intent":"rag_search","needs_tools":true,"tools":["rag_search"],"search_query":"import dữ liệu trong Zilcode hướng dẫn người dùng","reason":"Cần tra cứu tài liệu Zilcode"}
 User: "workflow này lỗi ở đâu" -> {"intent":"screen_context","needs_tools":true,"tools":["get_screen_context","get_workflow"],"search_query":null,"reason":"Cần biết workflow hiện tại trước khi phân tích"}
 User: "workflow wf-001 có những node gì" -> {"intent":"workflow","needs_tools":true,"tools":["get_workflow"],"search_query":null,"reason":"Có workflow ID rõ ràng"}`;
@@ -338,6 +340,23 @@ function toolsForRoute(route: RouteDecision): ToolDefinition[] {
 
 function buildRouterContext(route: RouteDecision, selectedTools: ToolDefinition[]): string {
   const selectedToolNames = selectedTools.map(tool => tool.name);
+  const guidance: string[] = [
+    "Chỉ dùng các công cụ đã được bật trong lượt này. Nếu không có công cụ nào được bật, hãy trả lời trực tiếp."
+  ];
+
+  if (route.tools.includes("rag_search")) {
+    guidance.push(
+      `Router đã xác định câu hỏi cần tra cứu tài liệu Zilcode. Hãy gọi rag_search trước khi trả lời; ưu tiên query: ${route.search_query ?? "tự viết query bám sát câu hỏi người dùng"}.`
+    );
+  }
+
+  if (route.tools.includes("get_screen_context")) {
+    guidance.push("Router đã xác định cần ngữ cảnh UI. Hãy gọi get_screen_context trước khi phân tích đối tượng hiện tại.");
+  }
+
+  if (route.tools.includes("get_workflow")) {
+    guidance.push("Router đã xác định có thể cần dữ liệu workflow. Chỉ gọi get_workflow khi có workflow ID hoặc sau khi lấy được resource_id từ ngữ cảnh màn hình.");
+  }
 
   return [
     "Quyết định router cho lượt này:",
@@ -346,7 +365,7 @@ function buildRouterContext(route: RouteDecision, selectedTools: ToolDefinition[
     `- tools được bật: ${selectedToolNames.length ? selectedToolNames.join(", ") : "không có"}`,
     `- search_query gợi ý: ${route.search_query ?? "không có"}`,
     `- lý do: ${route.reason}`,
-    "Chỉ dùng các công cụ đã được bật trong lượt này. Nếu không có công cụ nào được bật, hãy trả lời trực tiếp."
+    ...guidance
   ].join("\n");
 }
 
