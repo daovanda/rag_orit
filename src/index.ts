@@ -27,7 +27,7 @@ const TOOLS = [
   {
     name: "general_chat",
     description:
-      "Trả lời hội thoại thông thường bằng năng lực chat và kiến thức sẵn có của trợ lý. Dùng cho chào hỏi, cảm ơn, hỏi trợ lý là ai/có thể làm gì, câu hỏi không liên quan đến Zilcode, hoặc câu hỏi kiến thức chung không cần tra cứu tài liệu Zilcode. Không dùng khi câu hỏi cần thông tin cụ thể từ tài liệu Zilcode, workflow, hoặc ngữ cảnh màn hình.",
+      "Trả lời hội thoại thông thường bằng năng lực chat và kiến thức sẵn có của trợ lý. Dùng cho chào hỏi, cảm ơn, hỏi trợ lý là ai/có thể làm gì, hỏi trợ lý có trả lời ngoài Zilcode không, câu hỏi không liên quan đến Zilcode, hoặc câu hỏi kiến thức chung không cần tra cứu tài liệu Zilcode. Không dùng khi Zilcode là chủ đề cần giải thích/hướng dẫn, hoặc khi câu hỏi cần thông tin cụ thể từ tài liệu Zilcode, workflow, hoặc ngữ cảnh màn hình.",
     parameters: {
       type: "object",
       properties: {
@@ -42,7 +42,7 @@ const TOOLS = [
   {
     name: "rag_search",
     description:
-      "Nguồn bổ sung để tra cứu kho tài liệu Zilcode đã ingest, gồm Hướng dẫn người dùng và Hướng dẫn quản trị. Công cụ này không phải phạm vi duy nhất của trợ lý. Dùng khi câu hỏi cần kiểm tra thông tin cụ thể trong tài liệu Zilcode, ví dụ: đăng nhập, vai trò, Desktop, Header, Window, toolbar, tìm kiếm/thêm/sửa/xóa/import/export dữ liệu, SQL Cloud, App Builder, Site, Service, User, Role, Organization, Application, Window/Tab/Field/MenuTool, Application Wizard. Không dùng cho chào hỏi, cảm ơn, trò chuyện thông thường, hoặc câu hỏi kiến thức chung ngoài Zilcode. Thường chỉ cần gọi một lần với query tốt; chỉ gọi lại nếu kết quả chưa đủ và query mới thật sự bổ sung khía cạnh khác.",
+      "Nguồn bổ sung để tra cứu kho tài liệu Zilcode đã ingest, gồm Hướng dẫn người dùng và Hướng dẫn quản trị. Dùng khi Zilcode là chủ đề cần giải thích, hướng dẫn hoặc kiểm tra thông tin trong tài liệu, kể cả câu hỏi rộng như 'Zilcode là gì', 'hướng dẫn tôi sử dụng Zilcode', 'Zilcode có chức năng gì'. Ví dụ chủ đề: đăng nhập, vai trò, Desktop, Header, Window, toolbar, tìm kiếm/thêm/sửa/xóa/import/export dữ liệu, SQL Cloud, App Builder, Site, Service, User, Role, Organization, Application, Window/Tab/Field/MenuTool, Application Wizard. Không dùng cho chào hỏi, cảm ơn, trò chuyện thông thường, câu hỏi về năng lực của trợ lý, hoặc câu hỏi kiến thức chung ngoài Zilcode. Sau khi đã có kết quả rag_search, dùng kết quả đó để trả lời, không gọi general_chat để thay thế nội dung tài liệu. Thường chỉ cần gọi một lần với query tốt; chỉ gọi lại nếu kết quả chưa đủ và query mới thật sự bổ sung khía cạnh khác.",
     parameters: {
       type: "object",
       properties: {
@@ -233,9 +233,47 @@ interface AIMessage {
   tool_call_id?: string;
 }
 
+interface ToolResultRecord {
+  name: string;
+  content: string;
+}
+
 // ─── Agentic loop ─────────────────────────────────────────────────────────────
 
 const MAX_ITERATIONS = 6;
+
+function formatToolResultsForFinalAnswer(toolResults: ToolResultRecord[]): string {
+  return toolResults
+    .map((result, index) => `### ${index + 1}. ${result.name}\n${result.content}`)
+    .join("\n\n");
+}
+
+async function createFinalAnswerFromRag(
+  userMessage: string,
+  toolResults: ToolResultRecord[],
+  env: Env
+): Promise<string> {
+  const response = await env.AI.run(CHAT_MODEL, {
+    messages: [
+      {
+        role: "system",
+        content: `Bạn là trợ lý hỗ trợ Zilcode.
+Hãy trả lời bằng cùng ngôn ngữ với người hỏi.
+Dựa chủ yếu vào kết quả rag_search trong ngữ cảnh được cung cấp.
+Nếu có kết quả general_chat trong ngữ cảnh, chỉ xem là thông tin phụ; không dùng nó để phủ định hoặc thay thế tài liệu Zilcode.
+Nếu tài liệu không đủ thông tin, hãy nói rõ phần nào chưa tìm thấy trong tài liệu hiện có.
+Không nhắc đến tool/function nội bộ. Trả lời ngắn gọn, cụ thể, ưu tiên các bước thao tác rõ ràng.`
+      },
+      { role: "user", content: userMessage },
+      {
+        role: "assistant",
+        content: `Ngữ cảnh từ các công cụ:\n${formatToolResultsForFinalAnswer(toolResults)}`
+      }
+    ]
+  }) as { response?: string };
+
+  return response.response ?? "Không tạo được câu trả lời.";
+}
 
 async function runAgenticLoop(
   userMessage: string,
@@ -249,13 +287,15 @@ async function runAgenticLoop(
       content: `Bạn là trợ lý AI hội thoại và trợ lý hỗ trợ nền tảng Zilcode.
 Hãy trả lời bằng cùng ngôn ngữ với người hỏi. Nếu người hỏi yêu cầu một ngôn ngữ hoặc phong cách cụ thể, hãy làm theo yêu cầu đó.
 Bạn có các công cụ để xử lý từng loại yêu cầu. Hãy chọn công cụ phù hợp nhất thay vì nói rằng yêu cầu nằm ngoài phạm vi công cụ.
-Dùng general_chat cho chào hỏi, cảm ơn, trò chuyện thông thường, hỏi bạn là ai/có thể làm gì, câu hỏi kiến thức chung, hoặc câu hỏi không liên quan đến Zilcode.
+Dùng general_chat cho chào hỏi, cảm ơn, trò chuyện thông thường, hỏi bạn là ai/có thể làm gì, hỏi bạn có trả lời ngoài Zilcode không, câu hỏi kiến thức chung, hoặc câu hỏi không liên quan đến Zilcode.
 Chỉ dùng rag_search khi câu hỏi cần thông tin cụ thể từ tài liệu Zilcode, ví dụ tính năng, khái niệm, hướng dẫn thao tác, hoặc cách sử dụng Zilcode.
+Nếu Zilcode là chủ đề chính cần giải thích, hoặc người dùng hỏi Zilcode là gì, tính năng/cách dùng/hướng dẫn thao tác trong Zilcode, hãy ưu tiên rag_search thay vì general_chat.
 Khi dùng rag_search, thường chỉ gọi một lần với query tổng hợp tốt. Chỉ gọi lại nếu kết quả chưa đủ và query mới khác rõ ràng về ý định hoặc phạm vi; không gọi lại cùng query hoặc query tương đương.
 Chỉ dùng get_screen_context khi người dùng hỏi về đối tượng đang hiển thị/được chọn trong UI và câu trả lời phụ thuộc vào màn hình/node/tài nguyên hiện tại. Không dùng get_screen_context chỉ vì người dùng đang chat.
 Chỉ dùng get_workflow khi có workflow ID rõ ràng hoặc sau khi có screen context cho thấy tài nguyên hiện tại là workflow cần phân tích.
 Với câu hỏi ngoài phạm vi Zilcode, hãy dùng general_chat.
-Sau khi đã có đủ thông tin từ công cụ, hãy trả lời ngay thay vì tiếp tục gọi thêm công cụ. Nếu general_chat đã trả lời, hãy dùng nội dung đó làm cơ sở cho câu trả lời cuối cùng.
+Sau khi đã có đủ thông tin từ công cụ, hãy trả lời ngay thay vì tiếp tục gọi thêm công cụ. Nếu general_chat đã trả lời và chưa dùng rag_search, hãy dùng nội dung đó làm cơ sở cho câu trả lời cuối cùng.
+Khi đã dùng rag_search và có kết quả, không gọi general_chat để hỏi lại kiến thức chung; hãy tổng hợp câu trả lời từ kết quả rag_search.
 Khi đã dùng rag_search nhưng không tìm thấy thông tin phù hợp, hãy nói rõ là chưa tìm thấy trong tài liệu hiện có thay vì bịa nội dung.
 Trả lời ngắn gọn, cụ thể, ưu tiên các bước thao tác rõ ràng.`
     },
@@ -266,6 +306,8 @@ Trả lời ngắn gọn, cụ thể, ưu tiên các bước thao tác rõ ràng
   ];
 
   const toolsCalled: string[] = [];
+  const toolResults: ToolResultRecord[] = [];
+  let hasRagSearchResult = false;
 
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     console.log(`[VÒNG LẶP] Lần ${i + 1}`);
@@ -290,9 +332,14 @@ Trả lời ngắn gọn, cụ thể, ưu tiên các bước thao tác rõ ràng
       };
     }
 
+    const hasRagSearchCall = response.tool_calls.some(toolCall => toolCall.name === "rag_search");
+    const toolCallsToExecute = hasRagSearchCall
+      ? response.tool_calls.filter(toolCall => toolCall.name !== "general_chat")
+      : response.tool_calls;
+
     let generalChatResult: string | null = null;
 
-    for (const toolCall of response.tool_calls) {
+    for (const toolCall of toolCallsToExecute) {
       console.log(`[CÔNG CỤ] Gọi: ${toolCall.name}`, toolCall.arguments);
       toolsCalled.push(toolCall.name);
 
@@ -303,6 +350,7 @@ Trả lời ngắn gọn, cụ thể, ưu tiên các bước thao tác rõ ràng
       );
 
       console.log(`[CÔNG CỤ] Độ dài kết quả: ${toolResult.length} ký tự`);
+      toolResults.push({ name: toolCall.name, content: toolResult });
 
       messages.push({
         role: "assistant",
@@ -321,6 +369,23 @@ Trả lời ngắn gọn, cụ thể, ưu tiên các bước thao tác rõ ràng
       if (toolCall.name === "general_chat") {
         generalChatResult = toolResult;
       }
+
+      if (toolCall.name === "rag_search") {
+        hasRagSearchResult = true;
+      }
+    }
+
+    if (hasRagSearchResult) {
+      const finalAnswer = await createFinalAnswerFromRag(
+        userMessage,
+        toolResults,
+        env
+      );
+
+      return {
+        answer: finalAnswer,
+        toolsCalled
+      };
     }
 
     if (generalChatResult) {
