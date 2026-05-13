@@ -12,7 +12,7 @@ export interface Env {
 const CHAT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 const GENERAL_CHAT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 const EMBEDDING_MODEL = "@cf/baai/bge-m3";
-const CHART_IMAGE_MODEL = "@cf/black-forest-labs/flux-2-klein-4b";
+const CHART_IMAGE_MODEL = "@cf/black-forest-labs/flux-2-dev";
 
 const TOOL_SELECTION_MAX_TOKENS = 512;
 const GENERAL_CHAT_MAX_TOKENS = 1024;
