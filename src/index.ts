@@ -13,6 +13,10 @@ const CHAT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 const GENERAL_CHAT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 const EMBEDDING_MODEL = "@cf/baai/bge-m3";
 
+const TOOL_SELECTION_MAX_TOKENS = 512;
+const GENERAL_CHAT_MAX_TOKENS = 1024;
+const RAG_FINAL_MAX_TOKENS = 2048;
+
 // ─── CORS ─────────────────────────────────────────────────────────────────────
 
 const CORS = {
@@ -100,6 +104,7 @@ async function executeTool(
       if (!message) return "Lỗi: bắt buộc phải có tin nhắn để trả lời.";
 
       const response = await env.AI.run(GENERAL_CHAT_MODEL, {
+        max_tokens: GENERAL_CHAT_MAX_TOKENS,
         messages: [
           {
             role: "system",
@@ -254,6 +259,8 @@ async function createFinalAnswerFromRag(
   env: Env
 ): Promise<string> {
   const response = await env.AI.run(CHAT_MODEL, {
+    max_tokens: RAG_FINAL_MAX_TOKENS,
+    temperature: 0.2,
     messages: [
       {
         role: "system",
@@ -262,7 +269,8 @@ Hãy trả lời bằng cùng ngôn ngữ với người hỏi.
 Dựa chủ yếu vào kết quả rag_search trong ngữ cảnh được cung cấp.
 Nếu có kết quả general_chat trong ngữ cảnh, chỉ xem là thông tin phụ; không dùng nó để phủ định hoặc thay thế tài liệu Zilcode.
 Nếu tài liệu không đủ thông tin, hãy nói rõ phần nào chưa tìm thấy trong tài liệu hiện có.
-Không nhắc đến tool/function nội bộ. Trả lời ngắn gọn, cụ thể, ưu tiên các bước thao tác rõ ràng.`
+Không nhắc đến tool/function nội bộ.
+Trả lời đúng mức chi tiết theo yêu cầu của người dùng. Nếu người dùng yêu cầu chi tiết, hãy chia thành các phần/bước rõ ràng; nếu không yêu cầu chi tiết, hãy trả lời gọn.`
       },
       { role: "user", content: userMessage },
       {
@@ -297,7 +305,7 @@ Với câu hỏi ngoài phạm vi Zilcode, hãy dùng general_chat.
 Sau khi đã có đủ thông tin từ công cụ, hãy trả lời ngay thay vì tiếp tục gọi thêm công cụ. Nếu general_chat đã trả lời và chưa dùng rag_search, hãy dùng nội dung đó làm cơ sở cho câu trả lời cuối cùng.
 Khi đã dùng rag_search và có kết quả, không gọi general_chat để hỏi lại kiến thức chung; hãy tổng hợp câu trả lời từ kết quả rag_search.
 Khi đã dùng rag_search nhưng không tìm thấy thông tin phù hợp, hãy nói rõ là chưa tìm thấy trong tài liệu hiện có thay vì bịa nội dung.
-Trả lời ngắn gọn, cụ thể, ưu tiên các bước thao tác rõ ràng.`
+Trả lời đúng mức chi tiết theo yêu cầu của người dùng, cụ thể và ưu tiên các bước thao tác rõ ràng.`
     },
     {
       role: "user",
@@ -313,6 +321,7 @@ Trả lời ngắn gọn, cụ thể, ưu tiên các bước thao tác rõ ràng
     console.log(`[VÒNG LẶP] Lần ${i + 1}`);
 
     const response = await env.AI.run(CHAT_MODEL, {
+      max_tokens: TOOL_SELECTION_MAX_TOKENS,
       messages,
       tools: TOOLS
     }) as {
@@ -390,6 +399,7 @@ Trả lời ngắn gọn, cụ thể, ưu tiên các bước thao tác rõ ràng
 
     if (generalChatResult) {
       const finalResponse = await env.AI.run(CHAT_MODEL, {
+        max_tokens: GENERAL_CHAT_MAX_TOKENS,
         messages: [
           {
             role: "system",
