@@ -127,22 +127,9 @@
   }
 
   .tool-badge.rag_search .icon { background: #dbeafe; color: #1d4ed8; }
+  .tool-badge.general_chat .icon { background: #e5e7eb; color: #374151; }
   .tool-badge.get_workflow .icon { background: #dcfce7; color: #166534; }
   .tool-badge.get_screen_context .icon { background: #fef9c3; color: #854d0e; }
-
-  .route-badge {
-    display: inline-flex;
-    align-items: center;
-    max-width: 720px;
-    font-size: 11px;
-    background: #eef2ff;
-    border: 0.5px solid #c7d2fe;
-    border-radius: 20px;
-    padding: 3px 10px;
-    color: #3730a3;
-    margin-bottom: 6px;
-    line-height: 1.4;
-  }
 
   .tool-badge .spinner {
     width: 10px; height: 10px;
@@ -321,6 +308,7 @@
 
 <script>
   const TOOL_META = {
+    general_chat: { label: 'general_chat', icon: '💬', cls: 'general_chat' },
     rag_search: { label: 'rag_search', icon: '🔍', cls: 'rag_search' },
     get_workflow: { label: 'get_workflow', icon: '⚙', cls: 'get_workflow' },
     get_screen_context: { label: 'get_screen_context', icon: '🖥', cls: 'get_screen_context' },
@@ -363,21 +351,13 @@
     return new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' });
   }
 
-  function appendMessage(role, content, tools = [], route = null) {
+  function appendMessage(role, content, tools = []) {
     const empty = document.getElementById('emptyState');
     if (empty) empty.remove();
 
     const container = document.getElementById('messages');
     const msg = document.createElement('div');
     msg.className = `msg ${role}`;
-
-    if (role === 'assistant' && route) {
-      const routeBadge = document.createElement('div');
-      routeBadge.className = 'route-badge';
-      const routeTools = route.tools && route.tools.length ? route.tools.join(', ') : 'none';
-      routeBadge.textContent = `route: ${route.intent} | tools: ${routeTools} | ${route.reason || ''}`;
-      msg.appendChild(routeBadge);
-    }
 
     if (role === 'assistant' && tools.length > 0) {
       tools.forEach(tool => {
@@ -471,7 +451,7 @@
       const data = await res.json();
 
       if (data.success) {
-        appendMessage('assistant', data.response, data.tools_called || [], data.route || null);
+        appendMessage('assistant', data.response, data.tools_called || []);
       } else {
         const msg = document.createElement('div');
         msg.className = 'msg assistant';

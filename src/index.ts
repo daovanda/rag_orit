@@ -10,7 +10,7 @@ export interface Env {
 // ─── Models ───────────────────────────────────────────────────────────────────
 
 const CHAT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
-const ROUTER_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+const GENERAL_CHAT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 const EMBEDDING_MODEL = "@cf/baai/bge-m3";
 
 // ─── CORS ─────────────────────────────────────────────────────────────────────
@@ -24,6 +24,21 @@ const CORS = {
 // ─── Tool definitions ─────────────────────────────────────────────────────────
 
 const TOOLS = [
+  {
+    name: "general_chat",
+    description:
+      "Trả lời hội thoại thông thường bằng năng lực chat và kiến thức sẵn có của trợ lý. Dùng cho chào hỏi, cảm ơn, hỏi trợ lý là ai/có thể làm gì, câu hỏi không liên quan đến Zilcode, hoặc câu hỏi kiến thức chung không cần tra cứu tài liệu Zilcode. Không dùng khi câu hỏi cần thông tin cụ thể từ tài liệu Zilcode, workflow, hoặc ngữ cảnh màn hình.",
+    parameters: {
+      type: "object",
+      properties: {
+        message: {
+          type: "string",
+          description: "Tin nhắn người dùng cần trả lời trực tiếp"
+        }
+      },
+      required: ["message"]
+    }
+  },
   {
     name: "rag_search",
     description:
@@ -65,12 +80,6 @@ const TOOLS = [
   }
 ];
 
-type ToolDefinition = typeof TOOLS[number];
-type ToolName = "rag_search" | "get_workflow" | "get_screen_context";
-type RouteIntent = "direct_chat" | "rag_search" | "screen_context" | "workflow" | "mixed";
-
-const VALID_TOOL_NAMES: ToolName[] = ["rag_search", "get_workflow", "get_screen_context"];
-
 // ─── Tool executor ────────────────────────────────────────────────────────────
 
 interface ToolCall {
@@ -85,6 +94,27 @@ async function executeTool(
 ): Promise<string> {
 
   switch (tool.name) {
+
+    case "general_chat": {
+      const message = tool.arguments.message;
+      if (!message) return "Lỗi: bắt buộc phải có tin nhắn để trả lời.";
+
+      const response = await env.AI.run(GENERAL_CHAT_MODEL, {
+        messages: [
+          {
+            role: "system",
+            content: `Bạn là trợ lý hội thoại.
+Hãy trả lời trực tiếp bằng cùng ngôn ngữ với người hỏi, trừ khi người hỏi yêu cầu ngôn ngữ khác.
+Bạn có thể dùng kiến thức sẵn có để trả lời câu hỏi chung.
+Nếu người dùng hỏi bạn là ai, hãy nói bạn là trợ lý AI có thể trò chuyện thông thường và hỗ trợ tra cứu thông tin Zilcode khi cần.
+Trả lời ngắn gọn, tự nhiên, không nhắc đến function/tool nội bộ.`
+          },
+          { role: "user", content: message }
+        ]
+      }) as { response?: string };
+
+      return response.response ?? "Không tạo được câu trả lời.";
+    }
 
     case "rag_search": {
       const query = tool.arguments.query;
@@ -203,298 +233,31 @@ interface AIMessage {
   tool_call_id?: string;
 }
 
-interface RouteDecision {
-  intent: RouteIntent;
-  needs_tools: boolean;
-  tools: ToolName[];
-  search_query: string | null;
-  reason: string;
-}
-
 // ─── Agentic loop ─────────────────────────────────────────────────────────────
 
 const MAX_ITERATIONS = 6;
-
-const ROUTER_PROMPT = `Bạn là router intent cho chatbot Zilcode.
-Nhiệm vụ của bạn chỉ là phân loại tin nhắn người dùng để backend biết có cần bật công cụ hay không.
-Không trả lời người dùng. Không gọi công cụ. Chỉ trả về JSON hợp lệ, không markdown, không giải thích ngoài JSON.
-
-Intent:
-- "direct_chat": chào hỏi, cảm ơn, trò chuyện thông thường, câu hỏi về khả năng của trợ lý, câu hỏi kiến thức chung, hoặc câu hỏi không cần dữ liệu Zilcode. Nếu người dùng hỏi "bạn là gì" thì là direct_chat; nếu hỏi "Zilcode là gì" thì không phải direct_chat.
-- "rag_search": cần tra cứu tài liệu Zilcode như Zilcode là gì, giới thiệu Zilcode, nền tảng Zilcode, hướng dẫn sử dụng, tính năng, thao tác, quản trị, SQL Cloud, App Builder, import/export, thêm/sửa/xóa dữ liệu.
-- "screen_context": hỏi về đối tượng/màn hình/node hiện tại như "cái này", "ở đây", "màn hình hiện tại", "node này", "workflow này" mà không có ID rõ ràng.
-- "workflow": hỏi về workflow có ID rõ ràng.
-- "mixed": cần nhiều hơn một loại dữ liệu.
-
-Tool mapping:
-- direct_chat -> []
-- rag_search -> ["rag_search"]
-- screen_context -> ["get_screen_context", "get_workflow"] nếu có thể cần đọc workflow sau khi biết ngữ cảnh; nếu không thì ["get_screen_context"]
-- workflow -> ["get_workflow"]
-- mixed -> danh sách các tool thật sự cần
-
-Trả về đúng schema:
-{
-  "intent": "direct_chat" | "rag_search" | "screen_context" | "workflow" | "mixed",
-  "needs_tools": boolean,
-  "tools": string[],
-  "search_query": string | null,
-  "reason": string
-}
-
-Ví dụ:
-User: "hello" -> {"intent":"direct_chat","needs_tools":false,"tools":[],"search_query":null,"reason":"Chào hỏi thông thường"}
-User: "xin chào, bạn là gì" -> {"intent":"direct_chat","needs_tools":false,"tools":[],"search_query":null,"reason":"Hỏi về trợ lý, không cần tài liệu"}
-User: "Zilcode là gì" -> {"intent":"rag_search","needs_tools":true,"tools":["rag_search"],"search_query":"Zilcode là gì nền tảng mở nocode Việt Nam","reason":"Hỏi định nghĩa/giới thiệu về Zilcode nên cần tra cứu tài liệu"}
-User: "giới thiệu về Zilcode" -> {"intent":"rag_search","needs_tools":true,"tools":["rag_search"],"search_query":"giới thiệu Zilcode nền tảng nocode","reason":"Hỏi thông tin về Zilcode nên cần tra cứu tài liệu"}
-User: "cách import dữ liệu trong Zilcode" -> {"intent":"rag_search","needs_tools":true,"tools":["rag_search"],"search_query":"import dữ liệu trong Zilcode hướng dẫn người dùng","reason":"Cần tra cứu tài liệu Zilcode"}
-User: "workflow này lỗi ở đâu" -> {"intent":"screen_context","needs_tools":true,"tools":["get_screen_context","get_workflow"],"search_query":null,"reason":"Cần biết workflow hiện tại trước khi phân tích"}
-User: "workflow wf-001 có những node gì" -> {"intent":"workflow","needs_tools":true,"tools":["get_workflow"],"search_query":null,"reason":"Có workflow ID rõ ràng"}`;
-
-function defaultRouteDecision(reason: string): RouteDecision {
-  return {
-    intent: "direct_chat",
-    needs_tools: false,
-    tools: [],
-    search_query: null,
-    reason
-  };
-}
-
-function extractJsonObjects(raw: string): string[] {
-  const cleaned = raw
-    .replace(/```json/gi, "")
-    .replace(/```/g, "")
-    .trim();
-
-  const objects: string[] = [];
-  let depth = 0;
-  let start = -1;
-  let inString = false;
-  let escaped = false;
-
-  for (let i = 0; i < cleaned.length; i++) {
-    const char = cleaned[i];
-
-    if (inString) {
-      if (escaped) {
-        escaped = false;
-      } else if (char === "\\") {
-        escaped = true;
-      } else if (char === "\"") {
-        inString = false;
-      }
-      continue;
-    }
-
-    if (char === "\"") {
-      inString = true;
-      continue;
-    }
-
-    if (char === "{") {
-      if (depth === 0) start = i;
-      depth++;
-      continue;
-    }
-
-    if (char === "}") {
-      depth--;
-      if (depth === 0 && start !== -1) {
-        objects.push(cleaned.slice(start, i + 1));
-        start = -1;
-      }
-    }
-  }
-
-  if (objects.length === 0) {
-    throw new Error("Router response does not contain a JSON object");
-  }
-
-  return objects;
-}
-
-function parseRouteDecision(raw: string): RouteDecision {
-  const candidates = extractJsonObjects(raw);
-  let parsed: Partial<RouteDecision> | null = null;
-
-  for (let i = candidates.length - 1; i >= 0; i--) {
-    try {
-      parsed = JSON.parse(candidates[i]) as Partial<RouteDecision>;
-      break;
-    } catch {
-      // Try the previous JSON-looking block.
-    }
-  }
-
-  if (!parsed) {
-    throw new Error("Router response contains JSON-like blocks but none are valid JSON");
-  }
-
-  const validIntents: RouteIntent[] = [
-    "direct_chat",
-    "rag_search",
-    "screen_context",
-    "workflow",
-    "mixed"
-  ];
-
-  const intent = validIntents.includes(parsed.intent as RouteIntent)
-    ? parsed.intent as RouteIntent
-    : "direct_chat";
-
-  const tools = Array.isArray(parsed.tools)
-    ? parsed.tools.filter((tool): tool is ToolName =>
-        VALID_TOOL_NAMES.includes(tool as ToolName)
-      )
-    : [];
-
-  if (intent === "direct_chat") {
-    return defaultRouteDecision(parsed.reason || "Router chọn trả lời trực tiếp");
-  }
-
-  return {
-    intent,
-    needs_tools: Boolean(parsed.needs_tools) && tools.length > 0,
-    tools,
-    search_query: typeof parsed.search_query === "string" && parsed.search_query.trim()
-      ? parsed.search_query.trim()
-      : null,
-    reason: parsed.reason || "Router không nêu lý do"
-  };
-}
-
-function fallbackRouteFromMessage(userMessage: string, reason: string): RouteDecision {
-  const text = userMessage.toLowerCase();
-
-  if (
-    text.includes("zilcode") ||
-    text.includes("z-admin") ||
-    text.includes("z-flow") ||
-    text.includes("z-data") ||
-    text.includes("z-report") ||
-    text.includes("sql cloud") ||
-    text.includes("app builder")
-  ) {
-    return {
-      intent: "rag_search",
-      needs_tools: true,
-      tools: ["rag_search"],
-      search_query: userMessage,
-      reason: `${reason}; fallback semantic: câu hỏi nhắc đến Zilcode/tài liệu`
-    };
-  }
-
-  if (text.includes("workflow") && (text.includes("này") || text.includes("hiện tại"))) {
-    return {
-      intent: "screen_context",
-      needs_tools: true,
-      tools: ["get_screen_context", "get_workflow"],
-      search_query: null,
-      reason: `${reason}; fallback semantic: câu hỏi nhắc đến workflow hiện tại`
-    };
-  }
-
-  if (text.includes("workflow")) {
-    return {
-      intent: "workflow",
-      needs_tools: true,
-      tools: ["get_workflow"],
-      search_query: null,
-      reason: `${reason}; fallback semantic: câu hỏi nhắc đến workflow`
-    };
-  }
-
-  return defaultRouteDecision(reason);
-}
-
-async function routeMessage(userMessage: string, env: Env): Promise<RouteDecision> {
-  try {
-    const response = await env.AI.run(ROUTER_MODEL, {
-      messages: [
-        { role: "system", content: ROUTER_PROMPT },
-        { role: "user", content: userMessage }
-      ]
-    }) as { response?: string };
-
-    const route = parseRouteDecision(response.response ?? "");
-    console.log(`[ROUTER] intent=${route.intent}; tools=${route.tools.join(",") || "none"}; reason=${route.reason}`);
-    return route;
-  } catch (error) {
-    const reason = `Router lỗi hoặc trả JSON không hợp lệ: ${
-      error instanceof Error ? error.message : "unknown error"
-    }`;
-    console.log(
-      `[ROUTER] Fallback: ${reason}`
-    );
-    return fallbackRouteFromMessage(userMessage, reason);
-  }
-}
-
-function toolsForRoute(route: RouteDecision): ToolDefinition[] {
-  if (!route.needs_tools || route.tools.length === 0) return [];
-  return TOOLS.filter(tool => route.tools.includes(tool.name as ToolName));
-}
-
-function buildRouterContext(route: RouteDecision, selectedTools: ToolDefinition[]): string {
-  const selectedToolNames = selectedTools.map(tool => tool.name);
-  const guidance: string[] = [
-    "Chỉ dùng các công cụ đã được bật trong lượt này. Nếu không có công cụ nào được bật, hãy trả lời trực tiếp."
-  ];
-
-  if (route.tools.includes("rag_search")) {
-    guidance.push(
-      `Router đã xác định câu hỏi cần tra cứu tài liệu Zilcode. Hãy gọi rag_search trước khi trả lời; ưu tiên query: ${route.search_query ?? "tự viết query bám sát câu hỏi người dùng"}.`
-    );
-  }
-
-  if (route.tools.includes("get_screen_context")) {
-    guidance.push("Router đã xác định cần ngữ cảnh UI. Hãy gọi get_screen_context trước khi phân tích đối tượng hiện tại.");
-  }
-
-  if (route.tools.includes("get_workflow")) {
-    guidance.push("Router đã xác định có thể cần dữ liệu workflow. Chỉ gọi get_workflow khi có workflow ID hoặc sau khi lấy được resource_id từ ngữ cảnh màn hình.");
-  }
-
-  return [
-    "Quyết định router cho lượt này:",
-    `- intent: ${route.intent}`,
-    `- needs_tools: ${route.needs_tools}`,
-    `- tools được bật: ${selectedToolNames.length ? selectedToolNames.join(", ") : "không có"}`,
-    `- search_query gợi ý: ${route.search_query ?? "không có"}`,
-    `- lý do: ${route.reason}`,
-    ...guidance
-  ].join("\n");
-}
 
 async function runAgenticLoop(
   userMessage: string,
   env: Env,
   screenContext?: ScreenContext
-): Promise<{ answer: string; toolsCalled: string[]; route: RouteDecision }> {
-
-  const route = await routeMessage(userMessage, env);
-  const selectedTools = toolsForRoute(route);
-  const routerContext = buildRouterContext(route, selectedTools);
+): Promise<{ answer: string; toolsCalled: string[] }> {
 
   const messages: AIMessage[] = [
     {
       role: "system",
       content: `Bạn là trợ lý AI hội thoại và trợ lý hỗ trợ nền tảng Zilcode.
-Bạn có thể trả lời trực tiếp bằng kiến thức chung và khả năng hội thoại của mình. Bạn không bị giới hạn trong các công cụ được cung cấp.
 Hãy trả lời bằng cùng ngôn ngữ với người hỏi. Nếu người hỏi yêu cầu một ngôn ngữ hoặc phong cách cụ thể, hãy làm theo yêu cầu đó.
-Nếu người dùng chào hỏi, cảm ơn, trò chuyện thông thường, hoặc hỏi câu không cần dữ liệu Zilcode, hãy trả lời tự nhiên và không nói rằng nhiệm vụ nằm ngoài phạm vi công cụ.
-Công cụ chỉ là nguồn bổ sung khi cần dữ liệu cụ thể. Trước khi gọi công cụ, hãy tự hỏi: mình có thể trả lời tốt mà không cần công cụ không? Nếu có, hãy trả lời trực tiếp.
+Bạn có các công cụ để xử lý từng loại yêu cầu. Hãy chọn công cụ phù hợp nhất thay vì nói rằng yêu cầu nằm ngoài phạm vi công cụ.
+Dùng general_chat cho chào hỏi, cảm ơn, trò chuyện thông thường, hỏi bạn là ai/có thể làm gì, câu hỏi kiến thức chung, hoặc câu hỏi không liên quan đến Zilcode.
 Chỉ dùng rag_search khi câu hỏi cần thông tin cụ thể từ tài liệu Zilcode, ví dụ tính năng, khái niệm, hướng dẫn thao tác, hoặc cách sử dụng Zilcode.
 Khi dùng rag_search, thường chỉ gọi một lần với query tổng hợp tốt. Chỉ gọi lại nếu kết quả chưa đủ và query mới khác rõ ràng về ý định hoặc phạm vi; không gọi lại cùng query hoặc query tương đương.
 Chỉ dùng get_screen_context khi người dùng hỏi về đối tượng đang hiển thị/được chọn trong UI và câu trả lời phụ thuộc vào màn hình/node/tài nguyên hiện tại. Không dùng get_screen_context chỉ vì người dùng đang chat.
 Chỉ dùng get_workflow khi có workflow ID rõ ràng hoặc sau khi có screen context cho thấy tài nguyên hiện tại là workflow cần phân tích.
-Với câu hỏi ngoài phạm vi Zilcode, hãy trả lời như một trợ lý thông thường.
-Sau khi đã có đủ thông tin từ công cụ, hãy trả lời ngay thay vì tiếp tục gọi thêm công cụ.
+Với câu hỏi ngoài phạm vi Zilcode, hãy dùng general_chat.
+Sau khi đã có đủ thông tin từ công cụ, hãy trả lời ngay thay vì tiếp tục gọi thêm công cụ. Nếu general_chat đã trả lời, hãy dùng nội dung đó làm cơ sở cho câu trả lời cuối cùng.
 Khi đã dùng rag_search nhưng không tìm thấy thông tin phù hợp, hãy nói rõ là chưa tìm thấy trong tài liệu hiện có thay vì bịa nội dung.
-Trả lời ngắn gọn, cụ thể, ưu tiên các bước thao tác rõ ràng.
-
-${routerContext}`
+Trả lời ngắn gọn, cụ thể, ưu tiên các bước thao tác rõ ràng.`
     },
     {
       role: "user",
@@ -504,21 +267,12 @@ ${routerContext}`
 
   const toolsCalled: string[] = [];
 
-  if (selectedTools.length === 0) {
-    const response = await env.AI.run(CHAT_MODEL, { messages }) as { response?: string };
-    return {
-      answer: response.response ?? "Không tạo được câu trả lời.",
-      toolsCalled,
-      route
-    };
-  }
-
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     console.log(`[VÒNG LẶP] Lần ${i + 1}`);
 
     const response = await env.AI.run(CHAT_MODEL, {
       messages,
-      tools: selectedTools
+      tools: TOOLS
     }) as {
       response?: string;
       tool_calls?: Array<{
@@ -532,10 +286,11 @@ ${routerContext}`
       console.log(`[VÒNG LẶP] Không có tool call, trả về câu trả lời cuối cùng`);
       return {
         answer: response.response ?? "Không tạo được câu trả lời.",
-        toolsCalled,
-        route
+        toolsCalled
       };
     }
+
+    let generalChatResult: string | null = null;
 
     for (const toolCall of response.tool_calls) {
       console.log(`[CÔNG CỤ] Gọi: ${toolCall.name}`, toolCall.arguments);
@@ -562,13 +317,39 @@ ${routerContext}`
         tool_call_id: toolCall.id ?? toolCall.name,
         content: toolResult
       });
+
+      if (toolCall.name === "general_chat") {
+        generalChatResult = toolResult;
+      }
+    }
+
+    if (generalChatResult) {
+      const finalResponse = await env.AI.run(CHAT_MODEL, {
+        messages: [
+          {
+            role: "system",
+            content: `Bạn là trợ lý AI hội thoại.
+Hãy trả lời cuối cùng bằng cùng ngôn ngữ với người hỏi.
+Dựa trên nội dung từ general_chat, trả lời tự nhiên và không nhắc đến tool/function nội bộ.`
+          },
+          { role: "user", content: userMessage },
+          {
+            role: "assistant",
+            content: `Nội dung từ general_chat:\n${generalChatResult}`
+          }
+        ]
+      }) as { response?: string };
+
+      return {
+        answer: finalResponse.response ?? "Không tạo được câu trả lời.",
+        toolsCalled
+      };
     }
   }
 
   return {
     answer: "Đã đạt số vòng gọi công cụ tối đa nhưng chưa tạo được câu trả lời cuối cùng.",
-    toolsCalled,
-    route
+    toolsCalled
   };
 }
 
@@ -605,7 +386,7 @@ export default {
           );
         }
 
-        const { answer, toolsCalled, route } = await runAgenticLoop(
+        const { answer, toolsCalled } = await runAgenticLoop(
           body.message,
           env,
           body.context
@@ -614,14 +395,7 @@ export default {
         return Response.json({
           success: true,
           response: answer,
-          tools_called: toolsCalled,
-          route: {
-            intent: route.intent,
-            needs_tools: route.needs_tools,
-            tools: route.tools,
-            search_query: route.search_query,
-            reason: route.reason
-          }
+          tools_called: toolsCalled
         }, { headers: CORS });
 
       } catch (error) {
