@@ -7,6 +7,7 @@ export interface Env {
   ZILCODE_API_TOKEN: string;
   OPENROUTER_API_KEY?: string;
   OPENROUTER_MODEL?: string;
+  OPENROUTER_EMBEDDING_MODEL?: string;
 }
 
 // ─── Models ───────────────────────────────────────────────────────────────────
@@ -26,6 +27,7 @@ const RAG_VECTOR_TOP_K = 10;
 const RAG_MAX_CONTEXT_CHUNKS = 4;
 const RAG_MIN_SCORE = 0.35;
 const RAG_RERANK_TEXT_MAX_CHARS = 900;
+const RAG_VECTOR_DIMENSIONS = 1024;
 
  // ─── CORS ─────────────────────────────────────────────────────────────────────
 
@@ -362,6 +364,83 @@ async function runChatModel(
   }
 }
 
+async function callOpenRouterEmbedding(
+  text: string,
+  env: Env
+): Promise<number[]> {
+  if (!env.OPENROUTER_API_KEY || !env.OPENROUTER_MODEL) {
+    throw new Error("Thiếu OPENROUTER_API_KEY hoặc OPENROUTER_MODEL để fallback embedding sang OpenRouter.");
+  }
+
+  const model = env.OPENROUTER_EMBEDDING_MODEL ?? env.OPENROUTER_MODEL;
+  const response = await fetch("https://openrouter.ai/api/v1/embeddings", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
+      "Content-Type": "application/json",
+      "HTTP-Referer": "https://ragorit.daovanda2405.workers.dev",
+      "X-Title": "Ragorit Zilcode RAG Chatbot"
+    },
+    body: JSON.stringify({
+      model,
+      input: text,
+      dimensions: RAG_VECTOR_DIMENSIONS
+    })
+  });
+
+  const responseText = await response.text();
+  let data: unknown;
+  try {
+    data = responseText ? JSON.parse(responseText) : {};
+  } catch {
+    data = { error: responseText };
+  }
+
+  if (!response.ok) {
+    throw new Error(`OpenRouter Embeddings API lỗi ${response.status}: ${getErrorText(data)}`);
+  }
+
+  const payload = data as {
+    data?: Array<{
+      embedding?: number[];
+    }>;
+  };
+  const embedding = payload.data?.[0]?.embedding;
+
+  if (!embedding?.length) {
+    throw new Error("OpenRouter Embeddings API không trả về embedding.");
+  }
+
+  if (embedding.length !== RAG_VECTOR_DIMENSIONS) {
+    throw new Error(
+      `Embedding OpenRouter có ${embedding.length} chiều, nhưng Vectorize index hiện tại cần ${RAG_VECTOR_DIMENSIONS} chiều. Cần dùng embedding model hỗ trợ dimensions=${RAG_VECTOR_DIMENSIONS} hoặc tạo lại Vectorize index và ingest lại.`
+    );
+  }
+
+  return embedding;
+}
+
+async function embedQuery(
+  text: string,
+  env: Env
+): Promise<number[]> {
+  try {
+    const embeddingResult = await env.AI.run(
+      EMBEDDING_MODEL,
+      { text: [text] }
+    ) as { data: number[][] };
+
+    return embeddingResult.data[0];
+  } catch (error) {
+    if (isCloudflareNeuronQuotaError(error)) {
+      console.log("[EMBEDDING_MODEL] Cloudflare quota error, fallback embedding sang OpenRouter");
+      return callOpenRouterEmbedding(text, env);
+    }
+
+    throw error;
+  }
+}
+
 async function generateChartImage(
   args: Record<string, unknown>,
   env: Env
@@ -534,12 +613,7 @@ async function searchRag(
   query: string,
   env: Env
 ): Promise<ToolExecutionResult> {
-  const embeddingResult = await env.AI.run(
-    EMBEDDING_MODEL,
-    { text: [query] }
-  ) as { data: number[][] };
-
-  const queryVector = embeddingResult.data[0];
+  const queryVector = await embedQuery(query, env);
 
   const matches = await env.VECTORIZE.query(queryVector, {
     topK: RAG_VECTOR_TOP_K,
