@@ -5,6 +5,8 @@ export interface Env {
   VECTORIZE: VectorizeIndex;
   CHUNKS: KVNamespace;
   ZILCODE_API_TOKEN: string;
+  OPENROUTER_API_KEY?: string;
+  OPENROUTER_MODEL?: string;
 }
 
 // ─── Models ───────────────────────────────────────────────────────────────────
@@ -150,6 +152,28 @@ interface RagCandidate extends StoredChunk {
   source_label: string;
 }
 
+interface ChatModelRequest {
+  messages: AIMessage[];
+  max_tokens?: number;
+  temperature?: number;
+  tools?: typeof TOOLS;
+}
+
+interface ChatModelResponse {
+  response?: string;
+  tool_calls?: Array<{
+    name: string;
+    arguments: Record<string, unknown>;
+    id?: string;
+  }>;
+}
+
+interface OpenRouterMessage {
+  role: "system" | "user" | "assistant" | "tool";
+  content: string;
+  tool_call_id?: string;
+}
+
 function getStringArg(args: Record<string, unknown>, name: string): string {
   const value = args[name];
   return typeof value === "string" ? value.trim() : "";
@@ -173,6 +197,169 @@ function buildChartPrompt(prompt: string): string {
     "Phong cách: hiện đại, chuyên nghiệp, nền sáng, màu sắc cân bằng.",
     "Nếu có chữ trong ảnh, dùng tiếng Việt tự nhiên và giữ nhãn ngắn gọn."
   ].join("\n");
+}
+
+function getErrorText(error: unknown): string {
+  if (error instanceof Error) return `${error.name}: ${error.message}`;
+
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
+function isCloudflareNeuronQuotaError(error: unknown): boolean {
+  const text = getErrorText(error).toLowerCase();
+  return text.includes("4006")
+    || text.includes("daily free allocation")
+    || text.includes("neurons");
+}
+
+function isCloudflareNeuronQuotaResult(result: unknown): boolean {
+  const text = getErrorText(result).toLowerCase();
+  return text.includes("4006")
+    && (text.includes("daily free allocation") || text.includes("neurons"));
+}
+
+function normalizeMessagesForOpenRouter(messages: AIMessage[]): OpenRouterMessage[] {
+  return messages.map(message => {
+    if (message.role === "tool") {
+      return {
+        role: "user",
+        content: `Kết quả công cụ${message.tool_call_id ? ` (${message.tool_call_id})` : ""}:\n${message.content}`
+      };
+    }
+
+    return {
+      role: message.role,
+      content: message.content
+    };
+  });
+}
+
+function toOpenRouterTools(tools?: typeof TOOLS) {
+  if (!tools) return undefined;
+  return tools.map(tool => ({
+    type: "function",
+    function: {
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters
+    }
+  }));
+}
+
+function parseToolArguments(rawArguments: unknown): Record<string, unknown> {
+  if (typeof rawArguments === "string") {
+    try {
+      return JSON.parse(rawArguments) as Record<string, unknown>;
+    } catch {
+      return {};
+    }
+  }
+
+  if (rawArguments && typeof rawArguments === "object") {
+    return rawArguments as Record<string, unknown>;
+  }
+
+  return {};
+}
+
+function normalizeOpenRouterResponse(data: unknown): ChatModelResponse {
+  const payload = data as {
+    choices?: Array<{
+      message?: {
+        content?: string | null;
+        tool_calls?: Array<{
+          id?: string;
+          function?: {
+            name?: string;
+            arguments?: unknown;
+          };
+        }>;
+      };
+    }>;
+  };
+
+  const message = payload.choices?.[0]?.message;
+  const toolCalls = message?.tool_calls
+    ?.map(toolCall => ({
+      id: toolCall.id,
+      name: toolCall.function?.name ?? "",
+      arguments: parseToolArguments(toolCall.function?.arguments)
+    }))
+    .filter(toolCall => toolCall.name);
+
+  return {
+    response: message?.content ?? undefined,
+    tool_calls: toolCalls?.length ? toolCalls : undefined
+  };
+}
+
+async function callOpenRouterChat(
+  request: ChatModelRequest,
+  env: Env
+): Promise<ChatModelResponse> {
+  if (!env.OPENROUTER_API_KEY || !env.OPENROUTER_MODEL) {
+    throw new Error("Thiếu OPENROUTER_API_KEY hoặc OPENROUTER_MODEL để fallback sang OpenRouter.");
+  }
+
+  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
+      "Content-Type": "application/json",
+      "HTTP-Referer": "https://ragorit.daovanda2405.workers.dev",
+      "X-Title": "Ragorit Zilcode RAG Chatbot"
+    },
+    body: JSON.stringify({
+      model: env.OPENROUTER_MODEL,
+      messages: normalizeMessagesForOpenRouter(request.messages),
+      tools: toOpenRouterTools(request.tools),
+      tool_choice: request.tools ? "auto" : undefined,
+      max_tokens: request.max_tokens,
+      temperature: request.temperature
+    })
+  });
+
+  const responseText = await response.text();
+  let data: unknown;
+  try {
+    data = responseText ? JSON.parse(responseText) : {};
+  } catch {
+    data = { error: responseText };
+  }
+
+  if (!response.ok) {
+    throw new Error(`OpenRouter API lỗi ${response.status}: ${getErrorText(data)}`);
+  }
+
+  return normalizeOpenRouterResponse(data);
+}
+
+async function runChatModel(
+  cfModel: string,
+  request: ChatModelRequest,
+  env: Env
+): Promise<ChatModelResponse> {
+  try {
+    const result = await env.AI.run(
+      cfModel as string & {},
+      request as unknown as Record<string, unknown>
+    ) as ChatModelResponse;
+    if (isCloudflareNeuronQuotaResult(result)) {
+      console.log("[CHAT_MODEL] Cloudflare quota result, fallback sang OpenRouter");
+      return callOpenRouterChat(request, env);
+    }
+    return result;
+  } catch (error) {
+    if (isCloudflareNeuronQuotaError(error)) {
+      console.log("[CHAT_MODEL] Cloudflare quota error, fallback sang OpenRouter");
+      return callOpenRouterChat(request, env);
+    }
+    throw error;
+  }
 }
 
 async function generateChartImage(
@@ -291,7 +478,7 @@ async function rerankRagCandidates(
     text: truncateForRerank(candidate.text)
   }));
 
-  const response = await env.AI.run(CHAT_MODEL, {
+  const response = await runChatModel(CHAT_MODEL, {
     max_tokens: RAG_RERANK_MAX_TOKENS,
     temperature: 0,
     messages: [
@@ -311,7 +498,7 @@ Schema: {"ranked_ids":["chunk-id-1","chunk-id-2"]}`
         })
       }
     ]
-  }) as { response?: string };
+  }, env);
 
   const parsed = extractJsonObject(response.response ?? "");
   const rankedIds = getStringArray(parsed?.ranked_ids);
@@ -422,7 +609,7 @@ async function executeTool(
       const message = getStringArg(tool.arguments, "message");
       if (!message) return { content: "Lỗi: bắt buộc phải có tin nhắn để trả lời." };
 
-      const response = await env.AI.run(GENERAL_CHAT_MODEL, {
+      const response = await runChatModel(GENERAL_CHAT_MODEL, {
         max_tokens: GENERAL_CHAT_MAX_TOKENS,
         messages: [
           {
@@ -435,7 +622,7 @@ Trả lời ngắn gọn, tự nhiên, không nhắc đến function/tool nội 
           },
           { role: "user", content: message }
         ]
-      }) as { response?: string };
+      }, env);
 
       return { content: response.response ?? "Không tạo được câu trả lời." };
     }
@@ -576,7 +763,7 @@ async function createFinalAnswerFromRag(
   toolResults: ToolResultRecord[],
   env: Env
 ): Promise<string> {
-  const response = await env.AI.run(CHAT_MODEL, {
+  const response = await runChatModel(CHAT_MODEL, {
     max_tokens: RAG_FINAL_MAX_TOKENS,
     temperature: 0.2,
     messages: [
@@ -597,7 +784,7 @@ Trả lời đúng mức chi tiết theo yêu cầu của người dùng. Nếu 
         content: `Ngữ cảnh từ các công cụ:\n${formatToolResultsForFinalAnswer(toolResults)}`
       }
     ]
-  }) as { response?: string };
+  }, env);
 
   return cleanMarkdownArtifacts(response.response ?? "Không tạo được câu trả lời.");
 }
@@ -641,18 +828,11 @@ Trả lời đúng mức chi tiết theo yêu cầu của người dùng, cụ t
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     console.log(`[VÒNG LẶP] Lần ${i + 1}`);
 
-    const response = await env.AI.run(CHAT_MODEL, {
+    const response = await runChatModel(CHAT_MODEL, {
       max_tokens: TOOL_SELECTION_MAX_TOKENS,
       messages,
       tools: TOOLS
-    }) as {
-      response?: string;
-      tool_calls?: Array<{
-        name: string;
-        arguments: Record<string, unknown>;
-        id?: string;
-      }>;
-    };
+    }, env);
 
     if (!response.tool_calls || response.tool_calls.length === 0) {
       console.log(`[VÒNG LẶP] Không có tool call, trả về câu trả lời cuối cùng`);
@@ -734,7 +914,7 @@ Trả lời đúng mức chi tiết theo yêu cầu của người dùng, cụ t
     }
 
     if (generalChatResult) {
-      const finalResponse = await env.AI.run(CHAT_MODEL, {
+      const finalResponse = await runChatModel(CHAT_MODEL, {
         max_tokens: GENERAL_CHAT_MAX_TOKENS,
         messages: [
           {
@@ -749,7 +929,7 @@ Dựa trên nội dung từ general_chat, trả lời tự nhiên và không nh�
             content: `Nội dung từ general_chat:\n${generalChatResult}`
           }
         ]
-      }) as { response?: string };
+      }, env);
 
       return {
         answer: finalResponse.response ?? "Không tạo được câu trả lời.",
