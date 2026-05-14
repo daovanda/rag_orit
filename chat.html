@@ -274,6 +274,33 @@
     margin-top: 8px;
   }
 
+  .sources {
+    margin-top: 8px;
+    display: grid;
+    gap: 6px;
+    max-width: min(100%, 640px);
+  }
+
+  .source-item {
+    border: 0.5px solid #e0e0dc;
+    border-radius: 8px;
+    background: #fbfbfa;
+    padding: 8px 10px;
+    font-size: 12px;
+    color: #555;
+  }
+
+  .source-item strong {
+    display: block;
+    color: #1a1a1a;
+    font-size: 12px;
+    margin-bottom: 2px;
+  }
+
+  .source-meta {
+    color: #888;
+  }
+
   .timestamp {
     font-size: 11px;
     color: #bbb;
@@ -363,7 +390,7 @@
     return new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' });
   }
 
-  function appendMessage(role, content, tools = [], images = []) {
+  function appendMessage(role, content, tools = [], images = [], sources = []) {
     const empty = document.getElementById('emptyState');
     if (empty) empty.remove();
 
@@ -397,6 +424,33 @@
         img.alt = image.prompt || 'Generated chart';
         msg.appendChild(img);
       });
+    }
+
+    if (role === 'assistant' && Array.isArray(sources) && sources.length > 0) {
+      const sourceList = document.createElement('div');
+      sourceList.className = 'sources';
+      sources.forEach(source => {
+        const item = document.createElement('div');
+        item.className = 'source-item';
+
+        const title = document.createElement('strong');
+        title.textContent = source.title || source.module || source.id;
+        item.appendChild(title);
+
+        const meta = document.createElement('div');
+        meta.className = 'source-meta';
+        const score = typeof source.vector_score === 'number'
+          ? `score ${source.vector_score.toFixed(3)}`
+          : 'score n/a';
+        const rank = source.rerank_rank ? `rank ${source.rerank_rank}` : 'rank n/a';
+        meta.textContent = [source.section_path || source.heading, score, rank]
+          .filter(Boolean)
+          .join(' · ');
+        item.appendChild(meta);
+
+        sourceList.appendChild(item);
+      });
+      msg.appendChild(sourceList);
     }
 
     const ts = document.createElement('div');
@@ -476,7 +530,7 @@
       const data = await res.json();
 
       if (data.success) {
-        appendMessage('assistant', data.response, data.tools_called || [], data.images || []);
+        appendMessage('assistant', data.response, data.tools_called || [], data.images || [], data.sources || []);
       } else {
         const msg = document.createElement('div');
         msg.className = 'msg assistant';

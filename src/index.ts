@@ -17,10 +17,15 @@ const CHART_IMAGE_MODEL = "@cf/black-forest-labs/flux-2-dev";
 const TOOL_SELECTION_MAX_TOKENS = 512;
 const GENERAL_CHAT_MAX_TOKENS = 1024;
 const RAG_FINAL_MAX_TOKENS = 2048;
+const RAG_RERANK_MAX_TOKENS = 512;
 const DEFAULT_CHART_WIDTH = 1024;
 const DEFAULT_CHART_HEIGHT = 768;
+const RAG_VECTOR_TOP_K = 10;
+const RAG_MAX_CONTEXT_CHUNKS = 4;
+const RAG_MIN_SCORE = 0.35;
+const RAG_RERANK_TEXT_MAX_CHARS = 900;
 
-// ─── CORS ─────────────────────────────────────────────────────────────────────
+ // ─── CORS ─────────────────────────────────────────────────────────────────────
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -117,6 +122,34 @@ interface ToolCall {
   arguments: Record<string, unknown>;
 }
 
+interface ToolExecutionResult {
+  content: string;
+  sources?: RagSource[];
+}
+
+interface VectorMatch {
+  id: string;
+  score?: number;
+}
+
+interface StoredChunk {
+  text: string;
+  module: string;
+  filename?: string;
+  title?: string;
+  doc_type?: string;
+  audience?: string;
+  heading: string;
+  section_path?: string;
+}
+
+interface RagCandidate extends StoredChunk {
+  id: string;
+  vector_score?: number;
+  rerank_rank?: number;
+  source_label: string;
+}
+
 function getStringArg(args: Record<string, unknown>, name: string): string {
   const value = args[name];
   return typeof value === "string" ? value.trim() : "";
@@ -191,17 +224,203 @@ async function generateChartImage(
   };
 }
 
+function formatScore(score?: number): string {
+  return typeof score === "number" ? score.toFixed(3) : "không có";
+}
+
+function truncateForRerank(text: string): string {
+  if (text.length <= RAG_RERANK_TEXT_MAX_CHARS) return text;
+  return `${text.slice(0, RAG_RERANK_TEXT_MAX_CHARS).trim()}...`;
+}
+
+function getSourceLabel(chunk: StoredChunk): string {
+  return [
+    chunk.title ?? chunk.module,
+    chunk.audience,
+    chunk.section_path ?? chunk.heading
+  ].filter(Boolean).join(" | ");
+}
+
+function toRagSource(candidate: RagCandidate): RagSource {
+  return {
+    id: candidate.id,
+    title: candidate.title ?? candidate.module,
+    filename: candidate.filename,
+    module: candidate.module,
+    audience: candidate.audience,
+    section_path: candidate.section_path ?? candidate.heading,
+    heading: candidate.heading,
+    vector_score: candidate.vector_score,
+    rerank_rank: candidate.rerank_rank
+  };
+}
+
+function extractJsonObject(text: string): Record<string, unknown> | null {
+  const cleaned = text.replace(/```json|```/g, "").trim();
+  const start = cleaned.indexOf("{");
+  const end = cleaned.lastIndexOf("}");
+  if (start < 0 || end <= start) return null;
+
+  try {
+    return JSON.parse(cleaned.slice(start, end + 1)) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function getStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string");
+}
+
+function sortByVectorScore(candidates: RagCandidate[]): RagCandidate[] {
+  return [...candidates].sort((a, b) => (b.vector_score ?? -Infinity) - (a.vector_score ?? -Infinity));
+}
+
+async function rerankRagCandidates(
+  query: string,
+  candidates: RagCandidate[],
+  env: Env
+): Promise<RagCandidate[]> {
+  if (candidates.length === 0) return [];
+
+  const rerankPayload = candidates.map(candidate => ({
+    id: candidate.id,
+    source: candidate.source_label,
+    vector_score: candidate.vector_score,
+    text: truncateForRerank(candidate.text)
+  }));
+
+  const response = await env.AI.run(CHAT_MODEL, {
+    max_tokens: RAG_RERANK_MAX_TOKENS,
+    temperature: 0,
+    messages: [
+      {
+        role: "system",
+        content: `Bạn là bộ rerank tài liệu cho chatbot RAG Zilcode.
+Nhiệm vụ: xếp hạng các chunk theo mức liên quan với câu hỏi người dùng.
+Ưu tiên chunk trả lời trực tiếp câu hỏi, đúng đối tượng người dùng/quản trị, và có nội dung thao tác cụ thể.
+Chỉ trả về JSON hợp lệ, không giải thích thêm.
+Schema: {"ranked_ids":["chunk-id-1","chunk-id-2"]}`
+      },
+      {
+        role: "user",
+        content: JSON.stringify({
+          question: query,
+          candidates: rerankPayload
+        })
+      }
+    ]
+  }) as { response?: string };
+
+  const parsed = extractJsonObject(response.response ?? "");
+  const rankedIds = getStringArray(parsed?.ranked_ids);
+
+  if (!rankedIds.length) {
+    return sortByVectorScore(candidates)
+      .slice(0, RAG_MAX_CONTEXT_CHUNKS)
+      .map((candidate, index) => ({ ...candidate, rerank_rank: index + 1 }));
+  }
+
+  const candidateById = new Map(candidates.map(candidate => [candidate.id, candidate]));
+  const ordered: RagCandidate[] = [];
+
+  for (const id of rankedIds) {
+    const candidate = candidateById.get(id);
+    if (candidate && !ordered.some(item => item.id === id)) {
+      ordered.push(candidate);
+    }
+  }
+
+  for (const candidate of sortByVectorScore(candidates)) {
+    if (!ordered.some(item => item.id === candidate.id)) {
+      ordered.push(candidate);
+    }
+  }
+
+  return ordered
+    .slice(0, RAG_MAX_CONTEXT_CHUNKS)
+    .map((candidate, index) => ({ ...candidate, rerank_rank: index + 1 }));
+}
+
+async function searchRag(
+  query: string,
+  env: Env
+): Promise<ToolExecutionResult> {
+  const embeddingResult = await env.AI.run(
+    EMBEDDING_MODEL,
+    { text: [query] }
+  ) as { data: number[][] };
+
+  const queryVector = embeddingResult.data[0];
+
+  const matches = await env.VECTORIZE.query(queryVector, {
+    topK: RAG_VECTOR_TOP_K,
+    returnMetadata: "all"
+  });
+
+  const vectorMatches = matches.matches as VectorMatch[];
+  if (!vectorMatches.length) {
+    return { content: "Không tìm thấy tài liệu liên quan." };
+  }
+
+  const filteredMatches = vectorMatches.filter(match =>
+    typeof match.score !== "number" || match.score >= RAG_MIN_SCORE
+  );
+
+  if (!filteredMatches.length) {
+    return {
+      content: `Không tìm thấy tài liệu đủ liên quan. Điểm liên quan cao nhất là ${formatScore(vectorMatches[0]?.score)}, thấp hơn ngưỡng ${RAG_MIN_SCORE}.`
+    };
+  }
+
+  const candidates: RagCandidate[] = [];
+  for (const match of filteredMatches) {
+    const raw = await env.CHUNKS.get(`chunk:${match.id}`);
+    if (!raw) continue;
+
+    const chunk = JSON.parse(raw) as StoredChunk;
+    candidates.push({
+      ...chunk,
+      id: match.id,
+      vector_score: match.score,
+      source_label: getSourceLabel(chunk)
+    });
+  }
+
+  if (!candidates.length) {
+    return { content: "Không tìm thấy nội dung chunk tương ứng trong KV." };
+  }
+
+  const reranked = await rerankRagCandidates(query, candidates, env);
+  const content = reranked
+    .map((candidate, index) => [
+      `[Nguồn ${index + 1}: ${candidate.source_label}]`,
+      `ID: ${candidate.id}`,
+      `Điểm Vectorize: ${formatScore(candidate.vector_score)}`,
+      `Thứ hạng rerank: ${candidate.rerank_rank ?? index + 1}`,
+      "",
+      candidate.text
+    ].join("\n"))
+    .join("\n\n---\n\n");
+
+  return {
+    content,
+    sources: reranked.map(toRagSource)
+  };
+}
+
 async function executeTool(
   tool: ToolCall,
   env: Env,
   screenContext?: ScreenContext
-): Promise<string> {
+): Promise<ToolExecutionResult> {
 
   switch (tool.name) {
 
     case "general_chat": {
       const message = getStringArg(tool.arguments, "message");
-      if (!message) return "Lỗi: bắt buộc phải có tin nhắn để trả lời.";
+      if (!message) return { content: "Lỗi: bắt buộc phải có tin nhắn để trả lời." };
 
       const response = await env.AI.run(GENERAL_CHAT_MODEL, {
         max_tokens: GENERAL_CHAT_MAX_TOKENS,
@@ -218,59 +437,18 @@ Trả lời ngắn gọn, tự nhiên, không nhắc đến function/tool nội 
         ]
       }) as { response?: string };
 
-      return response.response ?? "Không tạo được câu trả lời.";
+      return { content: response.response ?? "Không tạo được câu trả lời." };
     }
 
     case "rag_search": {
       const query = getStringArg(tool.arguments, "query");
-      if (!query) return "Lỗi: bắt buộc phải có câu truy vấn.";
-
-      const embeddingResult = await env.AI.run(
-        EMBEDDING_MODEL,
-        { text: [query] }
-      ) as { data: number[][] };
-
-      const queryVector = embeddingResult.data[0];
-
-      const matches = await env.VECTORIZE.query(queryVector, {
-        topK: 6,
-        returnMetadata: "all"
-      });
-
-      if (!matches.matches.length) {
-        return "Không tìm thấy tài liệu liên quan.";
-      }
-
-      const results: string[] = [];
-      for (const match of matches.matches) {
-        const raw = await env.CHUNKS.get(`chunk:${match.id}`);
-        if (raw) {
-          const chunk = JSON.parse(raw) as {
-            text: string;
-            module: string;
-            title?: string;
-            doc_type?: string;
-            audience?: string;
-            heading: string;
-            section_path?: string;
-          };
-          const source = [
-            chunk.title ?? chunk.module,
-            chunk.audience,
-            chunk.section_path ?? chunk.heading
-          ].filter(Boolean).join(" | ");
-          results.push(`[Nguồn: ${source}]\n${chunk.text}`);
-        }
-      }
-
-      return results.length
-        ? results.join("\n\n---\n\n")
-        : "Không tìm thấy nội dung chunk tương ứng.";
+      if (!query) return { content: "Lỗi: bắt buộc phải có câu truy vấn." };
+      return searchRag(query, env);
     }
 
     case "get_workflow": {
       const id = getStringArg(tool.arguments, "id");
-      if (!id) return "Lỗi: bắt buộc phải có ID workflow.";
+      if (!id) return { content: "Lỗi: bắt buộc phải có ID workflow." };
 
       // TODO: thay mock bằng API Zilcode thật khi đã có token
       // const res = await fetch(`https://api.zilcode.io/workflows/${id}`, {
@@ -278,7 +456,7 @@ Trả lời ngắn gọn, tự nhiên, không nhắc đến function/tool nội 
       // });
       // return await res.text();
 
-      return JSON.stringify({
+      return { content: JSON.stringify({
         _mock: true,
         id,
         name: `Workflow ${id}`,
@@ -299,23 +477,23 @@ Trả lời ngắn gọn, tự nhiên, không nhắc đến function/tool nội 
           { from: "condition-1", to: "send-mail", branch: "true" },
           { from: "condition-1", to: "end", branch: "false" }
         ]
-      }, null, 2);
+      }, null, 2) };
     }
 
     case "get_screen_context": {
       if (screenContext) {
-        return JSON.stringify(screenContext, null, 2);
+        return { content: JSON.stringify(screenContext, null, 2) };
       }
-      return JSON.stringify({
+      return { content: JSON.stringify({
         _mock: true,
         screen: "workflow-editor",
         selected_node: "condition-1",
         resource_id: "wf-001"
-      }, null, 2);
+      }, null, 2) };
     }
 
     default:
-      return `Không nhận diện được công cụ: ${tool.name}`;
+      return { content: `Không nhận diện được công cụ: ${tool.name}` };
   }
 }
 
@@ -340,10 +518,23 @@ interface GeneratedImage {
   height: number;
 }
 
+interface RagSource {
+  id: string;
+  title?: string;
+  filename?: string;
+  module: string;
+  audience?: string;
+  section_path?: string;
+  heading: string;
+  vector_score?: number;
+  rerank_rank?: number;
+}
+
 interface AgenticLoopResult {
   answer: string;
   toolsCalled: string[];
   images?: GeneratedImage[];
+  sources?: RagSource[];
 }
 
 interface AIMessage {
@@ -444,6 +635,7 @@ Trả lời đúng mức chi tiết theo yêu cầu của người dùng, cụ t
 
   const toolsCalled: string[] = [];
   const toolResults: ToolResultRecord[] = [];
+  const ragSources: RagSource[] = [];
   let hasRagSearchResult = false;
 
   for (let i = 0; i < MAX_ITERATIONS; i++) {
@@ -490,14 +682,19 @@ Trả lời đúng mức chi tiết theo yêu cầu của người dùng, cụ t
         };
       }
 
-      const toolResult = await executeTool(
+      const toolExecution = await executeTool(
         { name: toolCall.name, arguments: toolCall.arguments },
         env,
         screenContext
       );
+      const toolResult = toolExecution.content;
 
       console.log(`[CÔNG CỤ] Độ dài kết quả: ${toolResult.length} ký tự`);
       toolResults.push({ name: toolCall.name, content: toolResult });
+
+      if (toolCall.name === "rag_search" && toolExecution.sources?.length) {
+        ragSources.push(...toolExecution.sources);
+      }
 
       messages.push({
         role: "assistant",
@@ -531,7 +728,8 @@ Trả lời đúng mức chi tiết theo yêu cầu của người dùng, cụ t
 
       return {
         answer: finalAnswer,
-        toolsCalled
+        toolsCalled,
+        sources: ragSources
       };
     }
 
@@ -599,7 +797,7 @@ export default {
           );
         }
 
-        const { answer, toolsCalled, images } = await runAgenticLoop(
+        const { answer, toolsCalled, images, sources } = await runAgenticLoop(
           body.message,
           env,
           body.context
@@ -609,7 +807,8 @@ export default {
           success: true,
           response: answer,
           tools_called: toolsCalled,
-          images
+          images,
+          sources
         }, { headers: CORS });
 
       } catch (error) {

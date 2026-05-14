@@ -1,0 +1,1032 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Báo cáo dự án RAG Chatbot Zilcode</title>
+  <style>
+    :root {
+      --bg: #f6f7f8;
+      --surface: #ffffff;
+      --ink: #172033;
+      --muted: #647084;
+      --line: #dfe4ea;
+      --blue: #2563eb;
+      --green: #059669;
+      --violet: #7c3aed;
+      --amber: #b45309;
+      --soft-blue: #eaf1ff;
+      --soft-green: #e8f7f1;
+      --soft-violet: #f1eaff;
+      --soft-amber: #fff3dc;
+      --shadow: 0 18px 50px rgba(23, 32, 51, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.6;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.92);
+      backdrop-filter: blur(14px);
+    }
+
+    .topbar-inner {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 12px 24px;
+      display: flex;
+      align-items: center;
+      gap: 18px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 760;
+      white-space: nowrap;
+    }
+
+    .brand-mark {
+      width: 32px;
+      height: 32px;
+      display: grid;
+      place-items: center;
+      border-radius: 8px;
+      background: var(--ink);
+      color: white;
+      font-size: 15px;
+    }
+
+    nav {
+      display: flex;
+      gap: 4px;
+      flex: 1;
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+
+    nav::-webkit-scrollbar {
+      display: none;
+    }
+
+    nav a,
+    .print-btn {
+      border: 1px solid transparent;
+      border-radius: 8px;
+      padding: 7px 10px;
+      color: var(--muted);
+      font-size: 13px;
+      white-space: nowrap;
+      background: transparent;
+      cursor: pointer;
+    }
+
+    nav a:hover,
+    .print-btn:hover {
+      color: var(--ink);
+      border-color: var(--line);
+      background: #f8fafc;
+    }
+
+    .page {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 28px 24px 64px;
+    }
+
+    .hero {
+      min-height: 420px;
+      display: grid;
+      grid-template-columns: minmax(0, 1.05fr) minmax(340px, 0.95fr);
+      gap: 32px;
+      align-items: center;
+      padding: 42px 0 30px;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 6px 11px;
+      color: var(--muted);
+      background: var(--surface);
+      font-size: 13px;
+      width: fit-content;
+    }
+
+    h1,
+    h2,
+    h3 {
+      line-height: 1.18;
+      margin: 0;
+      letter-spacing: 0;
+    }
+
+    h1 {
+      margin-top: 18px;
+      font-size: clamp(34px, 5vw, 62px);
+      max-width: 800px;
+    }
+
+    h2 {
+      font-size: clamp(25px, 3vw, 36px);
+    }
+
+    h3 {
+      font-size: 18px;
+    }
+
+    p {
+      margin: 0;
+    }
+
+    .hero-copy {
+      margin-top: 18px;
+      color: var(--muted);
+      font-size: 18px;
+      max-width: 760px;
+    }
+
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 24px;
+    }
+
+    .button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 40px;
+      padding: 0 15px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: var(--surface);
+      font-weight: 650;
+      font-size: 14px;
+    }
+
+    .button.primary {
+      border-color: var(--blue);
+      background: var(--blue);
+      color: white;
+    }
+
+    .hero-panel {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      box-shadow: var(--shadow);
+      padding: 22px;
+    }
+
+    .status-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .metric {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 14px;
+      min-height: 108px;
+      background: #fbfcfe;
+    }
+
+    .metric strong {
+      display: block;
+      font-size: 28px;
+      line-height: 1.05;
+      margin-bottom: 8px;
+    }
+
+    .metric span {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .section {
+      padding: 38px 0;
+      border-top: 1px solid var(--line);
+    }
+
+    .section-head {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 24px;
+      margin-bottom: 20px;
+    }
+
+    .section-head p {
+      color: var(--muted);
+      max-width: 620px;
+    }
+
+    .grid {
+      display: grid;
+      gap: 14px;
+    }
+
+    .grid.cols-2 {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .grid.cols-3 {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 18px;
+    }
+
+    .card p,
+    .card li {
+      color: var(--muted);
+    }
+
+    .card h3 + p,
+    .card h3 + ul {
+      margin-top: 10px;
+    }
+
+    ul,
+    ol {
+      margin: 0;
+      padding-left: 20px;
+    }
+
+    li + li {
+      margin-top: 7px;
+    }
+
+    .tag-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 0 10px;
+      border-radius: 999px;
+      background: #f1f5f9;
+      color: #475569;
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    .tag.blue {
+      background: var(--soft-blue);
+      color: #1d4ed8;
+    }
+
+    .tag.green {
+      background: var(--soft-green);
+      color: #047857;
+    }
+
+    .tag.violet {
+      background: var(--soft-violet);
+      color: #6d28d9;
+    }
+
+    .tag.amber {
+      background: var(--soft-amber);
+      color: #92400e;
+    }
+
+    .diagram {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(130px, 1fr));
+      gap: 10px;
+      overflow-x: auto;
+      padding-bottom: 4px;
+    }
+
+    .step {
+      position: relative;
+      min-height: 118px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--surface);
+      padding: 14px;
+    }
+
+    .step::after {
+      content: "";
+      position: absolute;
+      top: 50%;
+      right: -10px;
+      width: 10px;
+      height: 1px;
+      background: var(--line);
+    }
+
+    .step:last-child::after {
+      display: none;
+    }
+
+    .step-number {
+      width: 26px;
+      height: 26px;
+      border-radius: 7px;
+      display: grid;
+      place-items: center;
+      background: var(--ink);
+      color: white;
+      font-size: 12px;
+      font-weight: 760;
+      margin-bottom: 10px;
+    }
+
+    .step h3 {
+      font-size: 15px;
+      margin-bottom: 7px;
+    }
+
+    .step p {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .flow-lanes {
+      display: grid;
+      gap: 14px;
+    }
+
+    .lane {
+      display: grid;
+      grid-template-columns: 190px minmax(0, 1fr);
+      gap: 12px;
+      align-items: stretch;
+    }
+
+    .lane-title {
+      border-radius: 12px;
+      padding: 16px;
+      color: white;
+      font-weight: 760;
+    }
+
+    .lane-title.blue {
+      background: var(--blue);
+    }
+
+    .lane-title.green {
+      background: var(--green);
+    }
+
+    .lane-title.violet {
+      background: var(--violet);
+    }
+
+    .lane-body {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 16px;
+      color: var(--muted);
+    }
+
+    .arrow-chain {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .pill {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 7px 10px;
+      background: #fbfcfe;
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 650;
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--surface);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 820px;
+    }
+
+    th,
+    td {
+      text-align: left;
+      padding: 13px 14px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+      font-size: 14px;
+    }
+
+    th {
+      background: #f8fafc;
+      color: #334155;
+      font-weight: 760;
+    }
+
+    td {
+      color: var(--muted);
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    code,
+    pre {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    }
+
+    code {
+      background: #eef2f7;
+      border-radius: 5px;
+      padding: 2px 5px;
+      color: #26364d;
+      font-size: 0.92em;
+    }
+
+    pre {
+      margin: 0;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      overflow-x: auto;
+      background: #111827;
+      color: #dbeafe;
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .callout {
+      border-left: 4px solid var(--blue);
+      border-radius: 10px;
+      background: var(--soft-blue);
+      padding: 16px 18px;
+      color: #1e3a8a;
+    }
+
+    .footer {
+      padding: 28px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+      text-align: center;
+    }
+
+    @media (max-width: 900px) {
+      .hero,
+      .grid.cols-2,
+      .grid.cols-3,
+      .lane {
+        grid-template-columns: 1fr;
+      }
+
+      .topbar-inner {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      nav {
+        width: 100%;
+      }
+
+      .section-head {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .status-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media print {
+      body {
+        background: white;
+      }
+
+      .topbar,
+      .hero-actions {
+        display: none;
+      }
+
+      .page {
+        max-width: none;
+        padding: 0;
+      }
+
+      .section,
+      .hero {
+        break-inside: avoid;
+        padding: 22px 0;
+      }
+
+      .card,
+      .hero-panel,
+      .table-wrap,
+      pre,
+      .step,
+      .lane-body {
+        box-shadow: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="#tong-quan">
+        <span class="brand-mark">Z</span>
+        <span>RAG Chatbot Zilcode</span>
+      </a>
+      <nav aria-label="Điều hướng báo cáo">
+        <a href="#muc-tieu">Mục tiêu</a>
+        <a href="#kien-truc">Kiến trúc</a>
+        <a href="#rag">RAG</a>
+        <a href="#tools">Tools</a>
+        <a href="#api">API</a>
+        <a href="#ket-qua">Kết quả</a>
+        <a href="#huong-phat-trien">Hướng phát triển</a>
+      </nav>
+      <button class="print-btn" type="button" onclick="window.print()">In / Xuất PDF</button>
+    </div>
+  </header>
+
+  <main class="page">
+    <section class="hero" id="tong-quan">
+      <div>
+        <div class="eyebrow">Báo cáo bài tập công ty</div>
+        <h1>Chatbot RAG hỗ trợ tra cứu tài liệu Zilcode</h1>
+        <p class="hero-copy">
+          Dự án xây dựng một trợ lý AI chạy trên Cloudflare Worker, có khả năng chat thông thường,
+          tra cứu tài liệu Zilcode bằng RAG, gọi tool theo ngữ cảnh và tạo ảnh biểu đồ/sơ đồ khi người dùng yêu cầu.
+        </p>
+        <div class="hero-actions">
+          <a class="button primary" href="#kien-truc">Xem kiến trúc</a>
+          <a class="button" href="#api">Xem API tích hợp</a>
+        </div>
+      </div>
+
+      <aside class="hero-panel" aria-label="Tóm tắt dự án">
+        <div class="status-grid">
+          <div class="metric">
+            <strong>5</strong>
+            <span>Tool nội bộ: chat, RAG, vẽ biểu đồ, workflow, screen context</span>
+          </div>
+          <div class="metric">
+            <strong>3</strong>
+            <span>Nguồn hạ tầng chính: Worker, Vectorize, KV</span>
+          </div>
+          <div class="metric">
+            <strong>4</strong>
+            <span>Nhóm model: chat, general chat, embedding, image generation</span>
+          </div>
+          <div class="metric">
+            <strong>1</strong>
+            <span>Endpoint chính cho app bên ngoài: <code>POST /chat</code></span>
+          </div>
+        </div>
+      </aside>
+    </section>
+
+    <section class="section" id="muc-tieu">
+      <div class="section-head">
+        <h2>Mục Tiêu Bài Làm</h2>
+        <p>
+          Tạo một chatbot có thể trả lời câu hỏi về Zilcode dựa trên tài liệu nội bộ,
+          đồng thời vẫn giữ khả năng hội thoại bình thường và mở rộng qua tool.
+        </p>
+      </div>
+
+      <div class="grid cols-3">
+        <article class="card">
+          <h3>Tra cứu đúng tài liệu</h3>
+          <p>
+            Tài liệu Markdown được chunk, embed và lưu vào Vectorize/KV để model trả lời dựa trên nội dung đã ingest.
+          </p>
+        </article>
+        <article class="card">
+          <h3>Không ép mọi câu hỏi vào RAG</h3>
+          <p>
+            Câu chào hỏi, câu hỏi ngoài Zilcode hoặc câu hỏi về năng lực trợ lý được xử lý bằng <code>general_chat</code>.
+          </p>
+        </article>
+        <article class="card">
+          <h3>Mở rộng bằng tool</h3>
+          <p>
+            Bổ sung tool <code>draw_chart</code> để tạo ảnh biểu đồ/sơ đồ, và chuẩn bị sẵn mock tool cho workflow/context.
+          </p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="kien-truc">
+      <div class="section-head">
+        <h2>Kiến Trúc Tổng Quan</h2>
+        <p>
+          Worker đóng vai trò backend API và agent orchestrator. Vectorize tìm đoạn tài liệu liên quan,
+          KV lưu nội dung chunk, Workers AI chạy các model.
+        </p>
+      </div>
+
+      <div class="diagram" aria-label="Sơ đồ kiến trúc tổng quan">
+        <div class="step">
+          <div class="step-number">1</div>
+          <h3>Người dùng</h3>
+          <p>Gửi câu hỏi từ <code>chat.html</code> hoặc app bên ngoài.</p>
+        </div>
+        <div class="step">
+          <div class="step-number">2</div>
+          <h3>Worker API</h3>
+          <p>Nhận <code>POST /chat</code>, gọi vòng lặp agentic.</p>
+        </div>
+        <div class="step">
+          <div class="step-number">3</div>
+          <h3>Tool Selection</h3>
+          <p><code>CHAT_MODEL</code> quyết định dùng tool phù hợp.</p>
+        </div>
+        <div class="step">
+          <div class="step-number">4</div>
+          <h3>RAG / Chat / Image</h3>
+          <p>Gọi Vectorize, KV, general chat hoặc Flux tùy yêu cầu.</p>
+        </div>
+        <div class="step">
+          <div class="step-number">5</div>
+          <h3>Tổng hợp</h3>
+          <p>Model tạo câu trả lời cuối, làm sạch Markdown nếu là RAG.</p>
+        </div>
+        <div class="step">
+          <div class="step-number">6</div>
+          <h3>Response</h3>
+          <p>Trả về text, danh sách tool và ảnh nếu có.</p>
+        </div>
+      </div>
+
+      <div class="grid cols-2" style="margin-top: 16px;">
+        <article class="card">
+          <h3>Thành phần chính</h3>
+          <ul>
+            <li><code>src/index.ts</code>: Cloudflare Worker, API, tool definitions, agentic loop.</li>
+            <li><code>scripts/ingest.ts</code>: đọc tài liệu, chunk, embed, upsert vào Vectorize và KV.</li>
+            <li><code>chat.html</code>: giao diện thử nghiệm API, hiển thị text, badge tool và ảnh.</li>
+            <li><code>doc/*.md</code>: nguồn tài liệu tiếng Việt về Zilcode.</li>
+          </ul>
+        </article>
+
+        <article class="card">
+          <h3>Dịch vụ Cloudflare sử dụng</h3>
+          <ul>
+            <li><strong>Workers</strong>: chạy backend serverless.</li>
+            <li><strong>Workers AI</strong>: chạy Llama, BGE-M3 và Flux.</li>
+            <li><strong>Vectorize</strong>: lưu embedding để tìm kiếm ngữ nghĩa.</li>
+            <li><strong>KV Namespace</strong>: lưu nội dung thật của từng chunk tài liệu.</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="rag">
+      <div class="section-head">
+        <h2>Pipeline RAG</h2>
+        <p>
+          RAG được tách thành hai giai đoạn: ingest tài liệu trước, sau đó truy vấn khi người dùng chat.
+        </p>
+      </div>
+
+      <div class="grid cols-2">
+        <article class="card">
+          <h3>Giai đoạn ingest</h3>
+          <ol>
+            <li>Đọc các file <code>doc/*.md</code>.</li>
+            <li>Chuẩn hóa newline, lấy tiêu đề và xác định loại tài liệu.</li>
+            <li>Chunk theo heading Markdown từ <code>#</code> đến <code>######</code>.</li>
+            <li>Nếu section dài hơn 1800 ký tự, chia theo block, câu và overlap 160 ký tự.</li>
+            <li>Embed bằng <code>@cf/baai/bge-m3</code>.</li>
+            <li>Lưu vector vào Vectorize, lưu text chunk vào KV.</li>
+          </ol>
+        </article>
+
+        <article class="card">
+          <h3>Giai đoạn hỏi đáp</h3>
+          <ol>
+            <li>Người dùng hỏi về Zilcode.</li>
+            <li><code>CHAT_MODEL</code> chọn <code>rag_search</code>.</li>
+            <li>Worker embed câu hỏi bằng BGE-M3.</li>
+            <li>Vectorize tìm các chunk gần nghĩa nhất.</li>
+            <li>Worker lấy nội dung chunk từ KV.</li>
+            <li>Model tổng hợp câu trả lời cuối dựa trên tài liệu.</li>
+          </ol>
+        </article>
+      </div>
+
+      <div class="callout" style="margin-top: 16px;">
+        Vectorize không lưu nội dung dài của tài liệu; nó dùng để tìm đúng chunk bằng vector.
+        KV lưu text thật của chunk để model đọc và trả lời. Hai thành phần này kết hợp thành document retrieval layer.
+      </div>
+    </section>
+
+    <section class="section" id="flow">
+      <div class="section-head">
+        <h2>Flow Xử Lý Chat</h2>
+        <p>
+          Vòng lặp hiện tại dùng model chính để chọn tool, nhưng có guard để tránh tool không phù hợp làm mất ngữ cảnh.
+        </p>
+      </div>
+
+      <div class="flow-lanes">
+        <div class="lane">
+          <div class="lane-title blue">Câu hỏi Zilcode</div>
+          <div class="lane-body">
+            Dùng khi người dùng hỏi tài liệu, tính năng, cách dùng hoặc hướng dẫn thao tác trong Zilcode.
+            <div class="arrow-chain">
+              <span class="pill">User message</span>
+              <span class="pill">rag_search</span>
+              <span class="pill">Vectorize</span>
+              <span class="pill">KV chunks</span>
+              <span class="pill">Final answer</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="lane">
+          <div class="lane-title green">Chat thông thường</div>
+          <div class="lane-body">
+            Dùng cho chào hỏi, câu hỏi chung, câu hỏi ngoài phạm vi Zilcode hoặc hỏi trợ lý có thể làm gì.
+            <div class="arrow-chain">
+              <span class="pill">User message</span>
+              <span class="pill">general_chat</span>
+              <span class="pill">Final answer</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="lane">
+          <div class="lane-title violet">Vẽ biểu đồ</div>
+          <div class="lane-body">
+            Dùng khi người dùng yêu cầu tạo sơ đồ, flowchart, timeline, mindmap, dashboard mockup hoặc infographic.
+            <div class="arrow-chain">
+              <span class="pill">User prompt</span>
+              <span class="pill">draw_chart</span>
+              <span class="pill">Flux 2 Dev</span>
+              <span class="pill">Image data URL</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="tools">
+      <div class="section-head">
+        <h2>Models Và Tools</h2>
+        <p>
+          Dự án dùng nhiều model cho từng nhiệm vụ riêng để dễ kiểm soát chất lượng và chi phí.
+        </p>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Nhóm</th>
+              <th>Tên trong code</th>
+              <th>Model / Tool</th>
+              <th>Mục đích</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Chat điều phối</td>
+              <td><code>CHAT_MODEL</code></td>
+              <td><code>@cf/meta/llama-3.3-70b-instruct-fp8-fast</code></td>
+              <td>Chọn tool phù hợp và tổng hợp câu trả lời cuối.</td>
+            </tr>
+            <tr>
+              <td>Chat thường</td>
+              <td><code>GENERAL_CHAT_MODEL</code></td>
+              <td><code>@cf/meta/llama-3.3-70b-instruct-fp8-fast</code></td>
+              <td>Trả lời câu hỏi ngoài RAG, chào hỏi và hội thoại chung.</td>
+            </tr>
+            <tr>
+              <td>Embedding</td>
+              <td><code>EMBEDDING_MODEL</code></td>
+              <td><code>@cf/baai/bge-m3</code></td>
+              <td>Biến query và chunk tài liệu thành vector để search ngữ nghĩa.</td>
+            </tr>
+            <tr>
+              <td>Tạo ảnh</td>
+              <td><code>CHART_IMAGE_MODEL</code></td>
+              <td><code>@cf/black-forest-labs/flux-2-dev</code></td>
+              <td>Tạo ảnh biểu đồ/sơ đồ minh họa khi người dùng yêu cầu.</td>
+            </tr>
+            <tr>
+              <td>Tool</td>
+              <td><code>rag_search</code></td>
+              <td>Vectorize + KV</td>
+              <td>Tra cứu tài liệu Zilcode đã ingest.</td>
+            </tr>
+            <tr>
+              <td>Tool</td>
+              <td><code>get_workflow</code>, <code>get_screen_context</code></td>
+              <td>Mock hiện tại</td>
+              <td>Chuẩn bị hướng tích hợp sâu với app Zilcode thật.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="section" id="api">
+      <div class="section-head">
+        <h2>API Cho App Bên Ngoài</h2>
+        <p>
+          App khác có thể tích hợp qua endpoint chat của Worker. Response có thể chứa text và ảnh.
+        </p>
+      </div>
+
+      <div class="grid cols-2">
+        <div>
+          <pre><code>POST https://ragorit.daovanda2405.workers.dev/chat
+Content-Type: application/json
+
+{
+  "message": "Zilcode là gì?"
+}</code></pre>
+        </div>
+
+        <div>
+          <pre><code>{
+  "success": true,
+  "response": "Zilcode là một nền tảng no-code...",
+  "tools_called": ["rag_search"],
+  "images": []
+}</code></pre>
+        </div>
+      </div>
+
+      <div class="grid cols-2" style="margin-top: 16px;">
+        <article class="card">
+          <h3>Request có context</h3>
+          <p>
+            App có thể gửi thêm <code>context</code> để tool <code>get_screen_context</code> hiểu màn hình hiện tại.
+          </p>
+          <div class="tag-row">
+            <span class="tag blue">screen</span>
+            <span class="tag green">selected_node</span>
+            <span class="tag violet">resource_id</span>
+          </div>
+        </article>
+
+        <article class="card">
+          <h3>Bảo mật API</h3>
+          <p>
+            Nên thêm API key qua Cloudflare Secret như <code>CHAT_API_KEY</code>, sau đó kiểm tra header
+            <code>x-api-key</code> trong Worker để chỉ người được cấp key mới gọi được API.
+          </p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="ket-qua">
+      <div class="section-head">
+        <h2>Kết Quả Đã Làm Được</h2>
+        <p>
+          Các phần chính đã hoàn thành và có thể demo trực tiếp qua UI hoặc API.
+        </p>
+      </div>
+
+      <div class="grid cols-3">
+        <article class="card">
+          <h3>RAG hoạt động</h3>
+          <ul>
+            <li>Đã ingest tài liệu Markdown tiếng Việt.</li>
+            <li>Search theo nghĩa, không phụ thuộc hoàn toàn vào keyword.</li>
+            <li>Trả lời dựa trên chunk tài liệu liên quan.</li>
+          </ul>
+        </article>
+        <article class="card">
+          <h3>Tool-calling ổn định hơn</h3>
+          <ul>
+            <li>Không ép mọi câu hỏi phải gọi RAG.</li>
+            <li>Có guard tránh <code>general_chat</code> ghi đè kết quả RAG.</li>
+            <li>Giới hạn token để tránh câu trả lời bị cắt.</li>
+          </ul>
+        </article>
+        <article class="card">
+          <h3>UI test được</h3>
+          <ul>
+            <li>Gửi chat tới Worker URL.</li>
+            <li>Hiển thị tool đã gọi.</li>
+            <li>Hiển thị ảnh sinh bởi tool <code>draw_chart</code>.</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="demo">
+      <div class="section-head">
+        <h2>Kịch Bản Demo</h2>
+        <p>
+          Có thể dùng các câu dưới đây để trình bày khả năng khác nhau của chatbot.
+        </p>
+      </div>
+
+      <div class="grid cols-2">
+        <article class="card">
+          <h3>Demo RAG</h3>
+          <ul>
+            <li><code>Zilcode là gì?</code></li>
+            <li><code>Hướng dẫn tôi sử dụng Zilcode chi tiết</code></li>
+            <li><code>Cách đăng nhập vào Zilcode như thế nào?</code></li>
+            <li><code>Phần quản trị User và Role dùng để làm gì?</code></li>
+          </ul>
+        </article>
+
+        <article class="card">
+          <h3>Demo tool khác</h3>
+          <ul>
+            <li><code>Xin chào, bạn có thể làm gì?</code></li>
+            <li><code>Vẽ sơ đồ quy trình sử dụng Zilcode từ đăng nhập đến quản lý dữ liệu</code></li>
+            <li><code>Show me workflow wf-001</code></li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="huong-phat-trien">
+      <div class="section-head">
+        <h2>Hướng Phát Triển</h2>
+        <p>
+          Những việc nên làm tiếp nếu dự án đi từ bài tập sang thử nghiệm nội bộ hoặc production.
+        </p>
+      </div>
+
+      <div class="grid cols-3">
+        <article class="card">
+          <h3>Bảo mật</h3>
+          <p>
+            Thêm API key, giới hạn CORS theo domain, rate limit và log request để tránh bị gọi ngoài ý muốn.
+          </p>
+        </article>
+        <article class="card">
+          <h3>Chất lượng RAG</h3>
+          <p>
+            Thêm reranking, lưu nguồn trích dẫn, đánh giá bộ câu hỏi chuẩn và tối ưu chunk theo từng loại tài liệu.
+          </p>
+        </article>
+        <article class="card">
+          <h3>Tích hợp Zilcode thật</h3>
+          <p>
+            Thay mock <code>get_workflow</code> và <code>get_screen_context</code> bằng API/context thật từ ứng dụng.
+          </p>
+        </article>
+      </div>
+    </section>
+
+    <footer class="footer">
+      Báo cáo dự án RAG Chatbot Zilcode. Có thể mở trực tiếp file này trên trình duyệt hoặc xuất PDF bằng nút in.
+    </footer>
+  </main>
+</body>
+</html>
