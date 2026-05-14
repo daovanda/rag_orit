@@ -407,175 +407,6 @@
     return new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' });
   }
 
-  function createToolBadge(tool) {
-    const meta = TOOL_META[tool] || { label: tool, icon: '🔧', cls: '' };
-    const badge = document.createElement('div');
-    badge.className = `tool-badge ${meta.cls}`;
-    badge.innerHTML = `<span class="icon">${meta.icon}</span>${meta.label}`;
-    return badge;
-  }
-
-  function appendToolToMessage(msg, tool) {
-    const bubble = msg.querySelector('.bubble');
-    const badge = createToolBadge(tool);
-    if (bubble) {
-      msg.insertBefore(badge, bubble);
-    } else {
-      msg.appendChild(badge);
-    }
-  }
-
-  function appendImagesToMessage(msg, images = []) {
-    if (!Array.isArray(images)) return;
-
-    images.forEach(image => {
-      if (!image || !image.data_url) return;
-      const img = document.createElement('img');
-      img.className = 'generated-image';
-      img.src = image.data_url;
-      img.alt = image.prompt || 'Generated chart';
-      msg.appendChild(img);
-    });
-  }
-
-  function appendSourcesToMessage(msg, sources = []) {
-    if (!Array.isArray(sources) || sources.length === 0) return;
-
-    const sourceList = document.createElement('div');
-    sourceList.className = 'sources';
-    sources.forEach(source => {
-      const item = document.createElement('div');
-      item.className = 'source-item';
-
-      const title = document.createElement('strong');
-      title.textContent = source.title || source.module || source.id;
-      item.appendChild(title);
-
-      const meta = document.createElement('div');
-      meta.className = 'source-meta';
-      const score = typeof source.vector_score === 'number'
-        ? `score ${source.vector_score.toFixed(3)}`
-        : 'score n/a';
-      const rank = source.rerank_rank ? `rank ${source.rerank_rank}` : 'rank n/a';
-      meta.textContent = [source.section_path || source.heading, score, rank]
-        .filter(Boolean)
-        .join(' · ');
-      item.appendChild(meta);
-
-      sourceList.appendChild(item);
-    });
-    msg.appendChild(sourceList);
-  }
-
-  function appendEmbeddingDebugToMessage(msg, embeddingDebug) {
-    if (!embeddingDebug) return;
-
-    const debug = document.createElement('div');
-    debug.className = 'debug-log';
-
-    const provider = embeddingDebug.provider === 'openrouter' ? 'OpenRouter' : 'Cloudflare';
-    const model = embeddingDebug.model || 'unknown model';
-    const dimensions = typeof embeddingDebug.dimensions === 'number'
-      ? `${embeddingDebug.dimensions} chiều`
-      : 'không rõ số chiều';
-    const mode = embeddingDebug.fallback ? 'fallback' : 'primary';
-
-    const label = document.createElement('strong');
-    label.textContent = 'Embedding user message';
-    debug.appendChild(label);
-    debug.appendChild(document.createTextNode(`: ${provider} | ${model} | ${dimensions} | ${mode}`));
-    msg.appendChild(debug);
-  }
-
-  function appendTimestampToMessage(msg) {
-    const ts = document.createElement('div');
-    ts.className = 'timestamp';
-    ts.textContent = now();
-    msg.appendChild(ts);
-  }
-
-  function appendStreamingAssistant() {
-    const empty = document.getElementById('emptyState');
-    if (empty) empty.remove();
-
-    const container = document.getElementById('messages');
-    const msg = document.createElement('div');
-    msg.className = 'msg assistant';
-
-    const bubble = document.createElement('div');
-    bubble.className = 'bubble';
-    bubble.textContent = '';
-    msg.appendChild(bubble);
-
-    container.appendChild(msg);
-    container.scrollTop = container.scrollHeight;
-
-    return { msg, bubble };
-  }
-
-  function appendAssistantError(errorText) {
-    const container = document.getElementById('messages');
-    const msg = document.createElement('div');
-    msg.className = 'msg assistant';
-    const err = document.createElement('div');
-    err.className = 'error-bubble';
-    err.textContent = '❌ ' + (errorText || 'Unknown error');
-    msg.appendChild(err);
-    container.appendChild(msg);
-    container.scrollTop = container.scrollHeight;
-  }
-
-  function parseSseBlock(block) {
-    const lines = block.split(/\r?\n/);
-    let event = 'message';
-    const dataLines = [];
-
-    lines.forEach(line => {
-      if (line.startsWith('event:')) event = line.slice(6).trim();
-      if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart());
-    });
-
-    const dataText = dataLines.join('\n');
-    let data = {};
-    if (dataText) {
-      try {
-        data = JSON.parse(dataText);
-      } catch {
-        data = { text: dataText };
-      }
-    }
-
-    return { event, data };
-  }
-
-  async function readSseStream(body, onEvent) {
-    const reader = body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    async function flushBlock(block) {
-      if (!block.trim()) return;
-      const parsed = parseSseBlock(block);
-      await onEvent(parsed.event, parsed.data);
-    }
-
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const blocks = buffer.split(/\r?\n\r?\n/);
-      buffer = blocks.pop() || '';
-
-      for (const block of blocks) {
-        await flushBlock(block);
-      }
-    }
-
-    buffer += decoder.decode();
-    await flushBlock(buffer);
-  }
-
   function appendMessage(role, content, tools = [], images = [], sources = [], embeddingDebug = null) {
     const empty = document.getElementById('emptyState');
     if (empty) empty.remove();
@@ -723,7 +554,7 @@
     appendTyping();
 
     try {
-      const res = await fetch(getUrl() + '/chat-stream', {
+      const res = await fetch(getUrl() + '/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: text })
@@ -731,66 +562,30 @@
 
       removeTyping();
 
-      if (!res.ok || !res.body) {
-        let errorText = 'Streaming response không hợp lệ.';
-        try {
-          const data = await res.json();
-          errorText = data.error || errorText;
-        } catch {
-          errorText = await res.text();
-        }
-        appendAssistantError(errorText);
-        btn.disabled = false;
-        input.focus();
-        return;
+      const data = await res.json();
+
+      if (data.success) {
+        appendMessage('assistant', data.response, data.tools_called || [], data.images || [], data.sources || [], data.embedding_debug || null);
+      } else {
+        const msg = document.createElement('div');
+        msg.className = 'msg assistant';
+        const err = document.createElement('div');
+        err.className = 'error-bubble';
+        err.textContent = '❌ ' + (data.error || 'Unknown error');
+        msg.appendChild(err);
+        document.getElementById('messages').appendChild(msg);
       }
-
-      const streamView = appendStreamingAssistant();
-      let finalMeta = {};
-      let streamFailed = false;
-
-      await readSseStream(res.body, async (event, data) => {
-        if (event === 'tool' && data.name) {
-          appendToolToMessage(streamView.msg, data.name);
-          return;
-        }
-
-        if (event === 'meta') {
-          finalMeta = { ...finalMeta, ...data };
-          return;
-        }
-
-        if (event === 'delta') {
-          streamView.bubble.textContent += data.text || '';
-          const container = document.getElementById('messages');
-          container.scrollTop = container.scrollHeight;
-          return;
-        }
-
-        if (event === 'error') {
-          streamFailed = true;
-          streamView.bubble.textContent += `\n\n❌ ${data.error || 'Unknown error'}`;
-          return;
-        }
-
-        if (event === 'done') {
-          finalMeta = { ...finalMeta, ...data };
-        }
-      });
-
-      if (!streamView.bubble.textContent.trim() && !streamFailed) {
-        streamView.bubble.textContent = 'Không tạo được câu trả lời.';
-      }
-
-      appendImagesToMessage(streamView.msg, finalMeta.images || []);
-      appendSourcesToMessage(streamView.msg, finalMeta.sources || []);
-      appendEmbeddingDebugToMessage(streamView.msg, finalMeta.embedding_debug || null);
-      appendTimestampToMessage(streamView.msg);
-      document.getElementById('messages').scrollTop = document.getElementById('messages').scrollHeight;
 
     } catch (err) {
       removeTyping();
-      appendAssistantError('Không kết nối được Worker. Kiểm tra URL và CORS.');
+      const container = document.getElementById('messages');
+      const msg = document.createElement('div');
+      msg.className = 'msg assistant';
+      const errEl = document.createElement('div');
+      errEl.className = 'error-bubble';
+      errEl.textContent = '❌ Không kết nối được Worker. Kiểm tra URL và CORS.';
+      msg.appendChild(errEl);
+      container.appendChild(msg);
     }
 
     btn.disabled = false;

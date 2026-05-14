@@ -7,6 +7,7 @@
  *
  * Run:
  *   npx tsx scripts/ingest.ts
+ *   npx.cmd tsx scripts/ingest.ts
  *
  * Requires:
  *   - wrangler login (or CLOUDFLARE_API_TOKEN env var set)
