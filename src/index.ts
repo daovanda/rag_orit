@@ -129,6 +129,19 @@ interface ToolCall {
 interface ToolExecutionResult {
   content: string;
   sources?: RagSource[];
+  embedding_debug?: EmbeddingDebug;
+}
+
+interface EmbeddingDebug {
+  provider: "cloudflare" | "openrouter";
+  model: string;
+  dimensions: number;
+  fallback: boolean;
+}
+
+interface EmbeddingResult {
+  vector: number[];
+  debug: EmbeddingDebug;
 }
 
 interface VectorMatch {
@@ -367,12 +380,13 @@ async function runChatModel(
 async function callOpenRouterEmbedding(
   text: string,
   env: Env
-): Promise<number[]> {
-  if (!env.OPENROUTER_API_KEY || !env.OPENROUTER_MODEL) {
-    throw new Error("Thiếu OPENROUTER_API_KEY hoặc OPENROUTER_MODEL để fallback embedding sang OpenRouter.");
+): Promise<EmbeddingResult> {
+  const model = env.OPENROUTER_EMBEDDING_MODEL ?? env.OPENROUTER_MODEL;
+
+  if (!env.OPENROUTER_API_KEY || !model) {
+    throw new Error("Thiếu OPENROUTER_API_KEY và OPENROUTER_EMBEDDING_MODEL/OPENROUTER_MODEL để fallback embedding sang OpenRouter.");
   }
 
-  const model = env.OPENROUTER_EMBEDDING_MODEL ?? env.OPENROUTER_MODEL;
   const response = await fetch("https://openrouter.ai/api/v1/embeddings", {
     method: "POST",
     headers: {
@@ -417,20 +431,37 @@ async function callOpenRouterEmbedding(
     );
   }
 
-  return embedding;
+  return {
+    vector: embedding,
+    debug: {
+      provider: "openrouter",
+      model,
+      dimensions: embedding.length,
+      fallback: true
+    }
+  };
 }
 
 async function embedQuery(
   text: string,
   env: Env
-): Promise<number[]> {
+): Promise<EmbeddingResult> {
   try {
     const embeddingResult = await env.AI.run(
       EMBEDDING_MODEL,
       { text: [text] }
     ) as { data: number[][] };
 
-    return embeddingResult.data[0];
+    const vector = embeddingResult.data[0];
+    return {
+      vector,
+      debug: {
+        provider: "cloudflare",
+        model: EMBEDDING_MODEL,
+        dimensions: vector.length,
+        fallback: false
+      }
+    };
   } catch (error) {
     if (isCloudflareNeuronQuotaError(error)) {
       console.log("[EMBEDDING_MODEL] Cloudflare quota error, fallback embedding sang OpenRouter");
@@ -613,7 +644,8 @@ async function searchRag(
   query: string,
   env: Env
 ): Promise<ToolExecutionResult> {
-  const queryVector = await embedQuery(query, env);
+  const embeddingResult = await embedQuery(query, env);
+  const queryVector = embeddingResult.vector;
 
   const matches = await env.VECTORIZE.query(queryVector, {
     topK: RAG_VECTOR_TOP_K,
@@ -622,7 +654,10 @@ async function searchRag(
 
   const vectorMatches = matches.matches as VectorMatch[];
   if (!vectorMatches.length) {
-    return { content: "Không tìm thấy tài liệu liên quan." };
+    return {
+      content: "Không tìm thấy tài liệu liên quan.",
+      embedding_debug: embeddingResult.debug
+    };
   }
 
   const filteredMatches = vectorMatches.filter(match =>
@@ -631,7 +666,8 @@ async function searchRag(
 
   if (!filteredMatches.length) {
     return {
-      content: `Không tìm thấy tài liệu đủ liên quan. Điểm liên quan cao nhất là ${formatScore(vectorMatches[0]?.score)}, thấp hơn ngưỡng ${RAG_MIN_SCORE}.`
+      content: `Không tìm thấy tài liệu đủ liên quan. Điểm liên quan cao nhất là ${formatScore(vectorMatches[0]?.score)}, thấp hơn ngưỡng ${RAG_MIN_SCORE}.`,
+      embedding_debug: embeddingResult.debug
     };
   }
 
@@ -650,7 +686,10 @@ async function searchRag(
   }
 
   if (!candidates.length) {
-    return { content: "Không tìm thấy nội dung chunk tương ứng trong KV." };
+    return {
+      content: "Không tìm thấy nội dung chunk tương ứng trong KV.",
+      embedding_debug: embeddingResult.debug
+    };
   }
 
   const reranked = await rerankRagCandidates(query, candidates, env);
@@ -667,7 +706,8 @@ async function searchRag(
 
   return {
     content,
-    sources: reranked.map(toRagSource)
+    sources: reranked.map(toRagSource),
+    embedding_debug: embeddingResult.debug
   };
 }
 
@@ -796,6 +836,7 @@ interface AgenticLoopResult {
   toolsCalled: string[];
   images?: GeneratedImage[];
   sources?: RagSource[];
+  embedding_debug?: EmbeddingDebug;
 }
 
 interface AIMessage {
@@ -897,6 +938,7 @@ Trả lời đúng mức chi tiết theo yêu cầu của người dùng, cụ t
   const toolsCalled: string[] = [];
   const toolResults: ToolResultRecord[] = [];
   const ragSources: RagSource[] = [];
+  let embeddingDebug: EmbeddingDebug | undefined;
   let hasRagSearchResult = false;
 
   for (let i = 0; i < MAX_ITERATIONS; i++) {
@@ -950,6 +992,10 @@ Trả lời đúng mức chi tiết theo yêu cầu của người dùng, cụ t
         ragSources.push(...toolExecution.sources);
       }
 
+      if (toolCall.name === "rag_search" && toolExecution.embedding_debug) {
+        embeddingDebug = toolExecution.embedding_debug;
+      }
+
       messages.push({
         role: "assistant",
         content: JSON.stringify({
@@ -983,7 +1029,8 @@ Trả lời đúng mức chi tiết theo yêu cầu của người dùng, cụ t
       return {
         answer: finalAnswer,
         toolsCalled,
-        sources: ragSources
+        sources: ragSources,
+        embedding_debug: embeddingDebug
       };
     }
 
@@ -1051,7 +1098,7 @@ export default {
           );
         }
 
-        const { answer, toolsCalled, images, sources } = await runAgenticLoop(
+        const { answer, toolsCalled, images, sources, embedding_debug } = await runAgenticLoop(
           body.message,
           env,
           body.context
@@ -1062,7 +1109,8 @@ export default {
           response: answer,
           tools_called: toolsCalled,
           images,
-          sources
+          sources,
+          embedding_debug
         }, { headers: CORS });
 
       } catch (error) {

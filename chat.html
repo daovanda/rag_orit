@@ -301,6 +301,23 @@
     color: #888;
   }
 
+  .debug-log {
+    margin-top: 8px;
+    max-width: min(100%, 640px);
+    border: 0.5px solid #bfdbfe;
+    border-radius: 8px;
+    background: #eff6ff;
+    color: #1e3a8a;
+    padding: 7px 10px;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+
+  .debug-log strong {
+    color: #1d4ed8;
+    font-weight: 600;
+  }
+
   .timestamp {
     font-size: 11px;
     color: #bbb;
@@ -390,7 +407,7 @@
     return new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' });
   }
 
-  function appendMessage(role, content, tools = [], images = [], sources = []) {
+  function appendMessage(role, content, tools = [], images = [], sources = [], embeddingDebug = null) {
     const empty = document.getElementById('emptyState');
     if (empty) empty.remove();
 
@@ -451,6 +468,24 @@
         sourceList.appendChild(item);
       });
       msg.appendChild(sourceList);
+    }
+
+    if (role === 'assistant' && embeddingDebug) {
+      const debug = document.createElement('div');
+      debug.className = 'debug-log';
+
+      const provider = embeddingDebug.provider === 'openrouter' ? 'OpenRouter' : 'Cloudflare';
+      const model = embeddingDebug.model || 'unknown model';
+      const dimensions = typeof embeddingDebug.dimensions === 'number'
+        ? `${embeddingDebug.dimensions} chiều`
+        : 'không rõ số chiều';
+      const mode = embeddingDebug.fallback ? 'fallback' : 'primary';
+
+      const label = document.createElement('strong');
+      label.textContent = 'Embedding user message';
+      debug.appendChild(label);
+      debug.appendChild(document.createTextNode(`: ${provider} | ${model} | ${dimensions} | ${mode}`));
+      msg.appendChild(debug);
     }
 
     const ts = document.createElement('div');
@@ -530,7 +565,7 @@
       const data = await res.json();
 
       if (data.success) {
-        appendMessage('assistant', data.response, data.tools_called || [], data.images || [], data.sources || []);
+        appendMessage('assistant', data.response, data.tools_called || [], data.images || [], data.sources || [], data.embedding_debug || null);
       } else {
         const msg = document.createElement('div');
         msg.className = 'msg assistant';
