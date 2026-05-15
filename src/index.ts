@@ -189,6 +189,18 @@ interface OpenRouterMessage {
   tool_call_id?: string;
 }
 
+interface ResponseApiOutputItem {
+  type?: string;
+  role?: string;
+  name?: string;
+  arguments?: unknown;
+  call_id?: string;
+  content?: Array<{
+    type?: string;
+    text?: string;
+  }>;
+}
+
 function getStringArg(args: Record<string, unknown>, name: string): string {
   const value = args[name];
   return typeof value === "string" ? value.trim() : "";
@@ -237,6 +249,10 @@ function isCloudflareNeuronQuotaResult(result: unknown): boolean {
     && (text.includes("daily free allocation") || text.includes("neurons"));
 }
 
+function isOpenAiWorkersModel(model: string): boolean {
+  return model.includes("/openai/gpt-oss");
+}
+
 function normalizeMessagesForOpenRouter(messages: AIMessage[]): OpenRouterMessage[] {
   return messages.map(message => {
     if (message.role === "tool") {
@@ -263,6 +279,23 @@ function toOpenRouterTools(tools?: typeof TOOLS) {
       parameters: tool.parameters
     }
   }));
+}
+
+function buildCloudflareChatRequest(
+  cfModel: string,
+  request: ChatModelRequest
+): Record<string, unknown> {
+  if (!isOpenAiWorkersModel(cfModel)) {
+    return request as unknown as Record<string, unknown>;
+  }
+
+  return {
+    messages: normalizeMessagesForOpenRouter(request.messages),
+    tools: toOpenRouterTools(request.tools),
+    tool_choice: request.tools ? "auto" : undefined,
+    max_tokens: request.max_tokens,
+    temperature: request.temperature
+  };
 }
 
 function parseToolArguments(rawArguments: unknown): Record<string, unknown> {
@@ -309,6 +342,55 @@ function normalizeOpenRouterResponse(data: unknown): ChatModelResponse {
   return {
     response: message?.content ?? undefined,
     tool_calls: toolCalls?.length ? toolCalls : undefined
+  };
+}
+
+function normalizeResponsesApiOutput(output?: ResponseApiOutputItem[]): ChatModelResponse {
+  if (!Array.isArray(output)) return {};
+
+  const text = output
+    .filter(item => item.type === "message" || item.role === "assistant")
+    .flatMap(item => item.content ?? [])
+    .map(content => content.text ?? "")
+    .join("");
+
+  const toolCalls = output
+    .filter(item => item.type === "function_call" && item.name)
+    .map(item => ({
+      id: item.call_id,
+      name: item.name ?? "",
+      arguments: parseToolArguments(item.arguments)
+    }))
+    .filter(toolCall => toolCall.name);
+
+  return {
+    response: text || undefined,
+    tool_calls: toolCalls.length ? toolCalls : undefined
+  };
+}
+
+function normalizeCloudflareChatResponse(data: unknown): ChatModelResponse {
+  const existing = data as ChatModelResponse;
+  if (existing.response || existing.tool_calls) return existing;
+
+  const payload = data as {
+    output_text?: string;
+    output?: ResponseApiOutputItem[];
+    choices?: unknown[];
+  };
+
+  const chatCompletion = normalizeOpenRouterResponse(data);
+  if (chatCompletion.response || chatCompletion.tool_calls) {
+    return chatCompletion;
+  }
+
+  const responsesApi = normalizeResponsesApiOutput(payload.output);
+  if (responsesApi.response || responsesApi.tool_calls) {
+    return responsesApi;
+  }
+
+  return {
+    response: payload.output_text
   };
 }
 
@@ -361,13 +443,13 @@ async function runChatModel(
   try {
     const result = await env.AI.run(
       cfModel as string & {},
-      request as unknown as Record<string, unknown>
-    ) as ChatModelResponse;
+      buildCloudflareChatRequest(cfModel, request)
+    ) as unknown;
     if (isCloudflareNeuronQuotaResult(result)) {
       console.log("[CHAT_MODEL] Cloudflare quota result, fallback sang OpenRouter");
       return callOpenRouterChat(request, env);
     }
-    return result;
+    return normalizeCloudflareChatResponse(result);
   } catch (error) {
     if (isCloudflareNeuronQuotaError(error)) {
       console.log("[CHAT_MODEL] Cloudflare quota error, fallback sang OpenRouter");
