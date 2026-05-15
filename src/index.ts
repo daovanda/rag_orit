@@ -12,8 +12,8 @@ export interface Env {
 
 // ─── Models ───────────────────────────────────────────────────────────────────
 
-const CHAT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
-const GENERAL_CHAT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+const CHAT_MODEL = "@cf/openai/gpt-oss-120b"; // @cf/meta/llama-3.3-70b-instruct-fp8-fast
+const GENERAL_CHAT_MODEL = "@cf/openai/gpt-oss-120b"; // @cf/meta/llama-3.3-70b-instruct-fp8-fast
 const EMBEDDING_MODEL = "@cf/baai/bge-m3";
 const CHART_IMAGE_MODEL = "@cf/black-forest-labs/flux-2-dev";
 
