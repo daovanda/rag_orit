@@ -12,8 +12,10 @@ export interface Env {
 
 // ─── Models ───────────────────────────────────────────────────────────────────
 
-const CHAT_MODEL = "@cf/openai/gpt-oss-120b"; // @cf/meta/llama-3.3-70b-instruct-fp8-fast
-const GENERAL_CHAT_MODEL = "@cf/openai/gpt-oss-120b"; // @cf/meta/llama-3.3-70b-instruct-fp8-fast
+const LLAMA_CHAT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+const CHAT_MODEL = "@cf/openai/gpt-oss-120b";
+const GENERAL_CHAT_MODEL = CHAT_MODEL;
+const INTERNAL_CHAT_FALLBACK_MODEL = LLAMA_CHAT_MODEL;
 const EMBEDDING_MODEL = "@cf/baai/bge-m3";
 const CHART_IMAGE_MODEL = "@cf/black-forest-labs/flux-2-dev";
 
@@ -249,6 +251,11 @@ function isCloudflareNeuronQuotaResult(result: unknown): boolean {
     && (text.includes("daily free allocation") || text.includes("neurons"));
 }
 
+function isCloudflareInternalModelError(error: unknown): boolean {
+  const text = getErrorText(error).toLowerCase();
+  return text.includes("3043") || text.includes("internal server error");
+}
+
 function isOpenAiWorkersModel(model: string): boolean {
   return model.includes("/openai/gpt-oss");
 }
@@ -435,26 +442,41 @@ async function callOpenRouterChat(
   return normalizeOpenRouterResponse(data);
 }
 
+async function callCloudflareChatModel(
+  cfModel: string,
+  request: ChatModelRequest,
+  env: Env
+): Promise<ChatModelResponse> {
+  const result = await env.AI.run(
+    cfModel as string & {},
+    buildCloudflareChatRequest(cfModel, request)
+  ) as unknown;
+
+  if (isCloudflareNeuronQuotaResult(result)) {
+    throw new Error(getErrorText(result));
+  }
+
+  return normalizeCloudflareChatResponse(result);
+}
+
 async function runChatModel(
   cfModel: string,
   request: ChatModelRequest,
   env: Env
 ): Promise<ChatModelResponse> {
   try {
-    const result = await env.AI.run(
-      cfModel as string & {},
-      buildCloudflareChatRequest(cfModel, request)
-    ) as unknown;
-    if (isCloudflareNeuronQuotaResult(result)) {
-      console.log("[CHAT_MODEL] Cloudflare quota result, fallback sang OpenRouter");
-      return callOpenRouterChat(request, env);
-    }
-    return normalizeCloudflareChatResponse(result);
+    return await callCloudflareChatModel(cfModel, request, env);
   } catch (error) {
+    if (isCloudflareInternalModelError(error) && cfModel !== INTERNAL_CHAT_FALLBACK_MODEL) {
+      console.log(`[CHAT_MODEL] ${cfModel} lỗi nội bộ, fallback sang ${INTERNAL_CHAT_FALLBACK_MODEL}`);
+      return callCloudflareChatModel(INTERNAL_CHAT_FALLBACK_MODEL, request, env);
+    }
+
     if (isCloudflareNeuronQuotaError(error)) {
       console.log("[CHAT_MODEL] Cloudflare quota error, fallback sang OpenRouter");
       return callOpenRouterChat(request, env);
     }
+
     throw error;
   }
 }
