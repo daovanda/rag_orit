@@ -449,10 +449,12 @@ async function embedQuery(
   try {
     const embeddingResult = await env.AI.run(
       EMBEDDING_MODEL,
-      { text: [text] }
-    ) as { data: number[][] };
+      { text }
+    ) as { data: number[] | number[][] };
 
-    const vector = embeddingResult.data[0];
+    const vector = Array.isArray(embeddingResult.data[0])
+      ? embeddingResult.data[0] as number[]
+      : embeddingResult.data as number[];
     return {
       vector,
       debug: {
@@ -552,7 +554,17 @@ function toRagSource(candidate: RagCandidate): RagSource {
   };
 }
 
-function extractJsonObject(text: string): Record<string, unknown> | null {
+function extractJsonObject(value: unknown): Record<string, unknown> | null {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+
+  const text = typeof value === "string"
+    ? value
+    : JSON.stringify(value ?? "");
+
+  if (!text) return null;
+
   const cleaned = text.replace(/```json|```/g, "").trim();
   const start = cleaned.indexOf("{");
   const end = cleaned.lastIndexOf("}");
