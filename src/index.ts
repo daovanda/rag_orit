@@ -1241,6 +1241,7 @@ async function searchRag(
 
 interface ZilcodeSession {
   token: string;
+  base_url?: string;
   user: Record<string, unknown>;
   roles?: unknown;
   orgs?: unknown;
@@ -1273,8 +1274,38 @@ interface SqlRestSelectOptions {
   limit?: number;
 }
 
-function getZilcodeBase(env: Env): string {
-  return (env.ZILCODE_BASE || DEFAULT_ZILCODE_BASE).replace(/\/+$/, "");
+function getZilcodeBase(env: Env, baseOverride?: string): string {
+  return (baseOverride || env.ZILCODE_BASE || DEFAULT_ZILCODE_BASE).replace(/\/+$/, "");
+}
+
+function normalizeZilcodeBaseInput(value?: string): string | undefined {
+  const raw = value?.trim();
+  if (!raw) return undefined;
+
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error("ZILCODE_BASE khong hop le. Hay nhap URL day du, vi du https://dvnb.zilcode.vn");
+  }
+
+  if (url.protocol !== "https:" && url.hostname !== "localhost" && url.hostname !== "127.0.0.1") {
+    throw new Error("ZILCODE_BASE phai dung https, tru localhost/127.0.0.1 khi test local.");
+  }
+
+  const hostname = url.hostname.toLowerCase();
+  const allowed = hostname === "localhost"
+    || hostname === "127.0.0.1"
+    || hostname === "zilcode.vn"
+    || hostname.endsWith(".zilcode.vn")
+    || hostname === "zilcode.com"
+    || hostname.endsWith(".zilcode.com");
+
+  if (!allowed) {
+    throw new Error("ZILCODE_BASE chi duoc phep la domain Zilcode, localhost hoac 127.0.0.1.");
+  }
+
+  return `${url.protocol}//${url.host}`;
 }
 
 function getSessionTtlSeconds(env: Env): number {
@@ -1355,6 +1386,7 @@ function publicSessionPayload(state: ZilcodeSessionState): Record<string, unknow
   const session = state.session;
   return {
     session_id: state.id,
+    base_url: session.base_url,
     user: stripSensitiveUserFields(session.user),
     roles: session.roles,
     orgs: session.orgs,
@@ -1367,9 +1399,9 @@ function publicSessionPayload(state: ZilcodeSessionState): Record<string, unknow
   };
 }
 
-function resolveZilcodeUrl(env: Env, pathOrUrl: string): string {
+function resolveZilcodeUrl(env: Env, pathOrUrl: string, baseOverride?: string): string {
   if (/^https?:\/\//i.test(pathOrUrl)) return pathOrUrl;
-  return `${getZilcodeBase(env)}/${pathOrUrl.replace(/^\/+/, "")}`;
+  return `${getZilcodeBase(env, baseOverride)}/${pathOrUrl.replace(/^\/+/, "")}`;
 }
 
 async function callZilcodeJson<T = unknown>(
@@ -1379,6 +1411,7 @@ async function callZilcodeJson<T = unknown>(
     method?: string;
     token?: string;
     data?: unknown;
+    baseUrl?: string;
   } = {}
 ): Promise<ZilcodeApiEnvelope<T>> {
   const headers = new Headers({
@@ -1389,7 +1422,8 @@ async function callZilcodeJson<T = unknown>(
     headers.set("Authorization", `Bearer ${options.token}`);
   }
 
-  const response = await fetch(resolveZilcodeUrl(env, pathOrUrl), {
+  const endpoint = resolveZilcodeUrl(env, pathOrUrl, options.baseUrl);
+  const response = await fetch(endpoint, {
     method: options.method ?? "GET",
     headers,
     body: options.data === undefined ? undefined : JSON.stringify(options.data)
@@ -1404,7 +1438,7 @@ async function callZilcodeJson<T = unknown>(
   }
 
   if (!response.ok) {
-    throw new Error(`Zilcode API lỗi ${response.status}: ${getErrorText(data)}`);
+    throw new Error(`Zilcode API lỗi ${response.status} tại ${endpoint}: ${getErrorText(data)}`);
   }
 
   return data as ZilcodeApiEnvelope<T>;
@@ -1426,7 +1460,7 @@ async function fetchZilcodeAppMetadata(
   const envelope = await callZilcodeJson<Record<string, unknown>>(
     env,
     `rest/token/app/${encodeURIComponent(appid)}`,
-    { token: session.token }
+    { token: session.token, baseUrl: session.base_url }
   );
   return assertZilcodeSuccess(envelope);
 }
@@ -1613,7 +1647,7 @@ async function readZilcodeRecords(
   const urlview = String(table.urlview ?? "");
   if (!urlview) throw new Error("Table không có urlview để đọc dữ liệu.");
 
-  const endpoint = buildSqlRestSelectUrl(resolveZilcodeUrl(env, urlview), options);
+  const endpoint = buildSqlRestSelectUrl(resolveZilcodeUrl(env, urlview, session.base_url), options);
   const envelope = await callZilcodeJson(env, endpoint, { token: session.token });
   return envelope.success === false ? assertZilcodeSuccess(envelope) : envelope.result ?? envelope;
 }
@@ -1788,7 +1822,7 @@ Trả lời ngắn gọn, tự nhiên, không nhắc đến function/tool nội 
       const envelope = await callZilcodeJson<Record<string, unknown>>(
         env,
         `rest/token/cache/${encodeURIComponent(windowid)}`,
-        { token: zilcodeSession.session.token }
+        { token: zilcodeSession.session.token, baseUrl: zilcodeSession.session.base_url }
       );
       const cache = assertZilcodeSuccess(envelope) as Record<string, unknown>;
       const parsedConfig = tryParseJsonObject(cache.configjson);
@@ -2315,6 +2349,7 @@ async function applyZilcodeRoleOrg(
     {
       method: "PUT",
       token: session.token,
+      baseUrl: session.base_url,
       data: [roleid, orgid || 0]
     }
   );
@@ -2334,11 +2369,13 @@ async function handleZilcodeLogin(request: Request, env: Env): Promise<Response>
     username?: string;
     sitecode?: string;
     password?: string;
+    zilcode_base?: string;
   };
 
   const username = body.username?.trim();
   const sitecode = body.sitecode?.trim();
   const password = body.password ?? "";
+  const baseUrl = normalizeZilcodeBaseInput(body.zilcode_base);
 
   if (!username || !sitecode || !password) {
     return Response.json(
@@ -2352,6 +2389,7 @@ async function handleZilcodeLogin(request: Request, env: Env): Promise<Response>
     "rest/token/",
     {
       method: "POST",
+      baseUrl,
       data: [username, sitecode, password]
     }
   );
@@ -2368,6 +2406,7 @@ async function handleZilcodeLogin(request: Request, env: Env): Promise<Response>
   const orgs = user.orgs ?? [];
   const session: ZilcodeSession = {
     token,
+    base_url: getZilcodeBase(env, baseUrl),
     user: stripSensitiveUserFields(user),
     roles,
     orgs,

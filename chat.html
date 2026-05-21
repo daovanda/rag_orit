@@ -76,6 +76,10 @@
     width: 115px;
   }
 
+  .auth-panel input#zilBase {
+    width: 165px;
+  }
+
   #authStatus {
     font-size: 12px;
     color: #666;
@@ -404,6 +408,7 @@
     <button class="suggestion-btn" onclick="checkHealth()">Ping</button>
   </div>
   <div class="auth-panel">
+    <input type="text" id="zilBase" placeholder="Zilcode Base" value="https://dvnb.zilcode.vn" autocomplete="url" />
     <input type="text" id="zilUsername" placeholder="Username" autocomplete="username" />
     <input type="text" id="zilSitecode" placeholder="SiteCode" autocomplete="organization" />
     <input type="password" id="zilPassword" placeholder="Password" autocomplete="current-password" />
@@ -531,6 +536,7 @@
   function setAuthStatus(text, ok = false) {
     const el = document.getElementById('authStatus');
     el.textContent = text;
+    el.title = text;
     el.style.color = ok ? '#166534' : '#666';
   }
 
@@ -565,13 +571,20 @@
     });
     const selected = await res.json();
     if (!selected.success) throw new Error(selected.error || 'Không chọn được role/org');
-    setAuthStatus(`Zilcode: role ${selected.roleid}, org ${selected.orgid}`, true);
+    setAuthStatus(`Zilcode: ${selected.base_url || '-'} | role ${selected.roleid}, org ${selected.orgid}`, true);
   }
 
   async function loginZilcode() {
-    const username = document.getElementById('zilUsername').value.trim();
-    const sitecode = document.getElementById('zilSitecode').value.trim();
+    const zilcode_base = document.getElementById('zilBase').value.trim();
+    let username = document.getElementById('zilUsername').value.trim();
+    let sitecode = document.getElementById('zilSitecode').value.trim();
     const password = document.getElementById('zilPassword').value;
+
+    if (username.includes('.') && !sitecode) {
+      const parts = username.split('.');
+      sitecode = parts.pop() || '';
+      username = parts.join('.');
+    }
 
     if (!username || !sitecode || !password) {
       setAuthStatus('Thiếu username/sitecode/password');
@@ -586,7 +599,7 @@
       const res = await fetch(getUrl() + '/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, sitecode, password })
+        body: JSON.stringify({ username, sitecode, password, zilcode_base })
       });
       const data = await res.json();
       if (!data.success) throw new Error(data.error || 'Đăng nhập thất bại');
@@ -599,7 +612,7 @@
         setAuthStatus('Cần chọn role/org');
         await selectRoleOrgFromLogin(data);
       } else {
-        setAuthStatus(`Zilcode: role ${data.roleid || '-'}, org ${data.orgid || 0}`, true);
+        setAuthStatus(`Zilcode: ${data.base_url || '-'} | role ${data.roleid || '-'}, org ${data.orgid || 0}`, true);
       }
     } catch (err) {
       setAuthStatus(err.message || 'Lỗi đăng nhập');
@@ -621,7 +634,7 @@
       });
       const data = await res.json();
       if (!data.success) throw new Error();
-      setAuthStatus(`Zilcode: role ${data.roleid || '-'}, org ${data.orgid || 0}`, true);
+      setAuthStatus(`Zilcode: ${data.base_url || '-'} | role ${data.roleid || '-'}, org ${data.orgid || 0}`, true);
     } catch {
       zilcodeSessionId = '';
       sessionStorage.removeItem(ZILCODE_SESSION_STORAGE_KEY);
