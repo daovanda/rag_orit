@@ -370,6 +370,67 @@
     get_screen_context: { label: 'get_screen_context', icon: '🖥', cls: 'get_screen_context' },
   };
 
+  const CHAT_HISTORY_STORAGE_KEY = 'zilcode_chat_history_v1';
+  const MAX_HISTORY_MESSAGES = 6;
+  const MAX_HISTORY_CONTENT_CHARS = 1200;
+  let chatHistory = loadChatHistory();
+
+  function normalizeHistoryMessage(message) {
+    if (!message || typeof message !== 'object') return null;
+    if (message.role !== 'user' && message.role !== 'assistant') return null;
+    if (typeof message.content !== 'string') return null;
+
+    const content = message.content.trim().slice(0, MAX_HISTORY_CONTENT_CHARS);
+    if (!content) return null;
+
+    return { role: message.role, content };
+  }
+
+  function loadChatHistory() {
+    try {
+      const raw = sessionStorage.getItem(CHAT_HISTORY_STORAGE_KEY);
+      if (!raw) return [];
+
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+
+      return parsed
+        .map(normalizeHistoryMessage)
+        .filter(Boolean)
+        .slice(-MAX_HISTORY_MESSAGES);
+    } catch {
+      return [];
+    }
+  }
+
+  function saveChatHistory() {
+    try {
+      sessionStorage.setItem(CHAT_HISTORY_STORAGE_KEY, JSON.stringify(chatHistory));
+    } catch {
+      // Ignore storage failures; chat still works without persistent session history.
+    }
+  }
+
+  function rememberChatTurn(userText, assistantText) {
+    const nextMessages = [
+      ...chatHistory,
+      { role: 'user', content: userText },
+      { role: 'assistant', content: assistantText || '' }
+    ];
+
+    chatHistory = nextMessages
+      .map(normalizeHistoryMessage)
+      .filter(Boolean)
+      .slice(-MAX_HISTORY_MESSAGES);
+    saveChatHistory();
+  }
+
+  function renderStoredHistory() {
+    chatHistory.forEach(message => {
+      appendMessage(message.role, message.content);
+    });
+  }
+
   function getUrl() {
     return document.getElementById('workerUrl').value.replace(/\/$/, '');
   }
@@ -557,7 +618,10 @@
       const res = await fetch(getUrl() + '/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text })
+        body: JSON.stringify({
+          message: text,
+          history: chatHistory.slice(-MAX_HISTORY_MESSAGES)
+        })
       });
 
       removeTyping();
@@ -565,7 +629,9 @@
       const data = await res.json();
 
       if (data.success) {
-        appendMessage('assistant', data.response, data.tools_called || [], data.images || [], data.sources || [], data.embedding_debug || null);
+        const assistantText = data.response || '';
+        appendMessage('assistant', assistantText, data.tools_called || [], data.images || [], data.sources || [], data.embedding_debug || null);
+        rememberChatTurn(text, assistantText);
       } else {
         const msg = document.createElement('div');
         msg.className = 'msg assistant';
@@ -592,6 +658,7 @@
     input.focus();
   }
 
+  renderStoredHistory();
   checkHealth();
 </script>
 </body>

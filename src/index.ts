@@ -18,7 +18,6 @@ const GENERAL_CHAT_MODEL = CHAT_MODEL;
 const INTERNAL_CHAT_FALLBACK_MODEL = LLAMA_CHAT_MODEL;
 const EMBEDDING_MODEL = "@cf/baai/bge-m3";
 const CHART_IMAGE_MODEL = "@cf/black-forest-labs/flux-2-dev";
-
 const TOOL_SELECTION_MAX_TOKENS = 512;
 const GENERAL_CHAT_MAX_TOKENS = 1024;
 const RAG_FINAL_MAX_TOKENS = 2048;
@@ -30,6 +29,8 @@ const RAG_MAX_CONTEXT_CHUNKS = 4;
 const RAG_MIN_SCORE = 0.35;
 const RAG_RERANK_TEXT_MAX_CHARS = 900;
 const RAG_VECTOR_DIMENSIONS = 1024;
+const MAX_HISTORY_MESSAGES = 6;
+const MAX_HISTORY_CONTENT_CHARS = 1200;
 
  // ─── CORS ─────────────────────────────────────────────────────────────────────
 
@@ -830,7 +831,8 @@ async function searchRag(
 async function executeTool(
   tool: ToolCall,
   env: Env,
-  screenContext?: ScreenContext
+  screenContext?: ScreenContext,
+  chatHistory: AIMessage[] = []
 ): Promise<ToolExecutionResult> {
 
   switch (tool.name) {
@@ -850,6 +852,7 @@ Bạn có thể dùng kiến thức sẵn có để trả lời câu hỏi chung
 Nếu người dùng hỏi bạn là ai, hãy nói bạn là trợ lý AI có thể trò chuyện thông thường và hỗ trợ tra cứu thông tin Zilcode khi cần.
 Trả lời ngắn gọn, tự nhiên, không nhắc đến function/tool nội bộ.`
           },
+          ...chatHistory,
           { role: "user", content: message }
         ]
       }, env);
@@ -922,8 +925,14 @@ interface ScreenContext {
   resource_id?: string;
 }
 
+interface ChatHistoryMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
 interface ChatRequest {
   message: string;
+  history?: ChatHistoryMessage[];
   context?: ScreenContext;
 }
 
@@ -989,10 +998,30 @@ function cleanMarkdownArtifacts(answer: string): string {
     .trim();
 }
 
+function sanitizeChatHistory(history: unknown): AIMessage[] {
+  if (!Array.isArray(history)) return [];
+
+  return history
+    .filter((message): message is ChatHistoryMessage =>
+      message
+      && typeof message === "object"
+      && (message as ChatHistoryMessage).role !== undefined
+      && ((message as ChatHistoryMessage).role === "user" || (message as ChatHistoryMessage).role === "assistant")
+      && typeof (message as ChatHistoryMessage).content === "string"
+    )
+    .slice(-MAX_HISTORY_MESSAGES)
+    .map(message => ({
+      role: message.role,
+      content: message.content.trim().slice(0, MAX_HISTORY_CONTENT_CHARS)
+    }))
+    .filter(message => message.content.length > 0);
+}
+
 async function createFinalAnswerFromRag(
   userMessage: string,
   toolResults: ToolResultRecord[],
-  env: Env
+  env: Env,
+  chatHistory: AIMessage[] = []
 ): Promise<string> {
   const response = await runChatModel(CHAT_MODEL, {
     max_tokens: RAG_FINAL_MAX_TOKENS,
@@ -1009,6 +1038,7 @@ Không nhắc đến tool/function nội bộ.
 Tài liệu nguồn có thể chứa cú pháp Markdown như ###, -, +, ** hoặc dấu backtick. Không sao chép các ký tự định dạng đó vào câu trả lời cuối; hãy chuyển thành văn bản sạch, tự nhiên.
 Trả lời đúng mức chi tiết theo yêu cầu của người dùng. Nếu người dùng yêu cầu chi tiết, hãy chia thành các phần/bước rõ ràng; nếu không yêu cầu chi tiết, hãy trả lời gọn.`
       },
+      ...chatHistory,
       { role: "user", content: userMessage },
       {
         role: "assistant",
@@ -1023,7 +1053,8 @@ Trả lời đúng mức chi tiết theo yêu cầu của người dùng. Nếu 
 async function runAgenticLoop(
   userMessage: string,
   env: Env,
-  screenContext?: ScreenContext
+  screenContext?: ScreenContext,
+  chatHistory: AIMessage[] = []
 ): Promise<AgenticLoopResult> {
 
   const messages: AIMessage[] = [
@@ -1045,6 +1076,7 @@ Khi đã dùng rag_search và có kết quả, không gọi general_chat để h
 Khi đã dùng rag_search nhưng không tìm thấy thông tin phù hợp, hãy nói rõ là chưa tìm thấy trong tài liệu hiện có thay vì bịa nội dung.
 Trả lời đúng mức chi tiết theo yêu cầu của người dùng, cụ thể và ưu tiên các bước thao tác rõ ràng.`
     },
+    ...chatHistory,
     {
       role: "user",
       content: userMessage
@@ -1097,7 +1129,8 @@ Trả lời đúng mức chi tiết theo yêu cầu của người dùng, cụ t
       const toolExecution = await executeTool(
         { name: toolCall.name, arguments: toolCall.arguments },
         env,
-        screenContext
+        screenContext,
+        chatHistory
       );
       const toolResult = toolExecution.content;
 
@@ -1139,7 +1172,8 @@ Trả lời đúng mức chi tiết theo yêu cầu của người dùng, cụ t
       const finalAnswer = await createFinalAnswerFromRag(
         userMessage,
         toolResults,
-        env
+        env,
+        chatHistory
       );
 
       return {
@@ -1160,6 +1194,7 @@ Trả lời đúng mức chi tiết theo yêu cầu của người dùng, cụ t
 Hãy trả lời cuối cùng bằng cùng ngôn ngữ với người hỏi.
 Dựa trên nội dung từ general_chat, trả lời tự nhiên và không nhắc đến tool/function nội bộ.`
           },
+          ...chatHistory,
           { role: "user", content: userMessage },
           {
             role: "assistant",
@@ -1214,10 +1249,12 @@ export default {
           );
         }
 
+        const chatHistory = sanitizeChatHistory(body.history);
         const { answer, toolsCalled, images, sources, embedding_debug } = await runAgenticLoop(
           body.message,
           env,
-          body.context
+          body.context,
+          chatHistory
         );
 
         return Response.json({
