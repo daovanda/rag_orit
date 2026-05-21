@@ -143,6 +143,18 @@ const TOOLS = [
     parameters: { type: "object", properties: {} }
   },
   {
+    name: "zilcode_list_accessible_tables",
+    description:
+      "Read-only tool. Liet ke tong hop cac table/view trong tat ca application Zilcode ma phien hien tai duoc phep truy cap. Dung truc tiep cho cau hoi nhu 'tai khoan cua toi dang co nhung bang nao', 'toi xem duoc table nao', 'liet ke database/table cua toi'. Tool nay tu lay appid dung tu phien dang nhap, khong can model tu doan appid.",
+    parameters: {
+      type: "object",
+      properties: {
+        keyword: { type: "string", description: "Tu khoa loc theo table name, alias, display name hoac app name. Bo trong de liet ke tat ca." },
+        limit: { type: "string", description: "So table toi da tra ve tren toan bo app, mac dinh 120." }
+      }
+    }
+  },
+  {
     name: "zilcode_get_user_permissions",
     description:
       "Read-only tool. Lấy quyền access hiện tại theo role/org, có thể lọc theo table name.",
@@ -162,8 +174,7 @@ const TOOLS = [
       properties: {
         appid: { type: "string", description: "ID application Zilcode cần đọc metadata." },
         include_full: { type: "string", description: "Đặt 'true' nếu cần trả metadata đầy đủ. Mặc định trả bản tóm tắt." }
-      },
-      required: ["appid"]
+      }
     }
   },
   {
@@ -200,8 +211,7 @@ const TOOLS = [
       properties: {
         appid: { type: "string", description: "ID application cần liệt kê tables." },
         keyword: { type: "string", description: "Từ khóa lọc theo table name hoặc display name." }
-      },
-      required: ["appid"]
+      }
     }
   },
   {
@@ -1391,7 +1401,9 @@ function publicSessionPayload(state: ZilcodeSessionState): Record<string, unknow
     roles: session.roles,
     orgs: session.orgs,
     roleid: session.roleid,
+    role_name: getSelectedRoleName(session),
     orgid: session.orgid,
+    org_name: getSelectedOrgName(session),
     has_role_org: Boolean(session.roleid),
     apps: session.apps,
     access: session.access,
@@ -1770,11 +1782,24 @@ Trả lời ngắn gọn, tự nhiên, không nhắc đến function/tool nội 
 
     case "zilcode_list_applications": {
       if (!zilcodeSession) return noZilcodeSessionResult();
+      const applications = listSessionApplicationSummaries(zilcodeSession.session);
       return { content: JSON.stringify({
-        apps: zilcodeSession.session.apps ?? [],
+        applications,
+        raw_apps: zilcodeSession.session.apps ?? [],
         has_role_org: Boolean(zilcodeSession.session.roleid),
         note: zilcodeSession.session.apps ? undefined : "Phiên hiện tại chưa có apps. Hãy chọn role/org trước."
       }, null, 2) };
+    }
+
+    case "zilcode_list_accessible_tables": {
+      if (!zilcodeSession) return noZilcodeSessionResult();
+      const keyword = getStringArg(tool.arguments, "keyword").toLowerCase();
+      const limit = Math.min(
+        300,
+        Math.max(1, Number(getStringArg(tool.arguments, "limit")) || 120)
+      );
+      const result = await listAccessibleZilcodeTables(env, zilcodeSession.session, keyword, limit);
+      return { content: JSON.stringify(result, null, 2) };
     }
 
     case "zilcode_get_user_permissions": {
@@ -2319,6 +2344,24 @@ Dựa trên nội dung từ general_chat, trả lời tự nhiên và không nh�
     max_iterations: MAX_ITERATIONS
   });
 
+  if (toolResults.length > 0) {
+    const finalAnswer = await createFinalAnswerFromRag(
+      userMessage,
+      toolResults,
+      env,
+      chatHistory,
+      debugSteps
+    );
+
+    return {
+      answer: finalAnswer,
+      toolsCalled,
+      sources: ragSources,
+      embedding_debug: embeddingDebug,
+      rag_query_debug: ragQueryDebug
+    };
+  }
+
   return {
     answer: "Đã đạt số vòng gọi công cụ tối đa nhưng chưa tạo được câu trả lời cuối cùng.",
     toolsCalled
@@ -2330,11 +2373,183 @@ Dựa trên nội dung từ general_chat, trả lời tự nhiên và không nh�
 function getRecordId(record: unknown, keys: string[]): string | number | undefined {
   if (!record || typeof record !== "object") return undefined;
   const data = record as Record<string, unknown>;
+  const entries = Object.entries(data);
   for (const key of keys) {
-    const value = data[key];
+    const match = entries.find(([name]) => name.toLowerCase() === key.toLowerCase());
+    const value = match?.[1];
     if (typeof value === "string" || typeof value === "number") return value;
   }
   return undefined;
+}
+
+const ROLE_ID_KEYS = ["id", "roleid", "role_id"];
+const ORG_ID_KEYS = ["id", "orgid", "org_id", "organizationid", "organization_id"];
+const APP_ID_KEYS = ["appid", "app_id", "applicationid", "application_id", "id"];
+const ROLE_LABEL_KEYS = ["rolename", "role_name", "name", "text", "label", "displayname", "description", "rolecode", "code"];
+const ORG_LABEL_KEYS = ["orgname", "org_name", "organizationname", "organization_name", "name", "text", "label", "displayname", "description", "orgcode", "code"];
+const APP_LABEL_KEYS = ["appname", "app_name", "applicationname", "application_name", "name", "title", "text", "label", "displayname", "description", "appcode", "code"];
+const TABLE_ID_KEYS = ["tableid", "table_id", "id"];
+const TABLE_LABEL_KEYS = ["tablename", "table_name", "alias", "name", "title", "text", "label", "displayname", "description"];
+
+function getRecordLabel(record: unknown, keys: string[], fallback?: string): string | undefined {
+  if (!record || typeof record !== "object") return fallback;
+  const entries = Object.entries(record as Record<string, unknown>);
+
+  for (const key of keys) {
+    const match = entries.find(([name]) => name.toLowerCase() === key.toLowerCase());
+    const value = match?.[1];
+    if (typeof value === "string" && value.trim()) return value.trim();
+    if (typeof value === "number") return String(value);
+  }
+
+  return fallback;
+}
+
+function findRecordById(records: unknown, id: unknown, keys: string[]): unknown | undefined {
+  if (id === undefined || id === null || id === "") return undefined;
+  const normalizedId = String(id);
+  return toArrayValues(records).find(record => String(getRecordId(record, keys) ?? "") === normalizedId);
+}
+
+function getSelectedRoleName(session: ZilcodeSession): string | undefined {
+  const role = findRecordById(session.roles, session.roleid, ROLE_ID_KEYS);
+  return getRecordLabel(role, ROLE_LABEL_KEYS, session.roleid === undefined ? undefined : String(session.roleid));
+}
+
+function getSelectedOrgName(session: ZilcodeSession): string | undefined {
+  if (session.orgid === undefined || session.orgid === null || String(session.orgid) === "0") {
+    return "Không chọn tổ chức";
+  }
+
+  const org = findRecordById(session.orgs, session.orgid, ORG_ID_KEYS);
+  return getRecordLabel(org, ORG_LABEL_KEYS, String(session.orgid));
+}
+
+function toKeyedValues(value: unknown): Array<{ key?: string; value: unknown }> {
+  if (Array.isArray(value)) return value.map(item => ({ value: item }));
+  if (value && typeof value === "object") {
+    return Object.entries(value as Record<string, unknown>).map(([key, item]) => ({ key, value: item }));
+  }
+  return [];
+}
+
+function listSessionApplicationSummaries(session: ZilcodeSession): Record<string, unknown>[] {
+  const summaries: Array<Record<string, unknown> | null> = toKeyedValues(session.apps)
+    .map(({ key, value }) => {
+      if (value && typeof value === "object") {
+        const record = value as Record<string, unknown>;
+        const appid = String(getRecordId(record, APP_ID_KEYS) ?? key ?? "");
+        if (!appid) return null;
+        return {
+          appid,
+          app_name: getRecordLabel(record, APP_LABEL_KEYS, appid),
+          app_code: getRecordLabel(record, ["appcode", "app_code", "code"], undefined),
+          raw: record
+        };
+      }
+
+      const appid = String(value ?? key ?? "");
+      if (!appid) return null;
+      return { appid, app_name: appid, raw: value };
+    });
+
+  return summaries.filter((item): item is Record<string, unknown> => item !== null);
+}
+
+function summarizeZilcodeTable(
+  table: Record<string, unknown>,
+  app: Record<string, unknown>
+): Record<string, unknown> {
+  return {
+    appid: app.appid,
+    app_name: app.app_name,
+    tableid: getRecordId(table, TABLE_ID_KEYS) ?? table.tableid,
+    tablename: table.tablename ?? table.table_name ?? table.name,
+    display_name: getRecordLabel(table, TABLE_LABEL_KEYS, undefined),
+    alias: table.alias,
+    description: table.description,
+    columnkey: table.columnkey,
+    columndisplay: table.columndisplay,
+    columnfind: table.columnfind,
+    urlview: table.urlview
+  };
+}
+
+function matchesZilcodeTableKeyword(
+  table: Record<string, unknown>,
+  app: Record<string, unknown>,
+  keyword: string
+): boolean {
+  if (!keyword) return true;
+  const haystack = [
+    app.appid,
+    app.app_name,
+    table.tableid,
+    table.table_id,
+    table.tablename,
+    table.table_name,
+    table.alias,
+    table.description,
+    table.columndisplay,
+    table.columnfind
+  ]
+    .map(value => String(value ?? "").toLowerCase())
+    .join(" ");
+  return haystack.includes(keyword);
+}
+
+async function listAccessibleZilcodeTables(
+  env: Env,
+  session: ZilcodeSession,
+  keyword: string,
+  limit: number
+): Promise<Record<string, unknown>> {
+  const apps = listSessionApplicationSummaries(session);
+  const tables: Record<string, unknown>[] = [];
+  const appResults: Record<string, unknown>[] = [];
+  const errors: Record<string, unknown>[] = [];
+
+  for (const app of apps) {
+    const appid = String(app.appid ?? "");
+    if (!appid || tables.length >= limit) continue;
+
+    try {
+      const metadata = await fetchZilcodeAppMetadata(env, session, appid);
+      const appTables = toArrayValues(metadata.tables)
+        .filter((table): table is Record<string, unknown> => Boolean(table) && typeof table === "object")
+        .filter(table => matchesZilcodeTableKeyword(table, app, keyword))
+        .map(table => summarizeZilcodeTable(table, app));
+      const remaining = Math.max(0, limit - tables.length);
+      const selectedTables = appTables.slice(0, remaining);
+      tables.push(...selectedTables);
+      appResults.push({
+        appid,
+        app_name: app.app_name,
+        tables_count: appTables.length,
+        returned_count: selectedTables.length
+      });
+    } catch (error) {
+      errors.push({
+        appid,
+        app_name: app.app_name,
+        error: getErrorText(error)
+      });
+    }
+  }
+
+  return {
+    roleid: session.roleid,
+    role_name: getSelectedRoleName(session),
+    orgid: session.orgid,
+    org_name: getSelectedOrgName(session),
+    apps_count: apps.length,
+    apps: appResults,
+    keyword: keyword || undefined,
+    tables_count: tables.length,
+    tables,
+    errors: errors.length ? errors : undefined,
+    note: tables.length >= limit ? `Đã giới hạn ${limit} table. Truyền keyword để lọc hẹp hơn nếu cần.` : undefined
+  };
 }
 
 async function applyZilcodeRoleOrg(
@@ -2418,8 +2633,8 @@ async function handleZilcodeLogin(request: Request, env: Env): Promise<Response>
   const roleValues = toArrayValues(roles);
   const orgValues = toArrayValues(orgs);
   if (roleValues.length === 1 && orgValues.length <= 1) {
-    const roleid = getRecordId(roleValues[0], ["id", "roleid"]);
-    const orgid = orgValues.length ? getRecordId(orgValues[0], ["id", "orgid"]) ?? 0 : 0;
+    const roleid = getRecordId(roleValues[0], ROLE_ID_KEYS);
+    const orgid = orgValues.length ? getRecordId(orgValues[0], ORG_ID_KEYS) ?? 0 : 0;
     if (roleid !== undefined) {
       await applyZilcodeRoleOrg(env, session, roleid, orgid);
     }

@@ -21,7 +21,8 @@
     border-bottom: 0.5px solid #e0e0dc;
     padding: 14px 20px;
     display: flex;
-    align-items: center;
+    align-items: flex-start;
+    flex-wrap: wrap;
     gap: 10px;
   }
 
@@ -57,12 +58,22 @@
 
   .auth-panel {
     display: flex;
-    align-items: center;
-    gap: 6px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
     margin-left: 8px;
+    min-width: 0;
   }
 
-  .auth-panel input {
+  .auth-controls {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .auth-panel input,
+  .auth-panel select {
     font-size: 12px;
     border: 0.5px solid #ddd;
     border-radius: 6px;
@@ -81,12 +92,34 @@
   }
 
   #authStatus {
+    display: block;
     font-size: 12px;
     color: #666;
-    max-width: 180px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    margin-left: 0;
+    max-width: 720px;
+    overflow: visible;
+    white-space: normal;
+    line-height: 1.4;
+  }
+
+  .role-org-picker {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 6px;
+    border: 0.5px solid #e0e0dc;
+    border-radius: 8px;
+    background: #fafaf8;
+  }
+
+  .role-org-picker[hidden] {
+    display: none;
+  }
+
+  .role-org-picker select {
+    width: 180px;
+    background: #fff;
   }
 
   .dot {
@@ -408,13 +441,20 @@
     <button class="suggestion-btn" onclick="checkHealth()">Ping</button>
   </div>
   <div class="auth-panel">
+    <div class="auth-controls">
     <input type="text" id="zilBase" placeholder="Zilcode Base" value="https://dvnb.zilcode.vn" autocomplete="url" />
     <input type="text" id="zilUsername" placeholder="Username" autocomplete="username" />
     <input type="text" id="zilSitecode" placeholder="SiteCode" autocomplete="organization" />
     <input type="password" id="zilPassword" placeholder="Password" autocomplete="current-password" />
     <button class="suggestion-btn" id="zilLoginBtn" onclick="loginZilcode()">Login</button>
     <button class="suggestion-btn" id="zilLogoutBtn" onclick="logoutZilcode()">Logout</button>
+    </div>
     <span id="authStatus">Chưa đăng nhập Zilcode</span>
+    <div id="roleOrgPicker" class="role-org-picker" hidden>
+      <select id="zilRoleSelect" aria-label="Chọn role Zilcode"></select>
+      <select id="zilOrgSelect" aria-label="Chọn organization Zilcode"></select>
+      <button class="suggestion-btn" onclick="confirmRoleOrgSelection()">Dùng role/org</button>
+    </div>
   </div>
 </header>
 
@@ -449,6 +489,7 @@
     get_screen_context: { label: 'get_screen_context', icon: '🖥', cls: 'get_screen_context' },
     zilcode_get_session_info: { label: 'zilcode_session', icon: 'Z', cls: 'get_workflow' },
     zilcode_list_applications: { label: 'zilcode_apps', icon: 'Z', cls: 'get_workflow' },
+    zilcode_list_accessible_tables: { label: 'zilcode_tables_all', icon: 'Z', cls: 'get_workflow' },
     zilcode_get_user_permissions: { label: 'zilcode_permissions', icon: 'Z', cls: 'get_workflow' },
     zilcode_get_app_metadata: { label: 'zilcode_app_metadata', icon: 'Z', cls: 'get_workflow' },
     zilcode_search_windows: { label: 'zilcode_search_windows', icon: 'Z', cls: 'get_workflow' },
@@ -464,8 +505,13 @@
   const ZILCODE_SESSION_STORAGE_KEY = 'zilcode_api_session_v1';
   const MAX_HISTORY_MESSAGES = 6;
   const MAX_HISTORY_CONTENT_CHARS = 1200;
+  const ROLE_ID_KEYS = ['id', 'roleid', 'role_id'];
+  const ORG_ID_KEYS = ['id', 'orgid', 'org_id', 'organizationid', 'organization_id'];
+  const ROLE_LABEL_KEYS = ['rolename', 'role_name', 'name', 'text', 'label', 'displayname', 'description', 'rolecode', 'code'];
+  const ORG_LABEL_KEYS = ['orgname', 'org_name', 'organizationname', 'organization_name', 'name', 'text', 'label', 'displayname', 'description', 'orgcode', 'code'];
   let chatHistory = loadChatHistory();
   let zilcodeSessionId = sessionStorage.getItem(ZILCODE_SESSION_STORAGE_KEY) || '';
+  let pendingRoleOrgData = null;
 
   function normalizeHistoryMessage(message) {
     if (!message || typeof message !== 'object') return null;
@@ -546,15 +592,68 @@
     return [];
   }
 
-  function getOptionId(item, keys) {
+  function getObjectValue(item, keys) {
     if (!item || typeof item !== 'object') return '';
+    const entries = Object.entries(item);
     for (const key of keys) {
-      if (item[key] !== undefined && item[key] !== null) return String(item[key]);
+      const match = entries.find(([name]) => name.toLowerCase() === key.toLowerCase());
+      if (match && match[1] !== undefined && match[1] !== null) return String(match[1]);
     }
     return '';
   }
 
-  async function selectRoleOrgFromLogin(data) {
+  function getOptionId(item, keys) {
+    return getObjectValue(item, keys);
+  }
+
+  function getOptionLabel(item, labelKeys, fallback) {
+    return getObjectValue(item, labelKeys) || fallback || '-';
+  }
+
+  function formatRoleOrgStatus(data) {
+    const roleLabel = data.role_name
+      ? `${data.role_name} (${data.roleid || '-'})`
+      : `role ${data.roleid || '-'}`;
+    const orgLabel = data.org_name
+      ? `${data.org_name} (${data.orgid ?? 0})`
+      : `org ${data.orgid ?? 0}`;
+
+    return `Zilcode: ${data.base_url || '-'} | ${roleLabel}, ${orgLabel}`;
+  }
+
+  function setLoggedInStatus(data) {
+    setAuthStatus(formatRoleOrgStatus(data), true);
+  }
+
+  function hideRoleOrgPicker() {
+    document.getElementById('roleOrgPicker').hidden = true;
+    pendingRoleOrgData = null;
+  }
+
+  function fillSelect(select, items, idKeys, labelKeys, emptyOption = null) {
+    select.innerHTML = '';
+
+    if (emptyOption) {
+      const option = document.createElement('option');
+      option.value = emptyOption.value;
+      option.textContent = emptyOption.label;
+      select.appendChild(option);
+    }
+
+    items.forEach((item, index) => {
+      const id = getOptionId(item, idKeys);
+      if (!id) return;
+
+      const option = document.createElement('option');
+      option.value = id;
+      option.textContent = getOptionLabel(item, labelKeys, `${id}`);
+      option.title = option.textContent;
+      if (index === 0 && !emptyOption) option.selected = true;
+      select.appendChild(option);
+    });
+  }
+
+  /*
     const roles = asList(data.roles);
     const orgs = asList(data.orgs);
     const defaultRole = getOptionId(roles[0], ['id', 'roleid']);
@@ -572,6 +671,53 @@
     const selected = await res.json();
     if (!selected.success) throw new Error(selected.error || 'Không chọn được role/org');
     setAuthStatus(`Zilcode: ${selected.base_url || '-'} | role ${selected.roleid}, org ${selected.orgid}`, true);
+  }
+
+  */
+
+  async function selectRoleOrgFromLogin(data) {
+    const roles = asList(data.roles);
+    const orgs = asList(data.orgs);
+    const roleSelect = document.getElementById('zilRoleSelect');
+    const orgSelect = document.getElementById('zilOrgSelect');
+
+    if (roles.length === 0) {
+      throw new Error('Zilcode không trả về danh sách role để chọn.');
+    }
+
+    pendingRoleOrgData = data;
+    fillSelect(roleSelect, roles, ROLE_ID_KEYS, ROLE_LABEL_KEYS);
+    fillSelect(orgSelect, orgs, ORG_ID_KEYS, ORG_LABEL_KEYS, {
+      value: '0',
+      label: 'Không chọn tổ chức'
+    });
+
+    document.getElementById('roleOrgPicker').hidden = false;
+    setAuthStatus('Chọn role và organization bằng tên bên dưới, sau đó bấm Dùng role/org.');
+  }
+
+  async function confirmRoleOrgSelection() {
+    const roleid = document.getElementById('zilRoleSelect').value;
+    const orgid = document.getElementById('zilOrgSelect').value || '0';
+
+    if (!roleid) {
+      setAuthStatus('Chưa chọn role Zilcode.');
+      return;
+    }
+
+    try {
+      const res = await fetch(getUrl() + '/auth/select-role-org', {
+        method: 'POST',
+        headers: getZilcodeHeaders(),
+        body: JSON.stringify({ roleid, orgid })
+      });
+      const selected = await res.json();
+      if (!selected.success) throw new Error(selected.error || 'Không chọn được role/org');
+      hideRoleOrgPicker();
+      setLoggedInStatus(selected);
+    } catch (err) {
+      setAuthStatus(err.message || 'Không chọn được role/org');
+    }
   }
 
   async function loginZilcode() {
@@ -612,7 +758,8 @@
         setAuthStatus('Cần chọn role/org');
         await selectRoleOrgFromLogin(data);
       } else {
-        setAuthStatus(`Zilcode: ${data.base_url || '-'} | role ${data.roleid || '-'}, org ${data.orgid || 0}`, true);
+        hideRoleOrgPicker();
+        setLoggedInStatus(data);
       }
     } catch (err) {
       setAuthStatus(err.message || 'Lỗi đăng nhập');
@@ -623,6 +770,7 @@
 
   async function refreshZilcodeAuth() {
     if (!zilcodeSessionId) {
+      hideRoleOrgPicker();
       setAuthStatus('Chưa đăng nhập Zilcode');
       return;
     }
@@ -634,10 +782,11 @@
       });
       const data = await res.json();
       if (!data.success) throw new Error();
-      setAuthStatus(`Zilcode: ${data.base_url || '-'} | role ${data.roleid || '-'}, org ${data.orgid || 0}`, true);
+      setLoggedInStatus(data);
     } catch {
       zilcodeSessionId = '';
       sessionStorage.removeItem(ZILCODE_SESSION_STORAGE_KEY);
+      hideRoleOrgPicker();
       setAuthStatus('Phiên Zilcode hết hạn');
     }
   }
@@ -653,6 +802,7 @@
     } finally {
       zilcodeSessionId = '';
       sessionStorage.removeItem(ZILCODE_SESSION_STORAGE_KEY);
+      hideRoleOrgPicker();
       setAuthStatus('Chưa đăng nhập Zilcode');
     }
   }
