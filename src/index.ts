@@ -4,7 +4,10 @@ export interface Env {
   AI: Ai;
   VECTORIZE: VectorizeIndex;
   CHUNKS: KVNamespace;
+  ZILCODE_SESSIONS?: KVNamespace;
   ZILCODE_API_TOKEN: string;
+  ZILCODE_BASE?: string;
+  SESSION_TTL_SECONDS?: string;
   OPENROUTER_API_KEY?: string;
   OPENROUTER_MODEL?: string;
   OPENROUTER_EMBEDDING_MODEL?: string;
@@ -33,13 +36,18 @@ const RAG_RERANK_TEXT_MAX_CHARS = 900;
 const RAG_VECTOR_DIMENSIONS = 1024;
 const MAX_HISTORY_MESSAGES = 6;
 const MAX_HISTORY_CONTENT_CHARS = 1200;
+const DEFAULT_ZILCODE_BASE = "https://dvnb.zilcode.vn";
+const ZILCODE_SESSION_PREFIX = "zilcode_session:";
+const DEFAULT_SESSION_TTL_SECONDS = 60 * 60 * 8;
+const ZILCODE_READ_LIMIT_DEFAULT = 20;
+const ZILCODE_READ_LIMIT_MAX = 50;
 
  // ─── CORS ─────────────────────────────────────────────────────────────────────
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
+  "Access-Control-Allow-Headers": "Content-Type, X-Zilcode-Session",
 };
 
 // ─── Tool definitions ─────────────────────────────────────────────────────────
@@ -120,6 +128,141 @@ const TOOLS = [
     parameters: {
       type: "object",
       properties: {}
+    }
+  },
+  {
+    name: "zilcode_get_session_info",
+    description:
+      "Read-only tool. Lấy thông tin phiên đăng nhập Zilcode hiện tại của người dùng trong chatbot: user, site, role, organization, trạng thái đã chọn role/org hay chưa. Dùng khi câu hỏi cần biết người dùng đang đăng nhập Zilcode chưa hoặc đang dùng role/org nào. Không trả token.",
+    parameters: { type: "object", properties: {} }
+  },
+  {
+    name: "zilcode_list_applications",
+    description:
+      "Read-only tool. Liệt kê các application Zilcode mà phiên hiện tại được phép truy cập sau khi đã chọn role/org.",
+    parameters: { type: "object", properties: {} }
+  },
+  {
+    name: "zilcode_get_user_permissions",
+    description:
+      "Read-only tool. Lấy quyền access hiện tại theo role/org, có thể lọc theo table name.",
+    parameters: {
+      type: "object",
+      properties: {
+        table_name: { type: "string", description: "Tên table cần xem quyền. Bỏ trống để trả toàn bộ access." }
+      }
+    }
+  },
+  {
+    name: "zilcode_get_app_metadata",
+    description:
+      "Read-only tool. Gọi Zilcode để lấy metadata của một application: domains, services, relates, tables, workflows, roles, menus.",
+    parameters: {
+      type: "object",
+      properties: {
+        appid: { type: "string", description: "ID application Zilcode cần đọc metadata." },
+        include_full: { type: "string", description: "Đặt 'true' nếu cần trả metadata đầy đủ. Mặc định trả bản tóm tắt." }
+      },
+      required: ["appid"]
+    }
+  },
+  {
+    name: "zilcode_search_windows",
+    description:
+      "Read-only tool. Tìm window trong một application thông qua menu metadata khi người dùng nêu tên màn hình/window/menu.",
+    parameters: {
+      type: "object",
+      properties: {
+        appid: { type: "string", description: "ID application cần tìm window." },
+        keyword: { type: "string", description: "Từ khóa tên menu/window cần tìm." }
+      },
+      required: ["appid", "keyword"]
+    }
+  },
+  {
+    name: "zilcode_get_window_config",
+    description:
+      "Read-only tool. Lấy cache cấu hình window theo windowid. Nếu config parse được, trả window/tabs/fields/menus; nếu đang ở dạng nén Zipson chưa parse được, trả raw metadata và cảnh báo.",
+    parameters: {
+      type: "object",
+      properties: {
+        windowid: { type: "string", description: "ID window cần đọc cache/config." }
+      },
+      required: ["windowid"]
+    }
+  },
+  {
+    name: "zilcode_list_tables",
+    description:
+      "Read-only tool. Liệt kê table/view trong một application từ app metadata. Dùng khi cần tìm tableid/tablename/urlview/columnkey.",
+    parameters: {
+      type: "object",
+      properties: {
+        appid: { type: "string", description: "ID application cần liệt kê tables." },
+        keyword: { type: "string", description: "Từ khóa lọc theo table name hoặc display name." }
+      },
+      required: ["appid"]
+    }
+  },
+  {
+    name: "zilcode_get_table_metadata",
+    description:
+      "Read-only tool. Lấy metadata của một table trong application theo tableid hoặc tablename.",
+    parameters: {
+      type: "object",
+      properties: {
+        appid: { type: "string", description: "ID application chứa table." },
+        tableid: { type: "string", description: "ID table cần đọc." },
+        table_name: { type: "string", description: "Tên table cần đọc nếu chưa biết tableid." }
+      },
+      required: ["appid"]
+    }
+  },
+  {
+    name: "zilcode_search_records",
+    description:
+      "Read-only tool. Tìm record trong một table qua table.urlview. Cần appid và tableid hoặc table_name. Có thể truyền query đơn giản hoặc where theo format SqlREST.",
+    parameters: {
+      type: "object",
+      properties: {
+        appid: { type: "string", description: "ID application chứa table." },
+        tableid: { type: "string", description: "ID table cần tìm." },
+        table_name: { type: "string", description: "Tên table nếu chưa biết tableid." },
+        query: { type: "string", description: "Từ khóa tìm nhanh theo columnfind/columndisplay/columncode/columnkey." },
+        where: { type: "array", description: "Điều kiện where theo format SqlREST, ví dụ ['username','like','%admin%']." },
+        select: { type: "string", description: "Danh sách cột cần đọc, phân tách bằng dấu phẩy." },
+        orderby: { type: "string", description: "Mệnh đề orderby nếu cần." },
+        limit: { type: "string", description: "Số dòng tối đa, mặc định 20, tối đa 50." }
+      },
+      required: ["appid"]
+    }
+  },
+  {
+    name: "zilcode_get_record",
+    description:
+      "Read-only tool. Lấy một record cụ thể từ table.urlview theo recordid. Cần appid và tableid hoặc table_name.",
+    parameters: {
+      type: "object",
+      properties: {
+        appid: { type: "string", description: "ID application chứa table." },
+        tableid: { type: "string", description: "ID table cần đọc." },
+        table_name: { type: "string", description: "Tên table nếu chưa biết tableid." },
+        recordid: { type: "string", description: "ID/khóa chính của record cần đọc." }
+      },
+      required: ["appid", "recordid"]
+    }
+  },
+  {
+    name: "zilcode_get_domain_values",
+    description:
+      "Read-only tool. Lấy danh sách value/text của domain trong app metadata. Dùng khi cần giải thích hoặc map giá trị select/list.",
+    parameters: {
+      type: "object",
+      properties: {
+        appid: { type: "string", description: "ID application chứa domain." },
+        domainid: { type: "string", description: "ID domain cần đọc." }
+      },
+      required: ["appid", "domainid"]
     }
   }
 ];
@@ -1096,12 +1239,400 @@ async function searchRag(
   };
 }
 
+interface ZilcodeSession {
+  token: string;
+  user: Record<string, unknown>;
+  roles?: unknown;
+  orgs?: unknown;
+  roleid?: string | number;
+  orgid?: string | number;
+  access?: Record<string, unknown>;
+  apps?: unknown;
+  notifies?: unknown;
+  created_at: string;
+  updated_at: string;
+  expires_at: string;
+}
+
+interface ZilcodeSessionState {
+  id: string;
+  session: ZilcodeSession;
+}
+
+interface ZilcodeApiEnvelope<T = unknown> {
+  success?: boolean;
+  result?: T;
+  error?: unknown;
+}
+
+interface SqlRestSelectOptions {
+  id?: string;
+  where?: unknown;
+  select?: string;
+  orderby?: string;
+  limit?: number;
+}
+
+function getZilcodeBase(env: Env): string {
+  return (env.ZILCODE_BASE || DEFAULT_ZILCODE_BASE).replace(/\/+$/, "");
+}
+
+function getSessionTtlSeconds(env: Env): number {
+  const value = Number(env.SESSION_TTL_SECONDS);
+  return Number.isFinite(value) && value > 0
+    ? Math.round(value)
+    : DEFAULT_SESSION_TTL_SECONDS;
+}
+
+function getZilcodeSessionStore(env: Env): KVNamespace {
+  return env.ZILCODE_SESSIONS ?? env.CHUNKS;
+}
+
+function getSessionKvKey(sessionId: string): string {
+  return `${ZILCODE_SESSION_PREFIX}${sessionId}`;
+}
+
+function getSessionIdFromRequest(request: Request): string {
+  const header = request.headers.get("X-Zilcode-Session");
+  if (header?.trim()) return header.trim();
+
+  const cookie = request.headers.get("Cookie") ?? "";
+  const match = cookie.match(/(?:^|;\s*)ragorit_zilcode_session=([^;]+)/);
+  return match ? decodeURIComponent(match[1]) : "";
+}
+
+function stripSensitiveUserFields(user: Record<string, unknown>): Record<string, unknown> {
+  const clone: Record<string, unknown> = { ...user };
+  delete clone.token;
+  delete clone.password;
+  delete clone.pin;
+  return clone;
+}
+
+function toArrayValues(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  if (value && typeof value === "object") return Object.values(value as Record<string, unknown>);
+  return [];
+}
+
+async function loadZilcodeSession(
+  request: Request,
+  env: Env
+): Promise<ZilcodeSessionState | null> {
+  const sessionId = getSessionIdFromRequest(request);
+  if (!sessionId) return null;
+
+  const raw = await getZilcodeSessionStore(env).get(getSessionKvKey(sessionId));
+  if (!raw) return null;
+
+  const session = JSON.parse(raw) as ZilcodeSession;
+  if (Date.parse(session.expires_at) <= Date.now()) {
+    await getZilcodeSessionStore(env).delete(getSessionKvKey(sessionId));
+    return null;
+  }
+
+  return { id: sessionId, session };
+}
+
+async function saveZilcodeSession(
+  env: Env,
+  sessionId: string,
+  session: ZilcodeSession
+): Promise<void> {
+  await getZilcodeSessionStore(env).put(
+    getSessionKvKey(sessionId),
+    JSON.stringify(session),
+    { expirationTtl: getSessionTtlSeconds(env) }
+  );
+}
+
+async function deleteZilcodeSession(env: Env, sessionId: string): Promise<void> {
+  if (!sessionId) return;
+  await getZilcodeSessionStore(env).delete(getSessionKvKey(sessionId));
+}
+
+function publicSessionPayload(state: ZilcodeSessionState): Record<string, unknown> {
+  const session = state.session;
+  return {
+    session_id: state.id,
+    user: stripSensitiveUserFields(session.user),
+    roles: session.roles,
+    orgs: session.orgs,
+    roleid: session.roleid,
+    orgid: session.orgid,
+    has_role_org: Boolean(session.roleid),
+    apps: session.apps,
+    access: session.access,
+    expires_at: session.expires_at
+  };
+}
+
+function resolveZilcodeUrl(env: Env, pathOrUrl: string): string {
+  if (/^https?:\/\//i.test(pathOrUrl)) return pathOrUrl;
+  return `${getZilcodeBase(env)}/${pathOrUrl.replace(/^\/+/, "")}`;
+}
+
+async function callZilcodeJson<T = unknown>(
+  env: Env,
+  pathOrUrl: string,
+  options: {
+    method?: string;
+    token?: string;
+    data?: unknown;
+  } = {}
+): Promise<ZilcodeApiEnvelope<T>> {
+  const headers = new Headers({
+    "Content-Type": "application/json;charset=UTF-8"
+  });
+
+  if (options.token) {
+    headers.set("Authorization", `Bearer ${options.token}`);
+  }
+
+  const response = await fetch(resolveZilcodeUrl(env, pathOrUrl), {
+    method: options.method ?? "GET",
+    headers,
+    body: options.data === undefined ? undefined : JSON.stringify(options.data)
+  });
+
+  const text = await response.text();
+  let data: unknown = {};
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = { result: text };
+  }
+
+  if (!response.ok) {
+    throw new Error(`Zilcode API lỗi ${response.status}: ${getErrorText(data)}`);
+  }
+
+  return data as ZilcodeApiEnvelope<T>;
+}
+
+function assertZilcodeSuccess<T>(envelope: ZilcodeApiEnvelope<T>): T {
+  if (envelope.success === false) {
+    throw new Error(`Zilcode API trả lỗi: ${getErrorText(envelope.result ?? envelope.error)}`);
+  }
+
+  return envelope.result as T;
+}
+
+async function fetchZilcodeAppMetadata(
+  env: Env,
+  session: ZilcodeSession,
+  appid: string
+): Promise<Record<string, unknown>> {
+  const envelope = await callZilcodeJson<Record<string, unknown>>(
+    env,
+    `rest/token/app/${encodeURIComponent(appid)}`,
+    { token: session.token }
+  );
+  return assertZilcodeSuccess(envelope);
+}
+
+function summarizeObjectCollection(value: unknown, limit = 30): unknown[] {
+  return toArrayValues(value).slice(0, limit);
+}
+
+function summarizeAppMetadata(metadata: Record<string, unknown>): Record<string, unknown> {
+  const tables = toArrayValues(metadata.tables);
+  const menus = toArrayValues(metadata.menus);
+  const domains = toArrayValues(metadata.domains);
+  const services = toArrayValues(metadata.services);
+  const wfsteps = toArrayValues(metadata.wfsteps);
+
+  return {
+    counts: {
+      tables: tables.length,
+      menus: menus.length,
+      domains: domains.length,
+      services: services.length,
+      wfsteps: wfsteps.length,
+      relates: toArrayValues(metadata.relates).length,
+      roles: toArrayValues(metadata.roles).length
+    },
+    tables: tables.slice(0, 40),
+    menus: menus.slice(0, 60),
+    domains: domains.slice(0, 30),
+    services: services.slice(0, 20),
+    roles: summarizeObjectCollection(metadata.roles, 20),
+    note: "Metadata đã được rút gọn. Gọi include_full='true' nếu cần toàn bộ payload."
+  };
+}
+
+function findTableMetadata(
+  appMetadata: Record<string, unknown>,
+  tableid: string,
+  tableName: string
+): Record<string, unknown> | null {
+  const tablesRaw = appMetadata.tables;
+  const tablesByKey = tablesRaw && typeof tablesRaw === "object"
+    ? tablesRaw as Record<string, unknown>
+    : {};
+
+  if (tableid && tablesByKey[tableid] && typeof tablesByKey[tableid] === "object") {
+    return tablesByKey[tableid] as Record<string, unknown>;
+  }
+
+  const normalizedId = tableid.toLowerCase();
+  const normalizedName = tableName.toLowerCase();
+
+  for (const table of toArrayValues(tablesRaw)) {
+    if (!table || typeof table !== "object") continue;
+    const record = table as Record<string, unknown>;
+    const id = String(record.tableid ?? "").toLowerCase();
+    const name = String(record.tablename ?? "").toLowerCase();
+
+    if ((normalizedId && id === normalizedId) || (normalizedName && name === normalizedName)) {
+      return record;
+    }
+  }
+
+  return null;
+}
+
+function tryParseJsonObject(value: unknown): unknown | null {
+  if (!value) return null;
+  if (typeof value === "object") return value;
+  if (typeof value !== "string") return null;
+
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function getArrayArg(args: Record<string, unknown>, name: string): unknown[] | undefined {
+  const value = args[name];
+  return Array.isArray(value) ? value : undefined;
+}
+
+function getBooleanStringArg(args: Record<string, unknown>, name: string): boolean {
+  const value = args[name];
+  return value === true || (typeof value === "string" && value.toLowerCase() === "true");
+}
+
+function escapeSqlString(value: string): string {
+  return value.replace(/'/g, "''");
+}
+
+const SQL_OPERATORS: Record<string, string> = {
+  is: " is ",
+  "!is": " is not ",
+  like: " like ",
+  "!like": " not like ",
+  in: " in(",
+  "!in": " not in(",
+  "=": "=",
+  "<>": "<>",
+  ">": ">",
+  ">=": ">=",
+  "<": "<",
+  "<=": "<=",
+  between: " between "
+};
+
+function formatSqlValue(value: unknown, operator: string): string {
+  if (Array.isArray(value)) {
+    return value.map(item => formatSqlValue(item, "=")).join(",");
+  }
+
+  if (typeof value === "string") {
+    return operator === "between" ? value : `N'${escapeSqlString(value)}'`;
+  }
+
+  if (typeof value === "boolean") return value ? "1" : "0";
+  if (value === null) return "null";
+  return String(value);
+}
+
+function decodeSqlWhere(where: unknown, wrap = false): string {
+  if (!where) return "";
+  if (typeof where === "string") return where;
+  if (!Array.isArray(where) || where.length === 0) return "";
+
+  const first = where[0];
+  const hasLeadingLogic = first === "and" || first === "or";
+  const logic = hasLeadingLogic ? String(first) : "and";
+  const start = hasLeadingLogic ? 1 : 0;
+
+  if (Array.isArray(where[start])) {
+    const clauses = where
+      .slice(start)
+      .map(item => decodeSqlWhere(item, true))
+      .filter(Boolean);
+    const joined = clauses.join(` ${logic} `);
+    return joined && (wrap || clauses.length > 1) ? `(${joined})` : joined;
+  }
+
+  const field = String(where[start] ?? "");
+  const operator = String(where[start + 1] ?? "=");
+  const value = where[start + 2];
+  const sqlOperator = SQL_OPERATORS[operator] ?? "=";
+  let clause = `${field}${sqlOperator}${formatSqlValue(value, operator)}`;
+  if (operator === "in" || operator === "!in") clause += ")";
+  return wrap ? `(${clause})` : clause;
+}
+
+function buildSqlRestSelectUrl(
+  tableUrl: string,
+  options: SqlRestSelectOptions
+): string {
+  if (options.id) {
+    return `${tableUrl.replace(/\/+$/, "")}/${encodeURIComponent(options.id)}`;
+  }
+
+  const params = new URLSearchParams();
+  params.set("where", decodeSqlWhere(options.where));
+  if (options.select) params.set("select", options.select);
+  if (options.orderby) params.set("orderby", options.orderby);
+  if (options.limit) params.set("limit", String(options.limit));
+  return `${tableUrl}?${params.toString()}`;
+}
+
+function getQuickSearchWhere(table: Record<string, unknown>, query: string): unknown[] | undefined {
+  if (!query) return undefined;
+  const field = String(
+    table.columnfind
+    || table.columndisplay
+    || table.columncode
+    || table.columnkey
+    || ""
+  );
+  return field ? [field, "like", `%${query}%`] : undefined;
+}
+
+async function readZilcodeRecords(
+  env: Env,
+  session: ZilcodeSession,
+  table: Record<string, unknown>,
+  options: SqlRestSelectOptions
+): Promise<unknown> {
+  const urlview = String(table.urlview ?? "");
+  if (!urlview) throw new Error("Table không có urlview để đọc dữ liệu.");
+
+  const endpoint = buildSqlRestSelectUrl(resolveZilcodeUrl(env, urlview), options);
+  const envelope = await callZilcodeJson(env, endpoint, { token: session.token });
+  return envelope.success === false ? assertZilcodeSuccess(envelope) : envelope.result ?? envelope;
+}
+
+function noZilcodeSessionResult(): ToolExecutionResult {
+  return {
+    content: JSON.stringify({
+      error: "Chưa đăng nhập Zilcode trong chatbot. Hãy đăng nhập bằng form Zilcode ở giao diện chat trước khi dùng tool đọc dữ liệu Zilcode."
+    }, null, 2)
+  };
+}
+
 async function executeTool(
   tool: ToolCall,
   env: Env,
   screenContext?: ScreenContext,
   chatHistory: AIMessage[] = [],
-  debugSteps?: DebugStep[]
+  debugSteps?: DebugStep[],
+  zilcodeSession?: ZilcodeSessionState | null
 ): Promise<ToolExecutionResult> {
 
   switch (tool.name) {
@@ -1196,6 +1727,186 @@ Trả lời ngắn gọn, tự nhiên, không nhắc đến function/tool nội 
         selected_node: "condition-1",
         resource_id: "wf-001"
       }, null, 2) };
+    }
+
+    case "zilcode_get_session_info": {
+      if (!zilcodeSession) return noZilcodeSessionResult();
+      return { content: JSON.stringify(publicSessionPayload(zilcodeSession), null, 2) };
+    }
+
+    case "zilcode_list_applications": {
+      if (!zilcodeSession) return noZilcodeSessionResult();
+      return { content: JSON.stringify({
+        apps: zilcodeSession.session.apps ?? [],
+        has_role_org: Boolean(zilcodeSession.session.roleid),
+        note: zilcodeSession.session.apps ? undefined : "Phiên hiện tại chưa có apps. Hãy chọn role/org trước."
+      }, null, 2) };
+    }
+
+    case "zilcode_get_user_permissions": {
+      if (!zilcodeSession) return noZilcodeSessionResult();
+      const tableName = getStringArg(tool.arguments, "table_name");
+      const access = zilcodeSession.session.access ?? {};
+      const content = tableName
+        ? { table_name: tableName, access: access[tableName] ?? null }
+        : { access };
+      return { content: JSON.stringify(content, null, 2) };
+    }
+
+    case "zilcode_get_app_metadata": {
+      if (!zilcodeSession) return noZilcodeSessionResult();
+      const appid = getStringArg(tool.arguments, "appid");
+      if (!appid) return { content: "Lỗi: bắt buộc phải có appid." };
+      const metadata = await fetchZilcodeAppMetadata(env, zilcodeSession.session, appid);
+      const includeFull = getBooleanStringArg(tool.arguments, "include_full");
+      return { content: JSON.stringify(includeFull ? metadata : summarizeAppMetadata(metadata), null, 2) };
+    }
+
+    case "zilcode_search_windows": {
+      if (!zilcodeSession) return noZilcodeSessionResult();
+      const appid = getStringArg(tool.arguments, "appid");
+      const keyword = getStringArg(tool.arguments, "keyword").toLowerCase();
+      if (!appid || !keyword) return { content: "Lỗi: bắt buộc phải có appid và keyword." };
+      const metadata = await fetchZilcodeAppMetadata(env, zilcodeSession.session, appid);
+      const matches = toArrayValues(metadata.menus)
+        .filter(menu => {
+          if (!menu || typeof menu !== "object") return false;
+          const item = menu as Record<string, unknown>;
+          const haystack = [item.menuname, item.translate, item.linkwindowid, item.windowid, item.execname]
+            .map(value => String(value ?? "").toLowerCase())
+            .join(" ");
+          return haystack.includes(keyword);
+        })
+        .slice(0, 30);
+      return { content: JSON.stringify({ appid, keyword, windows: matches }, null, 2) };
+    }
+
+    case "zilcode_get_window_config": {
+      if (!zilcodeSession) return noZilcodeSessionResult();
+      const windowid = getStringArg(tool.arguments, "windowid");
+      if (!windowid) return { content: "Lỗi: bắt buộc phải có windowid." };
+      const envelope = await callZilcodeJson<Record<string, unknown>>(
+        env,
+        `rest/token/cache/${encodeURIComponent(windowid)}`,
+        { token: zilcodeSession.session.token }
+      );
+      const cache = assertZilcodeSuccess(envelope) as Record<string, unknown>;
+      const parsedConfig = tryParseJsonObject(cache.configjson);
+      const parsedLayout = tryParseJsonObject(cache.layoutjson);
+      return { content: JSON.stringify({
+        windowid,
+        parsed: Boolean(parsedConfig),
+        config: parsedConfig,
+        layout: parsedLayout,
+        raw: parsedConfig ? undefined : {
+          configjson_length: String(cache.configjson ?? "").length,
+          configjson_preview: String(cache.configjson ?? "").slice(0, 800),
+          layoutjson_length: String(cache.layoutjson ?? "").length
+        },
+        warning: parsedConfig ? undefined : "configjson có thể đang ở dạng Zipson. Tool hiện trả raw preview; cần thêm parser Zipson nếu muốn parse tabs/fields trực tiếp trong Worker."
+      }, null, 2) };
+    }
+
+    case "zilcode_list_tables": {
+      if (!zilcodeSession) return noZilcodeSessionResult();
+      const appid = getStringArg(tool.arguments, "appid");
+      const keyword = getStringArg(tool.arguments, "keyword").toLowerCase();
+      if (!appid) return { content: "Lỗi: bắt buộc phải có appid." };
+      const metadata = await fetchZilcodeAppMetadata(env, zilcodeSession.session, appid);
+      const tables = toArrayValues(metadata.tables)
+        .filter(table => {
+          if (!keyword) return true;
+          if (!table || typeof table !== "object") return false;
+          const item = table as Record<string, unknown>;
+          const haystack = [item.tableid, item.tablename, item.alias, item.description, item.columndisplay]
+            .map(value => String(value ?? "").toLowerCase())
+            .join(" ");
+          return haystack.includes(keyword);
+        })
+        .slice(0, 80);
+      return { content: JSON.stringify({ appid, keyword, tables }, null, 2) };
+    }
+
+    case "zilcode_get_table_metadata": {
+      if (!zilcodeSession) return noZilcodeSessionResult();
+      const appid = getStringArg(tool.arguments, "appid");
+      const tableid = getStringArg(tool.arguments, "tableid");
+      const tableName = getStringArg(tool.arguments, "table_name");
+      if (!appid) return { content: "Lỗi: bắt buộc phải có appid." };
+      const metadata = await fetchZilcodeAppMetadata(env, zilcodeSession.session, appid);
+      const table = findTableMetadata(metadata, tableid, tableName);
+      return { content: JSON.stringify({ appid, tableid, table_name: tableName, table }, null, 2) };
+    }
+
+    case "zilcode_search_records": {
+      if (!zilcodeSession) return noZilcodeSessionResult();
+      const appid = getStringArg(tool.arguments, "appid");
+      const tableid = getStringArg(tool.arguments, "tableid");
+      const tableName = getStringArg(tool.arguments, "table_name");
+      const query = getStringArg(tool.arguments, "query");
+      const select = getStringArg(tool.arguments, "select");
+      const orderby = getStringArg(tool.arguments, "orderby");
+      const limit = Math.min(
+        ZILCODE_READ_LIMIT_MAX,
+        Math.max(1, Number(getStringArg(tool.arguments, "limit")) || ZILCODE_READ_LIMIT_DEFAULT)
+      );
+      if (!appid) return { content: "Lỗi: bắt buộc phải có appid." };
+      const metadata = await fetchZilcodeAppMetadata(env, zilcodeSession.session, appid);
+      const table = findTableMetadata(metadata, tableid, tableName);
+      if (!table) return { content: `Không tìm thấy table với tableid='${tableid}' hoặc table_name='${tableName}'.` };
+      const where = getArrayArg(tool.arguments, "where") ?? getQuickSearchWhere(table, query);
+      const records = await readZilcodeRecords(env, zilcodeSession.session, table, { where, select, orderby, limit });
+      return { content: JSON.stringify({
+        appid,
+        table: {
+          tableid: table.tableid,
+          tablename: table.tablename,
+          columnkey: table.columnkey,
+          columndisplay: table.columndisplay
+        },
+        query,
+        where,
+        limit,
+        records
+      }, null, 2) };
+    }
+
+    case "zilcode_get_record": {
+      if (!zilcodeSession) return noZilcodeSessionResult();
+      const appid = getStringArg(tool.arguments, "appid");
+      const tableid = getStringArg(tool.arguments, "tableid");
+      const tableName = getStringArg(tool.arguments, "table_name");
+      const recordid = getStringArg(tool.arguments, "recordid");
+      if (!appid || !recordid) return { content: "Lỗi: bắt buộc phải có appid và recordid." };
+      const metadata = await fetchZilcodeAppMetadata(env, zilcodeSession.session, appid);
+      const table = findTableMetadata(metadata, tableid, tableName);
+      if (!table) return { content: `Không tìm thấy table với tableid='${tableid}' hoặc table_name='${tableName}'.` };
+      const record = await readZilcodeRecords(env, zilcodeSession.session, table, { id: recordid });
+      return { content: JSON.stringify({
+        appid,
+        table: {
+          tableid: table.tableid,
+          tablename: table.tablename,
+          columnkey: table.columnkey,
+          columndisplay: table.columndisplay
+        },
+        recordid,
+        record
+      }, null, 2) };
+    }
+
+    case "zilcode_get_domain_values": {
+      if (!zilcodeSession) return noZilcodeSessionResult();
+      const appid = getStringArg(tool.arguments, "appid");
+      const domainid = getStringArg(tool.arguments, "domainid");
+      if (!appid || !domainid) return { content: "Lỗi: bắt buộc phải có appid và domainid." };
+      const metadata = await fetchZilcodeAppMetadata(env, zilcodeSession.session, appid);
+      const domain = toArrayValues(metadata.domains).find(item => {
+        if (!item || typeof item !== "object") return false;
+        return String((item as Record<string, unknown>).domainid ?? "") === domainid;
+      }) as Record<string, unknown> | undefined;
+      const values = domain?.domainjson ? tryParseJsonObject(domain.domainjson) : null;
+      return { content: JSON.stringify({ appid, domainid, domain, values }, null, 2) };
     }
 
     default:
@@ -1355,7 +2066,8 @@ async function runAgenticLoop(
   env: Env,
   screenContext?: ScreenContext,
   chatHistory: AIMessage[] = [],
-  debugSteps?: DebugStep[]
+  debugSteps?: DebugStep[],
+  zilcodeSession?: ZilcodeSessionState | null
 ): Promise<AgenticLoopResult> {
 
   addDebugStep(debugSteps, "agent.start", "start", "Bắt đầu agentic loop.", {
@@ -1377,6 +2089,7 @@ Dùng draw_chart khi người dùng yêu cầu vẽ/tạo ảnh biểu đồ, s�
 Khi dùng rag_search, thường chỉ gọi một lần với query tổng hợp tốt. Chỉ gọi lại nếu kết quả chưa đủ và query mới khác rõ ràng về ý định hoặc phạm vi; không gọi lại cùng query hoặc query tương đương.
 Chỉ dùng get_screen_context khi người dùng hỏi về đối tượng đang hiển thị/được chọn trong UI và câu trả lời phụ thuộc vào màn hình/node/tài nguyên hiện tại. Không dùng get_screen_context chỉ vì người dùng đang chat.
 Chỉ dùng get_workflow khi có workflow ID rõ ràng hoặc sau khi có screen context cho thấy tài nguyên hiện tại là workflow cần phân tích.
+Các công cụ bắt đầu bằng zilcode_ là read-only tools gọi API Zilcode bằng phiên đăng nhập của người dùng trong chatbot. Dùng các công cụ này khi người dùng hỏi dữ liệu hoặc metadata đang có trong hệ thống Zilcode thật: app, quyền, window, table, domain hoặc record. Nếu chưa đăng nhập Zilcode, hãy yêu cầu người dùng đăng nhập ở giao diện chat trước. Không dùng các công cụ zilcode_ cho chào hỏi hoặc kiến thức chung có thể trả lời bằng general_chat/RAG.
 Với câu hỏi ngoài phạm vi Zilcode, hãy dùng general_chat.
 Sau khi đã có đủ thông tin từ công cụ, hãy trả lời ngay thay vì tiếp tục gọi thêm công cụ. Nếu general_chat đã trả lời và chưa dùng rag_search, hãy dùng nội dung đó làm cơ sở cho câu trả lời cuối cùng.
 Khi đã dùng rag_search và có kết quả, không gọi general_chat để hỏi lại kiến thức chung; hãy tổng hợp câu trả lời từ kết quả rag_search.
@@ -1467,7 +2180,8 @@ Trả lời đúng mức chi tiết theo yêu cầu của người dùng, cụ t
         env,
         screenContext,
         chatHistory,
-        debugSteps
+        debugSteps,
+        zilcodeSession
       );
       const toolResult = toolExecution.content;
 
@@ -1577,6 +2291,164 @@ Dựa trên nội dung từ general_chat, trả lời tự nhiên và không nh�
   };
 }
 
+// ─── Zilcode auth handlers ──────────────────────────────────────────────────
+
+function getRecordId(record: unknown, keys: string[]): string | number | undefined {
+  if (!record || typeof record !== "object") return undefined;
+  const data = record as Record<string, unknown>;
+  for (const key of keys) {
+    const value = data[key];
+    if (typeof value === "string" || typeof value === "number") return value;
+  }
+  return undefined;
+}
+
+async function applyZilcodeRoleOrg(
+  env: Env,
+  session: ZilcodeSession,
+  roleid: string | number,
+  orgid: string | number
+): Promise<void> {
+  const envelope = await callZilcodeJson<Record<string, unknown>>(
+    env,
+    "rest/token/roleorg",
+    {
+      method: "PUT",
+      token: session.token,
+      data: [roleid, orgid || 0]
+    }
+  );
+  const result = assertZilcodeSuccess(envelope);
+  session.roleid = roleid;
+  session.orgid = orgid || 0;
+  session.access = (result.access && typeof result.access === "object")
+    ? result.access as Record<string, unknown>
+    : {};
+  session.apps = result.apps ?? [];
+  session.notifies = result.notifies ?? [];
+  session.updated_at = new Date().toISOString();
+}
+
+async function handleZilcodeLogin(request: Request, env: Env): Promise<Response> {
+  const body = await request.json() as {
+    username?: string;
+    sitecode?: string;
+    password?: string;
+  };
+
+  const username = body.username?.trim();
+  const sitecode = body.sitecode?.trim();
+  const password = body.password ?? "";
+
+  if (!username || !sitecode || !password) {
+    return Response.json(
+      { success: false, error: "Bắt buộc phải có username, sitecode và password." },
+      { status: 400, headers: CORS }
+    );
+  }
+
+  const envelope = await callZilcodeJson<Record<string, unknown>>(
+    env,
+    "rest/token/",
+    {
+      method: "POST",
+      data: [username, sitecode, password]
+    }
+  );
+  const user = assertZilcodeSuccess(envelope);
+  const token = String(user.token ?? "");
+  if (!token) {
+    throw new Error("Zilcode login thành công nhưng response không có token.");
+  }
+
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + getSessionTtlSeconds(env) * 1000);
+  const sessionId = crypto.randomUUID();
+  const roles = user.roles ?? [];
+  const orgs = user.orgs ?? [];
+  const session: ZilcodeSession = {
+    token,
+    user: stripSensitiveUserFields(user),
+    roles,
+    orgs,
+    created_at: now.toISOString(),
+    updated_at: now.toISOString(),
+    expires_at: expiresAt.toISOString()
+  };
+
+  const roleValues = toArrayValues(roles);
+  const orgValues = toArrayValues(orgs);
+  if (roleValues.length === 1 && orgValues.length <= 1) {
+    const roleid = getRecordId(roleValues[0], ["id", "roleid"]);
+    const orgid = orgValues.length ? getRecordId(orgValues[0], ["id", "orgid"]) ?? 0 : 0;
+    if (roleid !== undefined) {
+      await applyZilcodeRoleOrg(env, session, roleid, orgid);
+    }
+  }
+
+  await saveZilcodeSession(env, sessionId, session);
+  const state = { id: sessionId, session };
+
+  return Response.json(
+    {
+      success: true,
+      ...publicSessionPayload(state),
+      needs_role_org: !session.roleid
+    },
+    { headers: CORS }
+  );
+}
+
+async function handleZilcodeSelectRoleOrg(request: Request, env: Env): Promise<Response> {
+  const state = await loadZilcodeSession(request, env);
+  if (!state) {
+    return Response.json(
+      { success: false, error: "Chưa có phiên Zilcode hoặc phiên đã hết hạn." },
+      { status: 401, headers: CORS }
+    );
+  }
+
+  const body = await request.json() as {
+    roleid?: string | number;
+    orgid?: string | number;
+  };
+
+  if (body.roleid === undefined || body.roleid === "") {
+    return Response.json(
+      { success: false, error: "Bắt buộc phải có roleid." },
+      { status: 400, headers: CORS }
+    );
+  }
+
+  await applyZilcodeRoleOrg(env, state.session, body.roleid, body.orgid ?? 0);
+  await saveZilcodeSession(env, state.id, state.session);
+
+  return Response.json(
+    { success: true, ...publicSessionPayload(state), needs_role_org: false },
+    { headers: CORS }
+  );
+}
+
+async function handleZilcodeMe(request: Request, env: Env): Promise<Response> {
+  const state = await loadZilcodeSession(request, env);
+  if (!state) {
+    return Response.json(
+      { success: false, authenticated: false },
+      { status: 401, headers: CORS }
+    );
+  }
+
+  return Response.json(
+    { success: true, authenticated: true, ...publicSessionPayload(state) },
+    { headers: CORS }
+  );
+}
+
+async function handleZilcodeLogout(request: Request, env: Env): Promise<Response> {
+  await deleteZilcodeSession(env, getSessionIdFromRequest(request));
+  return Response.json({ success: true }, { headers: CORS });
+}
+
 // ─── Worker handler ───────────────────────────────────────────────────────────
 
 export default {
@@ -1599,6 +2471,36 @@ export default {
     }
 
     // ── POST /chat — agentic chat ────────────────────────────────────────────
+    if (url.pathname === "/auth/login" && request.method === "POST") {
+      try {
+        return await handleZilcodeLogin(request, env);
+      } catch (error) {
+        return Response.json(
+          { success: false, error: error instanceof Error ? error.message : "Lỗi đăng nhập Zilcode." },
+          { status: 500, headers: CORS }
+        );
+      }
+    }
+
+    if (url.pathname === "/auth/select-role-org" && request.method === "POST") {
+      try {
+        return await handleZilcodeSelectRoleOrg(request, env);
+      } catch (error) {
+        return Response.json(
+          { success: false, error: error instanceof Error ? error.message : "Lỗi chọn role/org Zilcode." },
+          { status: 500, headers: CORS }
+        );
+      }
+    }
+
+    if (url.pathname === "/auth/me" && request.method === "GET") {
+      return handleZilcodeMe(request, env);
+    }
+
+    if (url.pathname === "/auth/logout" && request.method === "POST") {
+      return handleZilcodeLogout(request, env);
+    }
+
     if (url.pathname === "/chat" && request.method === "POST") {
       let debugSteps: DebugStep[] | undefined;
 
@@ -1614,11 +2516,13 @@ export default {
 
         const debugEnabled = body.debug === true;
         debugSteps = debugEnabled ? [] as DebugStep[] : undefined;
+        const zilcodeSession = await loadZilcodeSession(request, env);
 
         addDebugStep(debugSteps, "request.received", "ok", "Worker nhận request /chat.", {
           message_chars: body.message.length,
           raw_history_messages: Array.isArray(body.history) ? body.history.length : 0,
-          has_context: Boolean(body.context)
+          has_context: Boolean(body.context),
+          has_zilcode_session: Boolean(zilcodeSession)
         });
 
         const chatHistory = sanitizeChatHistory(body.history);
@@ -1632,7 +2536,8 @@ export default {
           env,
           body.context,
           chatHistory,
-          debugSteps
+          debugSteps,
+          zilcodeSession
         );
 
         addDebugStep(debugSteps, "response.ready", "ok", "Chuẩn bị trả response về client.", {

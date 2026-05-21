@@ -18,7 +18,9 @@
 
 	"vars": {
 		"OPENROUTER_MODEL": "openrouter/free",
-		"OPENROUTER_EMBEDDING_MODEL": "nvidia/llama-nemotron-embed-vl-1b-v2:free"
+		"OPENROUTER_EMBEDDING_MODEL": "nvidia/llama-nemotron-embed-vl-1b-v2:free",
+		"ZILCODE_BASE": "https://dvnb.zilcode.vn",
+		"SESSION_TTL_SECONDS": "28800"
 	},
 
 	"ai": {
@@ -35,6 +37,8 @@
 	],
 
 	// KV namespace to store chunk text (Vectorize only stores vectors, not text)
+	// Zilcode login sessions are also stored here with prefix zilcode_session: for the current MVP.
+	// For production, create a separate KV binding named ZILCODE_SESSIONS and keep tokens outside CHUNKS.
 	// Create with: wrangler kv namespace create CHUNKS
 	// Then replace <KV_NAMESPACE_ID> below with the returned id
 	"kv_namespaces": [

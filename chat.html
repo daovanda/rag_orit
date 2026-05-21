@@ -55,6 +55,36 @@
     color: #1a1a1a;
   }
 
+  .auth-panel {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: 8px;
+  }
+
+  .auth-panel input {
+    font-size: 12px;
+    border: 0.5px solid #ddd;
+    border-radius: 6px;
+    padding: 5px 8px;
+    width: 105px;
+    background: #fafaf8;
+    color: #1a1a1a;
+  }
+
+  .auth-panel input[type="password"] {
+    width: 115px;
+  }
+
+  #authStatus {
+    font-size: 12px;
+    color: #666;
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   .dot {
     width: 8px; height: 8px;
     border-radius: 50%;
@@ -373,6 +403,14 @@
     <input type="text" id="workerUrl" value="https://ragorit.daovanda2405.workers.dev" placeholder="Worker URL..." />
     <button class="suggestion-btn" onclick="checkHealth()">Ping</button>
   </div>
+  <div class="auth-panel">
+    <input type="text" id="zilUsername" placeholder="Username" autocomplete="username" />
+    <input type="text" id="zilSitecode" placeholder="SiteCode" autocomplete="organization" />
+    <input type="password" id="zilPassword" placeholder="Password" autocomplete="current-password" />
+    <button class="suggestion-btn" id="zilLoginBtn" onclick="loginZilcode()">Login</button>
+    <button class="suggestion-btn" id="zilLogoutBtn" onclick="logoutZilcode()">Logout</button>
+    <span id="authStatus">Chưa đăng nhập Zilcode</span>
+  </div>
 </header>
 
 <div id="messages">
@@ -404,12 +442,25 @@
     draw_chart: { label: 'draw_chart', icon: '📊', cls: 'draw_chart' },
     get_workflow: { label: 'get_workflow', icon: '⚙', cls: 'get_workflow' },
     get_screen_context: { label: 'get_screen_context', icon: '🖥', cls: 'get_screen_context' },
+    zilcode_get_session_info: { label: 'zilcode_session', icon: 'Z', cls: 'get_workflow' },
+    zilcode_list_applications: { label: 'zilcode_apps', icon: 'Z', cls: 'get_workflow' },
+    zilcode_get_user_permissions: { label: 'zilcode_permissions', icon: 'Z', cls: 'get_workflow' },
+    zilcode_get_app_metadata: { label: 'zilcode_app_metadata', icon: 'Z', cls: 'get_workflow' },
+    zilcode_search_windows: { label: 'zilcode_search_windows', icon: 'Z', cls: 'get_workflow' },
+    zilcode_get_window_config: { label: 'zilcode_window_config', icon: 'Z', cls: 'get_workflow' },
+    zilcode_list_tables: { label: 'zilcode_tables', icon: 'Z', cls: 'get_workflow' },
+    zilcode_get_table_metadata: { label: 'zilcode_table_metadata', icon: 'Z', cls: 'get_workflow' },
+    zilcode_search_records: { label: 'zilcode_search_records', icon: 'Z', cls: 'get_workflow' },
+    zilcode_get_record: { label: 'zilcode_get_record', icon: 'Z', cls: 'get_workflow' },
+    zilcode_get_domain_values: { label: 'zilcode_domain_values', icon: 'Z', cls: 'get_workflow' },
   };
 
   const CHAT_HISTORY_STORAGE_KEY = 'zilcode_chat_history_v1';
+  const ZILCODE_SESSION_STORAGE_KEY = 'zilcode_api_session_v1';
   const MAX_HISTORY_MESSAGES = 6;
   const MAX_HISTORY_CONTENT_CHARS = 1200;
   let chatHistory = loadChatHistory();
+  let zilcodeSessionId = sessionStorage.getItem(ZILCODE_SESSION_STORAGE_KEY) || '';
 
   function normalizeHistoryMessage(message) {
     if (!message || typeof message !== 'object') return null;
@@ -469,6 +520,128 @@
 
   function getUrl() {
     return document.getElementById('workerUrl').value.replace(/\/$/, '');
+  }
+
+  function getZilcodeHeaders() {
+    const headers = { 'Content-Type': 'application/json' };
+    if (zilcodeSessionId) headers['X-Zilcode-Session'] = zilcodeSessionId;
+    return headers;
+  }
+
+  function setAuthStatus(text, ok = false) {
+    const el = document.getElementById('authStatus');
+    el.textContent = text;
+    el.style.color = ok ? '#166534' : '#666';
+  }
+
+  function asList(value) {
+    if (Array.isArray(value)) return value;
+    if (value && typeof value === 'object') return Object.values(value);
+    return [];
+  }
+
+  function getOptionId(item, keys) {
+    if (!item || typeof item !== 'object') return '';
+    for (const key of keys) {
+      if (item[key] !== undefined && item[key] !== null) return String(item[key]);
+    }
+    return '';
+  }
+
+  async function selectRoleOrgFromLogin(data) {
+    const roles = asList(data.roles);
+    const orgs = asList(data.orgs);
+    const defaultRole = getOptionId(roles[0], ['id', 'roleid']);
+    const defaultOrg = orgs.length ? getOptionId(orgs[0], ['id', 'orgid']) : '0';
+
+    const roleid = window.prompt('Nhập roleid Zilcode cần dùng:', defaultRole);
+    if (!roleid) return;
+    const orgid = window.prompt('Nhập orgid Zilcode cần dùng:', defaultOrg || '0') || '0';
+
+    const res = await fetch(getUrl() + '/auth/select-role-org', {
+      method: 'POST',
+      headers: getZilcodeHeaders(),
+      body: JSON.stringify({ roleid, orgid })
+    });
+    const selected = await res.json();
+    if (!selected.success) throw new Error(selected.error || 'Không chọn được role/org');
+    setAuthStatus(`Zilcode: role ${selected.roleid}, org ${selected.orgid}`, true);
+  }
+
+  async function loginZilcode() {
+    const username = document.getElementById('zilUsername').value.trim();
+    const sitecode = document.getElementById('zilSitecode').value.trim();
+    const password = document.getElementById('zilPassword').value;
+
+    if (!username || !sitecode || !password) {
+      setAuthStatus('Thiếu username/sitecode/password');
+      return;
+    }
+
+    const btn = document.getElementById('zilLoginBtn');
+    btn.disabled = true;
+    setAuthStatus('Đang đăng nhập...');
+
+    try {
+      const res = await fetch(getUrl() + '/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, sitecode, password })
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error || 'Đăng nhập thất bại');
+
+      zilcodeSessionId = data.session_id || '';
+      sessionStorage.setItem(ZILCODE_SESSION_STORAGE_KEY, zilcodeSessionId);
+      document.getElementById('zilPassword').value = '';
+
+      if (data.needs_role_org) {
+        setAuthStatus('Cần chọn role/org');
+        await selectRoleOrgFromLogin(data);
+      } else {
+        setAuthStatus(`Zilcode: role ${data.roleid || '-'}, org ${data.orgid || 0}`, true);
+      }
+    } catch (err) {
+      setAuthStatus(err.message || 'Lỗi đăng nhập');
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function refreshZilcodeAuth() {
+    if (!zilcodeSessionId) {
+      setAuthStatus('Chưa đăng nhập Zilcode');
+      return;
+    }
+
+    try {
+      const res = await fetch(getUrl() + '/auth/me', {
+        method: 'GET',
+        headers: getZilcodeHeaders()
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error();
+      setAuthStatus(`Zilcode: role ${data.roleid || '-'}, org ${data.orgid || 0}`, true);
+    } catch {
+      zilcodeSessionId = '';
+      sessionStorage.removeItem(ZILCODE_SESSION_STORAGE_KEY);
+      setAuthStatus('Phiên Zilcode hết hạn');
+    }
+  }
+
+  async function logoutZilcode() {
+    try {
+      if (zilcodeSessionId) {
+        await fetch(getUrl() + '/auth/logout', {
+          method: 'POST',
+          headers: getZilcodeHeaders()
+        });
+      }
+    } finally {
+      zilcodeSessionId = '';
+      sessionStorage.removeItem(ZILCODE_SESSION_STORAGE_KEY);
+      setAuthStatus('Chưa đăng nhập Zilcode');
+    }
   }
 
   async function checkHealth() {
@@ -714,7 +887,7 @@
     try {
       const res = await fetch(getUrl() + '/chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getZilcodeHeaders(),
         body: JSON.stringify({
           message: text,
           history: chatHistory.slice(-MAX_HISTORY_MESSAGES),
@@ -771,6 +944,7 @@
 
   renderStoredHistory();
   checkHealth();
+  refreshZilcodeAuth();
 </script>
 </body>
 </html>
