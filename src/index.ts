@@ -15,6 +15,7 @@ export interface Env {
 const LLAMA_CHAT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 const CHAT_MODEL = "@cf/openai/gpt-oss-120b";
 const GENERAL_CHAT_MODEL = CHAT_MODEL;
+const QUERY_REWRITE_MODEL = CHAT_MODEL;
 const INTERNAL_CHAT_FALLBACK_MODEL = LLAMA_CHAT_MODEL;
 const EMBEDDING_MODEL = "@cf/baai/bge-m3";
 const CHART_IMAGE_MODEL = "@cf/black-forest-labs/flux-2-dev";
@@ -22,6 +23,7 @@ const TOOL_SELECTION_MAX_TOKENS = 512;
 const GENERAL_CHAT_MAX_TOKENS = 1024;
 const RAG_FINAL_MAX_TOKENS = 2048;
 const RAG_RERANK_MAX_TOKENS = 512;
+const RAG_QUERY_REWRITE_MAX_TOKENS = 160;
 const DEFAULT_CHART_WIDTH = 1024;
 const DEFAULT_CHART_HEIGHT = 768;
 const RAG_VECTOR_TOP_K = 10;
@@ -133,6 +135,17 @@ interface ToolExecutionResult {
   content: string;
   sources?: RagSource[];
   embedding_debug?: EmbeddingDebug;
+  rag_query_debug?: RagQueryDebug;
+}
+
+type DebugStatus = "start" | "ok" | "skip" | "error";
+
+interface DebugStep {
+  step: string;
+  status: DebugStatus;
+  detail: string;
+  data?: Record<string, unknown>;
+  timestamp_ms: number;
 }
 
 interface EmbeddingDebug {
@@ -145,6 +158,14 @@ interface EmbeddingDebug {
 interface EmbeddingResult {
   vector: number[];
   debug: EmbeddingDebug;
+}
+
+interface RagQueryDebug {
+  original_query: string;
+  rewritten_query: string;
+  used: boolean;
+  reason: string;
+  model?: string;
 }
 
 interface VectorMatch {
@@ -168,6 +189,24 @@ interface RagCandidate extends StoredChunk {
   vector_score?: number;
   rerank_rank?: number;
   source_label: string;
+}
+
+function addDebugStep(
+  debugSteps: DebugStep[] | undefined,
+  step: string,
+  status: DebugStatus,
+  detail: string,
+  data?: Record<string, unknown>
+): void {
+  if (!debugSteps) return;
+
+  debugSteps.push({
+    step,
+    status,
+    detail,
+    data,
+    timestamp_ms: Date.now()
+  });
 }
 
 interface ChatModelRequest {
@@ -691,12 +730,181 @@ function sortByVectorScore(candidates: RagCandidate[]): RagCandidate[] {
   return [...candidates].sort((a, b) => (b.vector_score ?? -Infinity) - (a.vector_score ?? -Infinity));
 }
 
+function normalizeSpaces(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function getAmbiguousRagQueryReason(query: string, chatHistory: AIMessage[]): string | null {
+  if (!chatHistory.length) return null;
+
+  const normalized = normalizeSpaces(query).toLowerCase();
+  if (!normalized) return null;
+
+  const contextualPatterns = [
+    /(^|\s)(nó|đó|này|kia)(\s|$)/u,
+    /(^|\s)(cái|phần|mục|chỗ|bước|trang|màn hình|module|chức năng|tính năng|workflow|node)\s+(đó|này|kia)(\s|$)/u,
+    /(^|\s)(ở trên|như trên|vừa rồi|vừa nói|ban nãy|tiếp theo|sau đó)(\s|$)/u,
+    /(^|\s)(còn|vậy|thế)\s+(thì|nó|phần|bước|mục|cái)(\s|$)/u
+  ];
+
+  if (contextualPatterns.some(pattern => pattern.test(normalized))) {
+    return "query có đại từ hoặc tham chiếu phụ thuộc lịch sử chat";
+  }
+
+  const genericQueries = [
+    "là gì",
+    "dùng thế nào",
+    "sử dụng thế nào",
+    "hướng dẫn tôi",
+    "làm sao",
+    "làm thế nào",
+    "cách làm",
+    "tiếp theo",
+    "sửa lỗi",
+    "giải thích thêm",
+    "nói rõ hơn"
+  ];
+
+  if (genericQueries.includes(normalized)) {
+    return "query quá ngắn hoặc quá chung, cần lịch sử để làm rõ";
+  }
+
+  return null;
+}
+
+function formatHistoryForRewrite(chatHistory: AIMessage[]): string {
+  return chatHistory
+    .slice(-MAX_HISTORY_MESSAGES)
+    .map(message => {
+      const role = message.role === "user" ? "Người dùng" : "Trợ lý";
+      return `${role}: ${normalizeSpaces(message.content).slice(0, MAX_HISTORY_CONTENT_CHARS)}`;
+    })
+    .join("\n");
+}
+
+function cleanRewrittenQuery(raw: string, fallback: string): string {
+  const cleaned = normalizeSpaces(
+    raw
+      .replace(/```json|```/g, "")
+      .replace(/^(truy vấn|query|rewritten query|câu truy vấn)\s*[:：-]\s*/i, "")
+  ).replace(/^["'“”]+|["'“”]+$/g, "").trim();
+
+  if (!cleaned || cleaned.length < 4) return fallback;
+  return cleaned.slice(0, 320).trim();
+}
+
+async function maybeRewriteRagQuery(
+  query: string,
+  chatHistory: AIMessage[],
+  env: Env,
+  debugSteps?: DebugStep[]
+): Promise<{ query: string; debug: RagQueryDebug }> {
+  const originalQuery = normalizeSpaces(query);
+  const reason = getAmbiguousRagQueryReason(originalQuery, chatHistory);
+
+  if (!reason) {
+    addDebugStep(debugSteps, "rag.query_rewrite", "skip", chatHistory.length ? "Query đã đủ rõ, không cần rewrite." : "Không có history để rewrite.", {
+      original_query: originalQuery,
+      history_messages: chatHistory.length
+    });
+
+    return {
+      query: originalQuery,
+      debug: {
+        original_query: originalQuery,
+        rewritten_query: originalQuery,
+        used: false,
+        reason: chatHistory.length ? "query đã đủ rõ, không cần rewrite" : "không có history để rewrite"
+      }
+    };
+  }
+
+  try {
+    addDebugStep(debugSteps, "rag.query_rewrite", "start", "Rewrite query mơ hồ bằng history.", {
+      model: QUERY_REWRITE_MODEL,
+      original_query: originalQuery,
+      reason,
+      history_messages: chatHistory.length
+    });
+
+    const response = await runChatModel(QUERY_REWRITE_MODEL, {
+      max_tokens: RAG_QUERY_REWRITE_MAX_TOKENS,
+      temperature: 0,
+      messages: [
+        {
+          role: "system",
+          content: `Bạn là bộ rewrite query cho hệ thống RAG tài liệu Zilcode.
+Nhiệm vụ: dựa vào lịch sử hội thoại và câu hỏi hiện tại, viết lại thành một truy vấn tìm kiếm độc lập, rõ nghĩa.
+Chỉ trả về đúng một câu truy vấn, không giải thích, không markdown, không JSON.
+Giữ thuật ngữ Zilcode quan trọng như App Builder, SQL Cloud, User, Role, Organization, Application, Window, Tab, Field, Workflow nếu có.
+Nếu câu hỏi hiện tại đã rõ sau khi xét lịch sử, vẫn viết lại thành câu truy vấn ngắn gọn và đầy đủ ngữ cảnh.`
+        },
+        {
+          role: "user",
+          content: [
+            "Lịch sử hội thoại gần nhất:",
+            formatHistoryForRewrite(chatHistory),
+            "",
+            `Câu hỏi/query hiện tại: ${originalQuery}`,
+            "",
+            "Truy vấn tìm kiếm độc lập cho tài liệu Zilcode:"
+          ].join("\n")
+        }
+      ]
+    }, env);
+
+    const rewrittenQuery = cleanRewrittenQuery(response.response ?? "", originalQuery);
+    const used = rewrittenQuery.toLowerCase() !== originalQuery.toLowerCase();
+
+    addDebugStep(debugSteps, "rag.query_rewrite", "ok", used ? "Đã rewrite query cho retrieval." : "Model giữ nguyên query gốc.", {
+      original_query: originalQuery,
+      rewritten_query: rewrittenQuery,
+      used
+    });
+
+    return {
+      query: rewrittenQuery,
+      debug: {
+        original_query: originalQuery,
+        rewritten_query: rewrittenQuery,
+        used,
+        reason,
+        model: QUERY_REWRITE_MODEL
+      }
+    };
+  } catch (error) {
+    console.log(`[RAG_REWRITE] Lỗi rewrite, dùng query gốc: ${getErrorText(error)}`);
+    addDebugStep(debugSteps, "rag.query_rewrite", "error", "Rewrite lỗi, fallback về query gốc.", {
+      original_query: originalQuery,
+      error: getErrorText(error)
+    });
+
+    return {
+      query: originalQuery,
+      debug: {
+        original_query: originalQuery,
+        rewritten_query: originalQuery,
+        used: false,
+        reason: `rewrite lỗi, dùng query gốc: ${getErrorText(error)}`,
+        model: QUERY_REWRITE_MODEL
+      }
+    };
+  }
+}
+
 async function rerankRagCandidates(
   query: string,
   candidates: RagCandidate[],
-  env: Env
+  env: Env,
+  debugSteps?: DebugStep[]
 ): Promise<RagCandidate[]> {
   if (candidates.length === 0) return [];
+
+  addDebugStep(debugSteps, "rag.rerank", "start", "Bắt đầu rerank các chunk từ Vectorize.", {
+    model: CHAT_MODEL,
+    candidates: candidates.length,
+    query
+  });
 
   const rerankPayload = candidates.map(candidate => ({
     id: candidate.id,
@@ -731,6 +939,10 @@ Schema: {"ranked_ids":["chunk-id-1","chunk-id-2"]}`
   const rankedIds = getStringArray(parsed?.ranked_ids);
 
   if (!rankedIds.length) {
+    addDebugStep(debugSteps, "rag.rerank", "skip", "Rerank không trả JSON hợp lệ, fallback theo điểm Vectorize.", {
+      selected_ids: sortByVectorScore(candidates).slice(0, RAG_MAX_CONTEXT_CHUNKS).map(candidate => candidate.id)
+    });
+
     return sortByVectorScore(candidates)
       .slice(0, RAG_MAX_CONTEXT_CHUNKS)
       .map((candidate, index) => ({ ...candidate, rerank_rank: index + 1 }));
@@ -752,17 +964,50 @@ Schema: {"ranked_ids":["chunk-id-1","chunk-id-2"]}`
     }
   }
 
-  return ordered
+  const selected = ordered
     .slice(0, RAG_MAX_CONTEXT_CHUNKS)
     .map((candidate, index) => ({ ...candidate, rerank_rank: index + 1 }));
+
+  addDebugStep(debugSteps, "rag.rerank", "ok", "Đã chọn các chunk tốt nhất sau rerank.", {
+    selected_ids: selected.map(candidate => candidate.id)
+  });
+
+  return selected;
 }
 
 async function searchRag(
   query: string,
-  env: Env
+  env: Env,
+  chatHistory: AIMessage[] = [],
+  debugSteps?: DebugStep[]
 ): Promise<ToolExecutionResult> {
-  const embeddingResult = await embedQuery(query, env);
+  addDebugStep(debugSteps, "rag.search", "start", "Bắt đầu RAG search.", {
+    original_query: query,
+    history_messages: chatHistory.length
+  });
+
+  const rewritten = await maybeRewriteRagQuery(query, chatHistory, env, debugSteps);
+  const retrievalQuery = rewritten.query;
+
+  addDebugStep(debugSteps, "rag.embedding", "start", "Embedding query dùng cho retrieval.", {
+    query: retrievalQuery,
+    model: EMBEDDING_MODEL
+  });
+
+  const embeddingResult = await embedQuery(retrievalQuery, env);
   const queryVector = embeddingResult.vector;
+
+  addDebugStep(debugSteps, "rag.embedding", "ok", "Embedding query hoàn tất.", {
+    provider: embeddingResult.debug.provider,
+    model: embeddingResult.debug.model,
+    dimensions: embeddingResult.debug.dimensions,
+    fallback: embeddingResult.debug.fallback
+  });
+
+  addDebugStep(debugSteps, "rag.vectorize", "start", "Query Vectorize index.", {
+    top_k: RAG_VECTOR_TOP_K,
+    min_score: RAG_MIN_SCORE
+  });
 
   const matches = await env.VECTORIZE.query(queryVector, {
     topK: RAG_VECTOR_TOP_K,
@@ -770,10 +1015,16 @@ async function searchRag(
   });
 
   const vectorMatches = matches.matches as VectorMatch[];
+  addDebugStep(debugSteps, "rag.vectorize", "ok", "Vectorize trả kết quả.", {
+    matches: vectorMatches.length,
+    top_score: vectorMatches[0]?.score
+  });
+
   if (!vectorMatches.length) {
     return {
       content: "Không tìm thấy tài liệu liên quan.",
-      embedding_debug: embeddingResult.debug
+      embedding_debug: embeddingResult.debug,
+      rag_query_debug: rewritten.debug
     };
   }
 
@@ -781,14 +1032,25 @@ async function searchRag(
     typeof match.score !== "number" || match.score >= RAG_MIN_SCORE
   );
 
+  addDebugStep(debugSteps, "rag.filter", "ok", "Lọc match theo ngưỡng score.", {
+    before: vectorMatches.length,
+    after: filteredMatches.length,
+    min_score: RAG_MIN_SCORE
+  });
+
   if (!filteredMatches.length) {
     return {
       content: `Không tìm thấy tài liệu đủ liên quan. Điểm liên quan cao nhất là ${formatScore(vectorMatches[0]?.score)}, thấp hơn ngưỡng ${RAG_MIN_SCORE}.`,
-      embedding_debug: embeddingResult.debug
+      embedding_debug: embeddingResult.debug,
+      rag_query_debug: rewritten.debug
     };
   }
 
   const candidates: RagCandidate[] = [];
+  addDebugStep(debugSteps, "rag.kv", "start", "Lấy nội dung chunk từ KV.", {
+    requested_chunks: filteredMatches.length
+  });
+
   for (const match of filteredMatches) {
     const raw = await env.CHUNKS.get(`chunk:${match.id}`);
     if (!raw) continue;
@@ -802,14 +1064,19 @@ async function searchRag(
     });
   }
 
+  addDebugStep(debugSteps, "rag.kv", "ok", "Đã tải nội dung chunk từ KV.", {
+    loaded_chunks: candidates.length
+  });
+
   if (!candidates.length) {
     return {
       content: "Không tìm thấy nội dung chunk tương ứng trong KV.",
-      embedding_debug: embeddingResult.debug
+      embedding_debug: embeddingResult.debug,
+      rag_query_debug: rewritten.debug
     };
   }
 
-  const reranked = await rerankRagCandidates(query, candidates, env);
+  const reranked = await rerankRagCandidates(retrievalQuery, candidates, env, debugSteps);
   const content = reranked
     .map((candidate, index) => [
       `[Nguồn ${index + 1}: ${candidate.source_label}]`,
@@ -824,7 +1091,8 @@ async function searchRag(
   return {
     content,
     sources: reranked.map(toRagSource),
-    embedding_debug: embeddingResult.debug
+    embedding_debug: embeddingResult.debug,
+    rag_query_debug: rewritten.debug
   };
 }
 
@@ -832,7 +1100,8 @@ async function executeTool(
   tool: ToolCall,
   env: Env,
   screenContext?: ScreenContext,
-  chatHistory: AIMessage[] = []
+  chatHistory: AIMessage[] = [],
+  debugSteps?: DebugStep[]
 ): Promise<ToolExecutionResult> {
 
   switch (tool.name) {
@@ -840,6 +1109,11 @@ async function executeTool(
     case "general_chat": {
       const message = getStringArg(tool.arguments, "message");
       if (!message) return { content: "Lỗi: bắt buộc phải có tin nhắn để trả lời." };
+
+      addDebugStep(debugSteps, "tool.general_chat", "start", "Gọi model chat thường.", {
+        model: GENERAL_CHAT_MODEL,
+        history_messages: chatHistory.length
+      });
 
       const response = await runChatModel(GENERAL_CHAT_MODEL, {
         max_tokens: GENERAL_CHAT_MAX_TOKENS,
@@ -857,18 +1131,26 @@ Trả lời ngắn gọn, tự nhiên, không nhắc đến function/tool nội 
         ]
       }, env);
 
+      addDebugStep(debugSteps, "tool.general_chat", "ok", "general_chat trả kết quả.", {
+        response_chars: (response.response ?? "").length
+      });
+
       return { content: response.response ?? "Không tạo được câu trả lời." };
     }
 
     case "rag_search": {
       const query = getStringArg(tool.arguments, "query");
       if (!query) return { content: "Lỗi: bắt buộc phải có câu truy vấn." };
-      return searchRag(query, env);
+      return searchRag(query, env, chatHistory, debugSteps);
     }
 
     case "get_workflow": {
       const id = getStringArg(tool.arguments, "id");
       if (!id) return { content: "Lỗi: bắt buộc phải có ID workflow." };
+
+      addDebugStep(debugSteps, "tool.get_workflow", "ok", "Trả mock workflow hiện tại.", {
+        id
+      });
 
       // TODO: thay mock bằng API Zilcode thật khi đã có token
       // const res = await fetch(`https://api.zilcode.io/workflows/${id}`, {
@@ -901,6 +1183,10 @@ Trả lời ngắn gọn, tự nhiên, không nhắc đến function/tool nội 
     }
 
     case "get_screen_context": {
+      addDebugStep(debugSteps, "tool.get_screen_context", "ok", screenContext ? "Dùng screen context từ request." : "Không có screen context, dùng mock context.", {
+        has_screen_context: Boolean(screenContext)
+      });
+
       if (screenContext) {
         return { content: JSON.stringify(screenContext, null, 2) };
       }
@@ -934,6 +1220,7 @@ interface ChatRequest {
   message: string;
   history?: ChatHistoryMessage[];
   context?: ScreenContext;
+  debug?: boolean;
 }
 
 interface GeneratedImage {
@@ -962,6 +1249,7 @@ interface AgenticLoopResult {
   images?: GeneratedImage[];
   sources?: RagSource[];
   embedding_debug?: EmbeddingDebug;
+  rag_query_debug?: RagQueryDebug;
 }
 
 interface AIMessage {
@@ -1021,8 +1309,15 @@ async function createFinalAnswerFromRag(
   userMessage: string,
   toolResults: ToolResultRecord[],
   env: Env,
-  chatHistory: AIMessage[] = []
+  chatHistory: AIMessage[] = [],
+  debugSteps?: DebugStep[]
 ): Promise<string> {
+  addDebugStep(debugSteps, "rag.final_answer", "start", "Tạo câu trả lời cuối từ context RAG.", {
+    model: CHAT_MODEL,
+    tool_results: toolResults.length,
+    history_messages: chatHistory.length
+  });
+
   const response = await runChatModel(CHAT_MODEL, {
     max_tokens: RAG_FINAL_MAX_TOKENS,
     temperature: 0.2,
@@ -1047,15 +1342,27 @@ Trả lời đúng mức chi tiết theo yêu cầu của người dùng. Nếu 
     ]
   }, env);
 
-  return cleanMarkdownArtifacts(response.response ?? "Không tạo được câu trả lời.");
+  const answer = cleanMarkdownArtifacts(response.response ?? "Không tạo được câu trả lời.");
+  addDebugStep(debugSteps, "rag.final_answer", "ok", "Đã tạo câu trả lời cuối từ RAG.", {
+    answer_chars: answer.length
+  });
+
+  return answer;
 }
 
 async function runAgenticLoop(
   userMessage: string,
   env: Env,
   screenContext?: ScreenContext,
-  chatHistory: AIMessage[] = []
+  chatHistory: AIMessage[] = [],
+  debugSteps?: DebugStep[]
 ): Promise<AgenticLoopResult> {
+
+  addDebugStep(debugSteps, "agent.start", "start", "Bắt đầu agentic loop.", {
+    message_chars: userMessage.length,
+    history_messages: chatHistory.length,
+    tools: TOOLS.map(tool => tool.name)
+  });
 
   const messages: AIMessage[] = [
     {
@@ -1087,10 +1394,17 @@ Trả lời đúng mức chi tiết theo yêu cầu của người dùng, cụ t
   const toolResults: ToolResultRecord[] = [];
   const ragSources: RagSource[] = [];
   let embeddingDebug: EmbeddingDebug | undefined;
+  let ragQueryDebug: RagQueryDebug | undefined;
   let hasRagSearchResult = false;
 
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     console.log(`[VÒNG LẶP] Lần ${i + 1}`);
+    addDebugStep(debugSteps, "agent.tool_selection", "start", "Model chọn tool hoặc trả lời trực tiếp.", {
+      iteration: i + 1,
+      model: CHAT_MODEL,
+      messages: messages.length,
+      max_tokens: TOOL_SELECTION_MAX_TOKENS
+    });
 
     const response = await runChatModel(CHAT_MODEL, {
       max_tokens: TOOL_SELECTION_MAX_TOKENS,
@@ -1100,6 +1414,11 @@ Trả lời đúng mức chi tiết theo yêu cầu của người dùng, cụ t
 
     if (!response.tool_calls || response.tool_calls.length === 0) {
       console.log(`[VÒNG LẶP] Không có tool call, trả về câu trả lời cuối cùng`);
+      addDebugStep(debugSteps, "agent.tool_selection", "ok", "Model không gọi tool, trả lời trực tiếp.", {
+        iteration: i + 1,
+        response_chars: (response.response ?? "").length
+      });
+
       return {
         answer: response.response ?? "Không tạo được câu trả lời.",
         toolsCalled
@@ -1111,14 +1430,31 @@ Trả lời đúng mức chi tiết theo yêu cầu của người dùng, cụ t
       ? response.tool_calls.filter(toolCall => toolCall.name !== "general_chat")
       : response.tool_calls;
 
+    addDebugStep(debugSteps, "agent.tool_selection", "ok", "Model đã chọn tool.", {
+      iteration: i + 1,
+      tool_calls: response.tool_calls.map(toolCall => toolCall.name),
+      executed_tool_calls: toolCallsToExecute.map(toolCall => toolCall.name),
+      skipped_general_chat_because_rag: hasRagSearchCall && toolCallsToExecute.length !== response.tool_calls.length
+    });
+
     let generalChatResult: string | null = null;
 
     for (const toolCall of toolCallsToExecute) {
       console.log(`[CÔNG CỤ] Gọi: ${toolCall.name}`, toolCall.arguments);
       toolsCalled.push(toolCall.name);
+      addDebugStep(debugSteps, "tool.call", "start", `Gọi tool ${toolCall.name}.`, {
+        name: toolCall.name,
+        arguments: toolCall.arguments
+      });
 
       if (toolCall.name === "draw_chart") {
         const image = await generateChartImage(toolCall.arguments, env);
+        addDebugStep(debugSteps, "tool.draw_chart", "ok", "Đã tạo ảnh biểu đồ.", {
+          width: image.width,
+          height: image.height,
+          model: CHART_IMAGE_MODEL
+        });
+
         return {
           answer: "Mình đã tạo biểu đồ theo yêu cầu. Lưu ý: ảnh do mô hình tạo sinh phù hợp để minh họa, không nên dùng làm biểu đồ số liệu cần độ chính xác tuyệt đối.",
           toolsCalled,
@@ -1130,11 +1466,17 @@ Trả lời đúng mức chi tiết theo yêu cầu của người dùng, cụ t
         { name: toolCall.name, arguments: toolCall.arguments },
         env,
         screenContext,
-        chatHistory
+        chatHistory,
+        debugSteps
       );
       const toolResult = toolExecution.content;
 
       console.log(`[CÔNG CỤ] Độ dài kết quả: ${toolResult.length} ký tự`);
+      addDebugStep(debugSteps, "tool.call", "ok", `Tool ${toolCall.name} đã trả kết quả.`, {
+        name: toolCall.name,
+        result_chars: toolResult.length
+      });
+
       toolResults.push({ name: toolCall.name, content: toolResult });
 
       if (toolCall.name === "rag_search" && toolExecution.sources?.length) {
@@ -1143,6 +1485,10 @@ Trả lời đúng mức chi tiết theo yêu cầu của người dùng, cụ t
 
       if (toolCall.name === "rag_search" && toolExecution.embedding_debug) {
         embeddingDebug = toolExecution.embedding_debug;
+      }
+
+      if (toolCall.name === "rag_search" && toolExecution.rag_query_debug) {
+        ragQueryDebug = toolExecution.rag_query_debug;
       }
 
       messages.push({
@@ -1173,18 +1519,25 @@ Trả lời đúng mức chi tiết theo yêu cầu của người dùng, cụ t
         userMessage,
         toolResults,
         env,
-        chatHistory
+        chatHistory,
+        debugSteps
       );
 
       return {
         answer: finalAnswer,
         toolsCalled,
         sources: ragSources,
-        embedding_debug: embeddingDebug
+        embedding_debug: embeddingDebug,
+        rag_query_debug: ragQueryDebug
       };
     }
 
     if (generalChatResult) {
+      addDebugStep(debugSteps, "general.final_answer", "start", "Tạo câu trả lời cuối từ general_chat.", {
+        model: CHAT_MODEL,
+        history_messages: chatHistory.length
+      });
+
       const finalResponse = await runChatModel(CHAT_MODEL, {
         max_tokens: GENERAL_CHAT_MAX_TOKENS,
         messages: [
@@ -1203,12 +1556,20 @@ Dựa trên nội dung từ general_chat, trả lời tự nhiên và không nh�
         ]
       }, env);
 
+      addDebugStep(debugSteps, "general.final_answer", "ok", "Đã tạo câu trả lời cuối từ general_chat.", {
+        answer_chars: (finalResponse.response ?? "").length
+      });
+
       return {
         answer: finalResponse.response ?? "Không tạo được câu trả lời.",
         toolsCalled
       };
     }
   }
+
+  addDebugStep(debugSteps, "agent.stop", "error", "Đạt số vòng gọi tool tối đa.", {
+    max_iterations: MAX_ITERATIONS
+  });
 
   return {
     answer: "Đã đạt số vòng gọi công cụ tối đa nhưng chưa tạo được câu trả lời cuối cùng.",
@@ -1239,6 +1600,8 @@ export default {
 
     // ── POST /chat — agentic chat ────────────────────────────────────────────
     if (url.pathname === "/chat" && request.method === "POST") {
+      let debugSteps: DebugStep[] | undefined;
+
       try {
         const body = await request.json() as ChatRequest;
 
@@ -1249,13 +1612,35 @@ export default {
           );
         }
 
+        const debugEnabled = body.debug === true;
+        debugSteps = debugEnabled ? [] as DebugStep[] : undefined;
+
+        addDebugStep(debugSteps, "request.received", "ok", "Worker nhận request /chat.", {
+          message_chars: body.message.length,
+          raw_history_messages: Array.isArray(body.history) ? body.history.length : 0,
+          has_context: Boolean(body.context)
+        });
+
         const chatHistory = sanitizeChatHistory(body.history);
-        const { answer, toolsCalled, images, sources, embedding_debug } = await runAgenticLoop(
+        addDebugStep(debugSteps, "history.sanitized", "ok", "Làm sạch history trước khi đưa vào model.", {
+          history_messages: chatHistory.length,
+          max_history_messages: MAX_HISTORY_MESSAGES
+        });
+
+        const { answer, toolsCalled, images, sources, embedding_debug, rag_query_debug } = await runAgenticLoop(
           body.message,
           env,
           body.context,
-          chatHistory
+          chatHistory,
+          debugSteps
         );
+
+        addDebugStep(debugSteps, "response.ready", "ok", "Chuẩn bị trả response về client.", {
+          tools_called: toolsCalled,
+          answer_chars: answer.length,
+          sources: sources?.length ?? 0,
+          images: images?.length ?? 0
+        });
 
         return Response.json({
           success: true,
@@ -1263,14 +1648,21 @@ export default {
           tools_called: toolsCalled,
           images,
           sources,
-          embedding_debug
+          embedding_debug,
+          rag_query_debug,
+          debug_steps: debugSteps
         }, { headers: CORS });
 
       } catch (error) {
+        addDebugStep(debugSteps, "response.error", "error", "Worker gặp lỗi khi xử lý /chat.", {
+          error: error instanceof Error ? error.message : "Lỗi không xác định"
+        });
+
         return Response.json(
           {
             success: false,
-            error: error instanceof Error ? error.message : "Lỗi không xác định"
+            error: error instanceof Error ? error.message : "Lỗi không xác định",
+            debug_steps: debugSteps
           },
           { status: 500, headers: CORS }
         );

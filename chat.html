@@ -318,6 +318,42 @@
     font-weight: 600;
   }
 
+  .debug-steps {
+    margin-top: 8px;
+    max-width: min(100%, 640px);
+    border: 0.5px solid #d1d5db;
+    border-radius: 8px;
+    background: #f9fafb;
+    color: #374151;
+    padding: 8px 10px;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+
+  .debug-steps summary {
+    cursor: pointer;
+    font-weight: 600;
+    color: #111827;
+  }
+
+  .debug-step {
+    border-top: 0.5px solid #e5e7eb;
+    padding-top: 7px;
+    margin-top: 7px;
+  }
+
+  .debug-step-title {
+    font-weight: 600;
+    color: #111827;
+  }
+
+  .debug-step-data {
+    margin-top: 4px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: #6b7280;
+  }
+
   .timestamp {
     font-size: 11px;
     color: #bbb;
@@ -468,7 +504,45 @@
     return new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' });
   }
 
-  function appendMessage(role, content, tools = [], images = [], sources = [], embeddingDebug = null) {
+  function buildDebugStepsElement(debugSteps) {
+    if (!Array.isArray(debugSteps) || debugSteps.length === 0) return null;
+
+    const details = document.createElement('details');
+    details.className = 'debug-steps';
+
+    const summary = document.createElement('summary');
+    summary.textContent = `Debug flow (${debugSteps.length} bước)`;
+    details.appendChild(summary);
+
+    debugSteps.forEach((step, index) => {
+      const item = document.createElement('div');
+      item.className = 'debug-step';
+
+      const title = document.createElement('div');
+      title.className = 'debug-step-title';
+      title.textContent = `${index + 1}. [${step.status || 'info'}] ${step.step || 'unknown_step'}`;
+      item.appendChild(title);
+
+      if (step.detail) {
+        const detail = document.createElement('div');
+        detail.textContent = step.detail;
+        item.appendChild(detail);
+      }
+
+      if (step.data) {
+        const data = document.createElement('div');
+        data.className = 'debug-step-data';
+        data.textContent = JSON.stringify(step.data, null, 2);
+        item.appendChild(data);
+      }
+
+      details.appendChild(item);
+    });
+
+    return details;
+  }
+
+  function appendMessage(role, content, tools = [], images = [], sources = [], embeddingDebug = null, ragQueryDebug = null, debugSteps = []) {
     const empty = document.getElementById('emptyState');
     if (empty) empty.remove();
 
@@ -531,6 +605,24 @@
       msg.appendChild(sourceList);
     }
 
+    if (role === 'assistant' && ragQueryDebug) {
+      const debug = document.createElement('div');
+      debug.className = 'debug-log';
+
+      const mode = ragQueryDebug.used ? 'rewritten' : 'original';
+      const label = document.createElement('strong');
+      label.textContent = 'RAG query';
+      debug.appendChild(label);
+      debug.appendChild(document.createTextNode(`: ${mode} | ${ragQueryDebug.rewritten_query || ragQueryDebug.original_query || 'unknown query'}`));
+
+      if (ragQueryDebug.used && ragQueryDebug.original_query) {
+        debug.appendChild(document.createElement('br'));
+        debug.appendChild(document.createTextNode(`Original: ${ragQueryDebug.original_query}`));
+      }
+
+      msg.appendChild(debug);
+    }
+
     if (role === 'assistant' && embeddingDebug) {
       const debug = document.createElement('div');
       debug.className = 'debug-log';
@@ -547,6 +639,11 @@
       debug.appendChild(label);
       debug.appendChild(document.createTextNode(`: ${provider} | ${model} | ${dimensions} | ${mode}`));
       msg.appendChild(debug);
+    }
+
+    const debugStepsElement = buildDebugStepsElement(debugSteps);
+    if (role === 'assistant' && debugStepsElement) {
+      msg.appendChild(debugStepsElement);
     }
 
     const ts = document.createElement('div');
@@ -620,7 +717,8 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: text,
-          history: chatHistory.slice(-MAX_HISTORY_MESSAGES)
+          history: chatHistory.slice(-MAX_HISTORY_MESSAGES),
+          debug: true
         })
       });
 
@@ -630,7 +728,16 @@
 
       if (data.success) {
         const assistantText = data.response || '';
-        appendMessage('assistant', assistantText, data.tools_called || [], data.images || [], data.sources || [], data.embedding_debug || null);
+        appendMessage(
+          'assistant',
+          assistantText,
+          data.tools_called || [],
+          data.images || [],
+          data.sources || [],
+          data.embedding_debug || null,
+          data.rag_query_debug || null,
+          data.debug_steps || []
+        );
         rememberChatTurn(text, assistantText);
       } else {
         const msg = document.createElement('div');
@@ -639,6 +746,10 @@
         err.className = 'error-bubble';
         err.textContent = '❌ ' + (data.error || 'Unknown error');
         msg.appendChild(err);
+
+        const debugStepsElement = buildDebugStepsElement(data.debug_steps || []);
+        if (debugStepsElement) msg.appendChild(debugStepsElement);
+
         document.getElementById('messages').appendChild(msg);
       }
 
