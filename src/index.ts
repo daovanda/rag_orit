@@ -34,6 +34,7 @@ const RAG_MAX_CONTEXT_CHUNKS = 6;
 const RAG_MIN_SCORE = 0.35;
 const RAG_RERANK_TEXT_MAX_CHARS = 900;
 const RAG_VECTOR_DIMENSIONS = 1024;
+const TOOL_RESULT_CONTEXT_MAX_CHARS = 30000;
 const MAX_HISTORY_MESSAGES = 6;
 const MAX_HISTORY_CONTENT_CHARS = 1200;
 const DEFAULT_ZILCODE_BASE = "https://demo.zilcode.com";
@@ -125,11 +126,11 @@ const TOOLS = [
         },
         max_apps: {
           type: "string",
-          description: "Số app tối đa cần đọc, mặc định 20."
+          description: "Số app tối đa cần đọc, mặc định 5."
         },
         max_windows_per_app: {
           type: "string",
-          description: "Số window/cache tối đa mỗi app, mặc định 100."
+          description: "Số window/cache tối đa mỗi app, mặc định 20."
         }
       }
     }
@@ -1513,6 +1514,16 @@ function formatToolResultsForFinalAnswer(toolResults: ToolResultRecord[]): strin
     .join("\n\n");
 }
 
+function truncateToolContext(context: string): string {
+  if (context.length <= TOOL_RESULT_CONTEXT_MAX_CHARS) return context;
+
+  return [
+    context.slice(0, TOOL_RESULT_CONTEXT_MAX_CHARS).trim(),
+    "",
+    `[GHI_CHU_HE_THONG: Ket qua tool da duoc cat bot vi qua dai. Do dai goc: ${context.length} ky tu.]`
+  ].join("\n");
+}
+
 function cleanMarkdownArtifacts(answer: string): string {
   return answer
     .replace(/^\s*#{1,6}\s+/gm, "")
@@ -1580,6 +1591,51 @@ Trả lời đúng mức chi tiết theo yêu cầu của người dùng. Nếu 
 
   const answer = cleanMarkdownArtifacts(response.response ?? "Không tạo được câu trả lời.");
   addDebugStep(debugSteps, "rag.final_answer", "ok", "Đã tạo câu trả lời cuối từ RAG.", {
+    answer_chars: answer.length
+  });
+
+  return answer;
+}
+
+async function createFinalAnswerFromToolResults(
+  userMessage: string,
+  toolResults: ToolResultRecord[],
+  env: Env,
+  chatHistory: AIMessage[] = [],
+  debugSteps?: DebugStep[]
+): Promise<string> {
+  const toolContext = truncateToolContext(formatToolResultsForFinalAnswer(toolResults));
+
+  addDebugStep(debugSteps, "tools.final_answer", "start", "Tạo câu trả lời cuối từ kết quả tool.", {
+    model: CHAT_MODEL,
+    tool_results: toolResults.map(result => result.name),
+    context_chars: toolContext.length
+  });
+
+  const response = await runChatModel(CHAT_MODEL, {
+    max_tokens: RAG_FINAL_MAX_TOKENS,
+    temperature: 0.2,
+    messages: [
+      {
+        role: "system",
+        content: `Bạn là trợ lý hỗ trợ Zilcode.
+Hãy trả lời bằng cùng ngôn ngữ với người hỏi.
+Dựa vào kết quả công cụ read-only đã cung cấp để trả lời câu hỏi.
+Không nhắc đến tool/function nội bộ.
+Nếu kết quả có lỗi hoặc phần chưa lấy được, hãy nói rõ phần nào chưa đọc được thay vì bỏ qua.
+Nếu dữ liệu quá nhiều, hãy tóm tắt theo cấu trúc dễ đọc: phiên đăng nhập, danh sách app, bảng, window/menu, tab, domain/relation và các lỗi phát sinh nếu có.`
+      },
+      ...chatHistory,
+      { role: "user", content: userMessage },
+      {
+        role: "assistant",
+        content: `Ngữ cảnh từ các công cụ:\n${toolContext}`
+      }
+    ]
+  }, env);
+
+  const answer = cleanMarkdownArtifacts(response.response ?? "Không tạo được câu trả lời.");
+  addDebugStep(debugSteps, "tools.final_answer", "ok", "Đã tạo câu trả lời cuối từ kết quả tool.", {
     answer_chars: answer.length
   });
 
@@ -1655,8 +1711,34 @@ Trả lời đúng mức chi tiết theo yêu cầu của người dùng, cụ t
         response_chars: (response.response ?? "").length
       });
 
+      const directAnswer = response.response?.trim();
+      if (directAnswer) {
+        return {
+          answer: directAnswer,
+          toolsCalled
+        };
+      }
+
+      if (toolResults.length > 0) {
+        const finalAnswer = await createFinalAnswerFromToolResults(
+          userMessage,
+          toolResults,
+          env,
+          chatHistory,
+          debugSteps
+        );
+
+        return {
+          answer: finalAnswer,
+          toolsCalled,
+          sources: ragSources,
+          embedding_debug: embeddingDebug,
+          rag_query_debug: ragQueryDebug
+        };
+      }
+
       return {
-        answer: response.response ?? "Không tạo được câu trả lời.",
+        answer: "Không tạo được câu trả lời.",
         toolsCalled
       };
     }
@@ -1818,6 +1900,24 @@ Dựa trên nội dung từ general_chat, trả lời tự nhiên và không nh�
       return {
         answer: finalResponse.response ?? "Không tạo được câu trả lời.",
         toolsCalled
+      };
+    }
+
+    if (toolResults.length > 0) {
+      const finalAnswer = await createFinalAnswerFromToolResults(
+        userMessage,
+        toolResults,
+        env,
+        chatHistory,
+        debugSteps
+      );
+
+      return {
+        answer: finalAnswer,
+        toolsCalled,
+        sources: ragSources,
+        embedding_debug: embeddingDebug,
+        rag_query_debug: ragQueryDebug
       };
     }
   }
@@ -2278,8 +2378,8 @@ async function buildZilcodeSystemBlueprint(
   const appidFilter = getStringArg(args, "appid");
   const includeFields = getOptionalBooleanArg(args, "include_fields", true);
   const includeRaw = getOptionalBooleanArg(args, "include_raw", false);
-  const maxApps = getLimitArg(args, "max_apps", 20, 100);
-  const maxWindowsPerApp = getLimitArg(args, "max_windows_per_app", 100, 300);
+  const maxApps = getLimitArg(args, "max_apps", 5, 100);
+  const maxWindowsPerApp = getLimitArg(args, "max_windows_per_app", 20, 300);
   const apps = listSessionApplicationSummaries(session)
     .filter(app => !appidFilter || String(app.appid ?? "") === appidFilter)
     .slice(0, maxApps);
