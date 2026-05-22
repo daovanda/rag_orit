@@ -310,6 +310,11 @@ function getErrorText(error: unknown): string {
   }
 }
 
+function truncateDebugText(value: unknown, maxChars = 700): string {
+  const text = getErrorText(value);
+  return text.length > maxChars ? `${text.slice(0, maxChars).trim()}...` : text;
+}
+
 function isCloudflareNeuronQuotaError(error: unknown): boolean {
   const text = getErrorText(error).toLowerCase();
   return text.includes("4006")
@@ -1442,13 +1447,45 @@ Trả lời ngắn gọn, tự nhiên, không nhắc đến function/tool nội 
       const graph = asRecord(blueprint.graph);
       const graphNodes = Array.isArray(graph?.nodes) ? graph.nodes.length : undefined;
       const graphEdges = Array.isArray(graph?.edges) ? graph.edges.length : undefined;
+      const appErrors = Array.isArray(blueprint.errors)
+        ? blueprint.errors
+          .filter((error): error is Record<string, unknown> => Boolean(error) && typeof error === "object")
+          .map(error => ({
+            appid: error.appid,
+            app_name: error.app_name,
+            error: truncateDebugText(error.error)
+          }))
+        : [];
+      const windowErrors = Array.isArray(graph?.nodes)
+        ? graph.nodes
+          .filter((node): node is Record<string, unknown> => Boolean(node) && typeof node === "object")
+          .map(node => ({
+            id: node.id,
+            type: node.type,
+            label: node.label,
+            appid: node.appid,
+            summary: asRecord(node.summary)
+          }))
+          .filter(node => node.type === "window" && node.summary?.error)
+          .map(node => ({
+            node_id: node.id,
+            appid: node.appid,
+            windowid: node.summary?.windowid,
+            label: node.label,
+            error: truncateDebugText(node.summary?.error)
+          }))
+        : [];
 
       addDebugStep(debugSteps, "tool.zilcode_get_system_blueprint", "ok", "Đã lấy system blueprint.", {
         mode: blueprint.mode,
+        scan: blueprint.scan,
         apps_count: blueprint.apps_count,
         graph_nodes: graphNodes,
         graph_edges: graphEdges,
-        errors: Array.isArray(blueprint.errors) ? blueprint.errors.length : 0
+        app_errors_count: appErrors.length,
+        app_errors: appErrors,
+        window_errors_count: windowErrors.length,
+        window_errors: windowErrors
       });
 
       return { content: JSON.stringify(blueprint, null, 2) };
@@ -1563,6 +1600,7 @@ function compactToolContentForFinalAnswer(result: ToolResultRecord): string {
     return JSON.stringify({
       mode: data.mode,
       session: asRecord(data.overview)?.session ?? data.session,
+      scan: data.scan,
       filters: data.filters,
       apps_count: data.apps_count,
       overview: data.overview,
@@ -3308,6 +3346,14 @@ async function buildZilcodeSystemBlueprint(
   return {
     mode,
     session: sessionSummary,
+    scan: {
+      attempted_apps_count: apps.length,
+      attempted_apps: apps.map(app => ({
+        appid: app.appid,
+        app_name: app.app_name,
+        app_code: app.app_code
+      }))
+    },
     filters: {
       appid: appidFilter || undefined,
       node_ids: nodeIds.length ? nodeIds : undefined,
