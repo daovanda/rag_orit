@@ -1,6 +1,6 @@
 ﻿// src/index.ts
 
-import zipson from "./vendor/zipson.min.js";
+import zipsonModule from "./vendor/zipson.min.js";
 
 export interface Env {
   AI: Ai;
@@ -2175,6 +2175,24 @@ function mapZilcodeArrayRecord(
   return record;
 }
 
+interface ZipsonRuntime {
+  parse(input: string): unknown;
+  stringify(value: unknown): string;
+}
+
+function getZipsonRuntime(): ZipsonRuntime {
+  const moduleRuntime = zipsonModule as unknown as Partial<ZipsonRuntime> | undefined;
+  const globalRuntime = (globalThis as unknown as { zipson?: ZipsonRuntime }).zipson;
+  const runtime = typeof moduleRuntime?.parse === "function"
+    ? moduleRuntime as ZipsonRuntime
+    : globalRuntime;
+
+  if (!runtime || typeof runtime.parse !== "function") {
+    throw new Error("Zipson parser chưa được nạp trong Worker runtime.");
+  }
+  return runtime;
+}
+
 function decodeZilcodeCachePayload(value: unknown): { value: unknown | null; format?: string; error?: string } {
   if (value === undefined || value === null || value === "") return { value: null, error: "empty" };
   if (typeof value === "object") return { value, format: "object" };
@@ -2197,7 +2215,7 @@ function decodeZilcodeCachePayload(value: unknown): { value: unknown | null; for
   }
 
   try {
-    return { value: zipson.parse(text), format: "zipson" };
+    return { value: getZipsonRuntime().parse(text), format: "zipson" };
   } catch (error) {
     try {
       const decoded = decodeURIComponent(text);
