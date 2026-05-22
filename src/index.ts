@@ -1,5 +1,7 @@
 ﻿// src/index.ts
 
+import zipson from "./vendor/zipson.min.js";
+
 export interface Env {
   AI: Ai;
   VECTORIZE: VectorizeIndex;
@@ -1366,18 +1368,6 @@ async function fetchZilcodeAppMetadata(
   return assertZilcodeSuccess(envelope);
 }
 
-function tryParseJsonObject(value: unknown): unknown | null {
-  if (!value) return null;
-  if (typeof value === "object") return value;
-  if (typeof value !== "string") return null;
-
-  try {
-    return JSON.parse(value);
-  } catch {
-    return null;
-  }
-}
-
 function noZilcodeSessionResult(): ToolExecutionResult {
   return {
     content: JSON.stringify({
@@ -2141,6 +2131,12 @@ const WINDOW_ID_KEYS = ["linkwindowid", "link_window_id", "windowid", "window_id
 const WINDOW_LABEL_KEYS = ["windowname", "window_name", "menuname", "menu_name", "name", "title", "text", "label", "displayname", "translate", "description"];
 const TAB_LABEL_KEYS = ["tabname", "tab_name", "name", "title", "text", "label", "displayname", "description"];
 const FIELD_LABEL_KEYS = ["fieldname", "field_name", "columnname", "column_name", "name", "title", "text", "label", "displayname", "description"];
+const ZILCODE_ERD = {
+  window: ["windowid", "windowname", "windowtype", "appid", "execname", "isopenfind", "translate"],
+  tab: ["tabid", "parenttabid", "tabname", "tablevel", "seqno", "layoutcols", "linkchildfield", "linkparentfield", "linktableid", "whereclause", "orderby", "tableid", "windowid", "relatechildfield", "relateparentfield", "relatetableid", "filterfield", "filterclause", "noinsert", "noupdate", "nodelete", "isarchive", "islock", "isautosave", "translate", "noselect", "noexport", "workflowid", "isviewonly", "labelspan"],
+  field: ["fieldid", "fieldname", "translate", "hideingrid", "hideinform", "hideinfind", "displaylength", "seqno", "isreadonly", "fieldlength", "vformat", "defaultvalue", "isrequire", "isfrozen", "fieldgroup", "tabid", "columnid", "fieldtype", "linktableid", "domainid", "issearchtonghop", "parentfieldid", "wherefieldname", "placeholder", "calculation", "colspan", "rowspan", "mapcolumn", "displaylogic", "columnname", "tableid", "whereclause", "bindfieldname", "options", "columntype", "linkcolumn"],
+  menu: ["menuid", "menuname", "parentid", "seqno", "translate", "issummary", "appid", "windowid", "siteid", "tabid", "menutype", "execname", "icon", "reportid"]
+} as const;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -2160,6 +2156,120 @@ function pickRecordFields(record: Record<string, unknown>, keys: string[]): Reco
     if (value !== undefined && value !== null && value !== "") output[key] = value;
   }
   return output;
+}
+
+function mapZilcodeArrayRecord(
+  value: unknown,
+  keys: readonly string[]
+): Record<string, unknown> | null {
+  if (!Array.isArray(value)) return asRecord(value);
+  const record: Record<string, unknown> = {};
+
+  for (let i = 0; i < keys.length; i++) {
+    const item = value[i];
+    if (item !== undefined && item !== null && item !== "") {
+      record[keys[i]] = item;
+    }
+  }
+
+  return record;
+}
+
+function decodeZilcodeCachePayload(value: unknown): { value: unknown | null; format?: string; error?: string } {
+  if (value === undefined || value === null || value === "") return { value: null, error: "empty" };
+  if (typeof value === "object") return { value, format: "object" };
+  if (typeof value !== "string") return { value: null, error: `unsupported_${typeof value}` };
+
+  const text = value.trim();
+  if (!text) return { value: null, error: "empty_string" };
+
+  try {
+    const parsed = JSON.parse(text);
+    if (typeof parsed === "string") {
+      const nested = decodeZilcodeCachePayload(parsed);
+      return nested.value !== null
+        ? { ...nested, format: `json_string:${nested.format ?? "unknown"}` }
+        : { value: parsed, format: "json_string" };
+    }
+    return { value: parsed, format: "json" };
+  } catch {
+    // Window cache in Zilcode is normally zipson, not plain JSON.
+  }
+
+  try {
+    return { value: zipson.parse(text), format: "zipson" };
+  } catch (error) {
+    try {
+      const decoded = decodeURIComponent(text);
+      if (decoded !== text) {
+        const parsed = decodeZilcodeCachePayload(decoded);
+        if (parsed.value !== null) {
+          return { ...parsed, format: `uri:${parsed.format ?? "unknown"}` };
+        }
+      }
+    } catch {
+      // Ignore malformed URI escape sequences.
+    }
+
+    return { value: null, error: getErrorText(error) };
+  }
+}
+
+function normalizeZilcodeWindowConfig(
+  rawConfig: unknown,
+  tableById: Map<string, Record<string, unknown>>
+): Record<string, unknown> | null {
+  const config = asRecord(rawConfig);
+  if (!config) return null;
+
+  const windowRecord = mapZilcodeArrayRecord(config.window, ZILCODE_ERD.window);
+  const tabRecords = Array.isArray(config.tabs)
+    ? config.tabs
+      .map(tab => mapZilcodeArrayRecord(tab, ZILCODE_ERD.tab))
+      .filter((tab): tab is Record<string, unknown> => Boolean(tab))
+    : [];
+  const fieldRecords = Array.isArray(config.fields)
+    ? config.fields
+      .map(field => mapZilcodeArrayRecord(field, ZILCODE_ERD.field))
+      .filter((field): field is Record<string, unknown> => Boolean(field))
+    : [];
+  const menuRecords = Array.isArray(config.menus)
+    ? config.menus
+      .map(menu => mapZilcodeArrayRecord(menu, ZILCODE_ERD.menu))
+      .filter((menu): menu is Record<string, unknown> => Boolean(menu))
+    : [];
+  const tabById = new Map<string, Record<string, unknown>>();
+
+  for (const tab of tabRecords) {
+    const tableId = String(tab.tableid ?? tab.linktableid ?? "");
+    const linkedTable = tableId ? tableById.get(tableId) : undefined;
+    if (linkedTable) {
+      tab.linked_table = {
+        tableid: linkedTable.tableid,
+        tablename: linkedTable.tablename,
+        alias: linkedTable.alias,
+        columnkey: linkedTable.columnkey,
+        columndisplay: linkedTable.columndisplay
+      };
+    }
+
+    if (tab.tabid !== undefined && tab.tabid !== null) {
+      tabById.set(String(tab.tabid), tab);
+    }
+  }
+
+  for (const field of fieldRecords) {
+    const tabid = String(field.tabid ?? "");
+    const tab = tabid ? tabById.get(tabid) : undefined;
+    if (tab && !tab.tableid && field.tableid) tab.tableid = field.tableid;
+  }
+
+  return {
+    window: windowRecord ? [windowRecord] : [],
+    tabs: tabRecords,
+    fields: fieldRecords,
+    menus: menuRecords
+  };
 }
 
 function getOptionalBooleanArg(
@@ -2391,11 +2501,17 @@ function summarizeBlueprintField(field: Record<string, unknown>): Record<string,
       "label",
       "datatype",
       "controltype",
+      "fieldtype",
+      "columntype",
       "domainid",
       "defaultvalue",
       "isrequired",
+      "isrequire",
       "isreadonly",
       "isvisible",
+      "hideingrid",
+      "hideinform",
+      "hideinfind",
       "isprimarykey",
       "seqno"
     ]),
@@ -2448,9 +2564,13 @@ function summarizeWindowBlueprint(
   includeFields: boolean,
   includeRaw: boolean
 ): Record<string, unknown> {
-  const parsedConfig = tryParseJsonObject(cache.configjson);
-  const parsedLayout = tryParseJsonObject(cache.layoutjson);
+  const decodedConfig = decodeZilcodeCachePayload(cache.configjson);
+  const decodedLayout = decodeZilcodeCachePayload(cache.layoutjson);
+  const parsedConfig = decodedConfig.value;
+  const parsedLayout = decodedLayout.value;
+  const normalizedConfig = normalizeZilcodeWindowConfig(parsedConfig, tableById);
   const roots = [
+    normalizedConfig,
     parsedConfig,
     asRecord(parsedConfig)?.data,
     asRecord(parsedConfig)?.result,
@@ -2471,7 +2591,9 @@ function summarizeWindowBlueprint(
 
   return {
     windowid,
-    parsed_config: Boolean(parsedConfig),
+    parsed_config: Boolean(normalizedConfig || parsedConfig),
+    config_format: decodedConfig.format,
+    layout_format: decodedLayout.format,
     label: getRecordLabel(windowRecords[0] ?? cache, WINDOW_LABEL_KEYS, windowid),
     window: windowRecords[0] ? pickRecordFields(windowRecords[0], [
       "windowid",
@@ -2494,7 +2616,9 @@ function summarizeWindowBlueprint(
       parsed_config: parsedConfig,
       parsed_layout: parsedLayout
     } : undefined,
-    warning: parsedConfig ? undefined : "configjson không parse được bằng JSON.parse; có thể đang ở dạng nén/format riêng của Zilcode."
+    warning: normalizedConfig || parsedConfig
+      ? undefined
+      : `Không parse được configjson. Lỗi: ${decodedConfig.error ?? "unknown"}`
   };
 }
 
@@ -2846,11 +2970,17 @@ function buildSystemGraphFromBlueprint(
             "label",
             "datatype",
             "controltype",
+            "fieldtype",
+            "columntype",
             "domainid",
             "defaultvalue",
             "isrequired",
+            "isrequire",
             "isreadonly",
             "isvisible",
+            "hideingrid",
+            "hideinform",
+            "hideinfind",
             "isprimarykey",
             "seqno"
           ]),
