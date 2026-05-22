@@ -34,7 +34,7 @@ const RAG_MAX_CONTEXT_CHUNKS = 6;
 const RAG_MIN_SCORE = 0.35;
 const RAG_RERANK_TEXT_MAX_CHARS = 900;
 const RAG_VECTOR_DIMENSIONS = 1024;
-const TOOL_RESULT_CONTEXT_MAX_CHARS = 30000;
+const TOOL_RESULT_CONTEXT_MAX_CHARS = 16000;
 const MAX_HISTORY_MESSAGES = 6;
 const MAX_HISTORY_CONTENT_CHARS = 1200;
 const DEFAULT_ZILCODE_BASE = "https://demo.zilcode.com";
@@ -108,17 +108,33 @@ const TOOLS = [
   {
     name: "zilcode_get_system_blueprint",
     description:
-      "Read-only tool. Lấy bản đồ tổng hợp hệ thống Zilcode của phiên đăng nhập hiện tại: applications, menus/windows, window cache/config, tabs, fields, tables, domains, relations và các ràng buộc app -> window -> tab -> table. Dùng khi cần hiểu hệ thống thật của tài khoản role system để tư vấn tạo app/window/tab/table hoặc kiểm tra cấu trúc đang có.",
+      "Read-only tool. Lấy bản đồ graph hệ thống Zilcode của phiên đăng nhập hiện tại. Mặc định dùng mode=graph để lấy graph compact gồm apps, menus/windows, tabs, tables, domains, relations và các cạnh quan hệ. Nếu graph chưa đủ để trả lời, gọi lại mode=subgraph hoặc mode=detail với node_id/node_ids lấy từ graph để đào sâu phần liên quan. Không dùng tool này cho chào hỏi hoặc kiến thức chung.",
     parameters: {
       type: "object",
       properties: {
+        mode: {
+          type: "string",
+          description: "graph | subgraph | detail. Mặc định graph. graph trả bản đồ compact; subgraph trả vùng liên quan quanh node_id; detail trả dữ liệu chi tiết của node_id/node_ids."
+        },
         appid: {
           type: "string",
           description: "Optional appid. Bỏ trống để quét tất cả app trong phiên hiện tại."
         },
+        node_id: {
+          type: "string",
+          description: "Optional graph node id cần đào sâu, ví dụ app:1, window:101, table:1:Customer, tab:101:5. Lấy node_id từ kết quả mode=graph."
+        },
+        node_ids: {
+          type: "string",
+          description: "Optional danh sách node id, phân tách bằng dấu phẩy, dùng cho subgraph/detail khi cần nhiều node."
+        },
+        depth: {
+          type: "string",
+          description: "Độ sâu mở rộng quanh node_id cho mode=subgraph, mặc định 1, tối đa 4."
+        },
         include_fields: {
           type: "string",
-          description: "true/false. Mặc định true. Đặt false nếu chỉ cần app/window/tab/table summary."
+          description: "true/false. Mặc định false với graph/subgraph và true với detail. Chỉ bật true khi cần field trong tab/window liên quan."
         },
         include_raw: {
           type: "string",
@@ -1420,17 +1436,28 @@ Trả lời ngắn gọn, tự nhiên, không nhắc đến function/tool nội 
 
     case "zilcode_get_system_blueprint": {
       if (!zilcodeSession) return noZilcodeSessionResult();
+      const mode = getBlueprintMode(tool.arguments);
 
       addDebugStep(debugSteps, "tool.zilcode_get_system_blueprint", "start", "Lấy bản đồ tổng hợp hệ thống Zilcode.", {
+        mode,
         appid: getStringArg(tool.arguments, "appid") || undefined,
-        include_fields: getOptionalBooleanArg(tool.arguments, "include_fields", true),
+        node_id: getStringArg(tool.arguments, "node_id") || undefined,
+        node_ids: getNodeIdsArg(tool.arguments),
+        depth: getLimitArg(tool.arguments, "depth", 1, 4),
+        include_fields: getOptionalBooleanArg(tool.arguments, "include_fields", mode === "detail"),
         include_raw: getOptionalBooleanArg(tool.arguments, "include_raw", false)
       });
 
       const blueprint = await buildZilcodeSystemBlueprint(env, zilcodeSession.session, tool.arguments);
+      const graph = asRecord(blueprint.graph);
+      const graphNodes = Array.isArray(graph?.nodes) ? graph.nodes.length : undefined;
+      const graphEdges = Array.isArray(graph?.edges) ? graph.edges.length : undefined;
 
       addDebugStep(debugSteps, "tool.zilcode_get_system_blueprint", "ok", "Đã lấy system blueprint.", {
+        mode: blueprint.mode,
         apps_count: blueprint.apps_count,
+        graph_nodes: graphNodes,
+        graph_edges: graphEdges,
         errors: Array.isArray(blueprint.errors) ? blueprint.errors.length : 0
       });
 
@@ -1666,7 +1693,8 @@ Dùng general_chat cho chào hỏi, cảm ơn, trò chuyện thông thường, h
 Chỉ dùng rag_search khi câu hỏi cần thông tin cụ thể từ tài liệu Zilcode, ví dụ tính năng, khái niệm, hướng dẫn thao tác, hoặc cách sử dụng Zilcode.
 Nếu Zilcode là chủ đề chính cần giải thích, hoặc người dùng hỏi Zilcode là gì, tính năng/cách dùng/hướng dẫn thao tác trong Zilcode, hãy ưu tiên rag_search thay vì general_chat.
 Dùng draw_chart khi người dùng yêu cầu vẽ/tạo ảnh biểu đồ, sơ đồ, flowchart, timeline, mindmap, dashboard mockup hoặc infographic. Với biểu đồ cần số liệu chính xác tuyệt đối, hãy nói ngắn gọn rằng ảnh AI chỉ mang tính minh họa và vẫn có thể tạo ảnh nếu người dùng muốn.
- Bộ công cụ hiện tại gồm: general_chat, rag_search, draw_chart, zilcode_get_system_blueprint. Khi cần đọc hệ thống Zilcode thật, dùng zilcode_get_system_blueprint để lấy một lần bản đồ apps, windows, tabs, tables, domains, relations và ràng buộc app -> window -> tab -> table.
+Bộ công cụ hiện tại gồm: general_chat, rag_search, draw_chart, zilcode_get_system_blueprint.
+Khi cần đọc hệ thống Zilcode thật, dùng zilcode_get_system_blueprint theo flow graph-first: gọi mode=graph trước để lấy bản đồ compact gồm apps, windows, tabs, tables, domains, relations và các cạnh quan hệ. Nếu graph đã đủ để trả lời thì trả lời ngay. Nếu cần đào sâu một app/window/tab/table/domain/relation cụ thể, gọi lại mode=subgraph hoặc mode=detail với node_id/node_ids lấy từ graph; không yêu cầu full blueprint khi chưa có node liên quan.
 Khi dùng rag_search, thường chỉ gọi một lần với query tổng hợp tốt. Chỉ gọi lại nếu kết quả chưa đủ và query mới khác rõ ràng về ý định hoặc phạm vi; không gọi lại cùng query hoặc query tương đương.
 Dùng zilcode_get_system_blueprint khi người dùng hỏi dữ liệu/cấu trúc hệ thống Zilcode thật của tài khoản đang đăng nhập: app, window/menu, tab, table, domain, relation, field, quyền hoặc các ràng buộc tạo app. Nếu chưa đăng nhập Zilcode, hãy yêu cầu người dùng đăng nhập ở giao diện chat trước. Không dùng zilcode_get_system_blueprint cho chào hỏi hoặc kiến thức chung có thể trả lời bằng general_chat/RAG.
 Với câu hỏi ngoài phạm vi Zilcode, hãy dùng general_chat.
@@ -1775,6 +1803,7 @@ Trả lời đúng mức chi tiết theo yêu cầu của người dùng, cụ t
     });
 
     let generalChatResult: string | null = null;
+    let shouldLetModelInspectToolResult = false;
 
     for (const toolCall of toolCallsToExecute) {
       console.log(`[CÔNG CỤ] Gọi: ${toolCall.name}`, toolCall.arguments);
@@ -1849,6 +1878,11 @@ Trả lời đúng mức chi tiết theo yêu cầu của người dùng, cụ t
       if (toolCall.name === "rag_search") {
         hasRagSearchResult = true;
       }
+
+      if (toolCall.name === "zilcode_get_system_blueprint") {
+        const blueprintMode = getBlueprintMode(toolCall.arguments);
+        shouldLetModelInspectToolResult = blueprintMode === "graph" || blueprintMode === "subgraph";
+      }
     }
 
     if (hasRagSearchResult) {
@@ -1904,6 +1938,13 @@ Dựa trên nội dung từ general_chat, trả lời tự nhiên và không nh�
     }
 
     if (toolResults.length > 0) {
+      if (shouldLetModelInspectToolResult && i < MAX_ITERATIONS - 1) {
+        addDebugStep(debugSteps, "agent.graph_continue", "ok", "Đưa graph/subgraph về model để model quyết định trả lời hoặc gọi detail.", {
+          next_iteration: i + 2
+        });
+        continue;
+      }
+
       const finalAnswer = await createFinalAnswerFromToolResults(
         userMessage,
         toolResults,
@@ -2081,6 +2122,33 @@ function getLimitArg(
   const parsed = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
   return Math.min(max, Math.max(1, Math.round(parsed)));
+}
+
+type BlueprintMode = "graph" | "subgraph" | "detail";
+
+function getBlueprintMode(args: Record<string, unknown>): BlueprintMode {
+  const mode = getStringArg(args, "mode").toLowerCase();
+  if (mode === "subgraph" || mode === "detail") return mode;
+  return "graph";
+}
+
+function getNodeIdsArg(args: Record<string, unknown>): string[] {
+  const ids = new Set<string>();
+  const single = getStringArg(args, "node_id");
+  if (single) ids.add(single);
+
+  const raw = args.node_ids;
+  if (Array.isArray(raw)) {
+    for (const item of raw) {
+      if (typeof item === "string" && item.trim()) ids.add(item.trim());
+    }
+  } else if (typeof raw === "string") {
+    for (const item of raw.split(",")) {
+      if (item.trim()) ids.add(item.trim());
+    }
+  }
+
+  return [...ids];
 }
 
 function getFirstConfigArray(
@@ -2370,16 +2438,523 @@ function summarizeWindowBlueprint(
   };
 }
 
+interface SystemGraphNode {
+  id: string;
+  type: string;
+  label: string;
+  appid?: string;
+  counts?: Record<string, unknown>;
+  summary?: Record<string, unknown>;
+  detail_available?: boolean;
+}
+
+interface SystemGraphEdge {
+  from: string;
+  to: string;
+  type: string;
+  label?: string;
+  metadata?: Record<string, unknown>;
+}
+
+interface SystemGraph {
+  nodes: SystemGraphNode[];
+  edges: SystemGraphEdge[];
+  node_counts: Record<string, number>;
+  edge_count: number;
+}
+
+function graphIdPart(value: unknown, fallback: string): string {
+  const text = String(value ?? "").trim() || fallback;
+  return text.replace(/[^\p{L}\p{N}_.-]+/gu, "_").slice(0, 96) || fallback;
+}
+
+function graphNodeId(type: string, ...parts: unknown[]): string {
+  return [type, ...parts.map((part, index) => graphIdPart(part, `node${index}`))].join(":");
+}
+
+function addGraphNode(nodes: Map<string, SystemGraphNode>, node: SystemGraphNode): void {
+  const current = nodes.get(node.id);
+  nodes.set(node.id, current ? { ...current, ...node, summary: { ...current.summary, ...node.summary } } : node);
+}
+
+function addGraphEdge(edges: Map<string, SystemGraphEdge>, edge: SystemGraphEdge): void {
+  if (!edge.from || !edge.to || edge.from === edge.to) return;
+  edges.set(`${edge.from}|${edge.type}|${edge.to}`, edge);
+}
+
+function rememberGraphLookup(map: Map<string, string>, appid: string, value: unknown, nodeId: string): void {
+  if (value === undefined || value === null || value === "") return;
+  map.set(`${appid}:${String(value)}`, nodeId);
+}
+
+function lookupGraphNode(map: Map<string, string>, appid: string, value: unknown): string | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  return map.get(`${appid}:${String(value)}`);
+}
+
+function compactGraphSummary(record: Record<string, unknown>, keys: string[]): Record<string, unknown> {
+  const summary: Record<string, unknown> = {};
+
+  for (const key of keys) {
+    const value = getCaseInsensitiveValue(record, key);
+    if (value === undefined || value === null || value === "") continue;
+    if (typeof value === "string") {
+      summary[key] = value.length > 300 ? `${value.slice(0, 300)}...` : value;
+    } else if (typeof value === "number" || typeof value === "boolean") {
+      summary[key] = value;
+    }
+  }
+
+  const domainJson = getCaseInsensitiveValue(record, "domainjson");
+  if (typeof domainJson === "string" && domainJson) {
+    summary.domainjson_chars = domainJson.length;
+  }
+
+  return summary;
+}
+
+function finalizeSystemGraph(nodes: Map<string, SystemGraphNode>, edges: Map<string, SystemGraphEdge>): SystemGraph {
+  const nodeList = [...nodes.values()];
+  const nodeCounts: Record<string, number> = {};
+  for (const node of nodeList) {
+    nodeCounts[node.type] = (nodeCounts[node.type] ?? 0) + 1;
+  }
+
+  return {
+    nodes: nodeList,
+    edges: [...edges.values()],
+    node_counts: nodeCounts,
+    edge_count: edges.size
+  };
+}
+
+function buildSystemGraphFromBlueprint(
+  sessionSummary: Record<string, unknown>,
+  appBlueprints: Record<string, unknown>[]
+): SystemGraph {
+  const nodes = new Map<string, SystemGraphNode>();
+  const edges = new Map<string, SystemGraphEdge>();
+  const tableLookup = new Map<string, string>();
+  const domainLookup = new Map<string, string>();
+  const tabLookup = new Map<string, string>();
+  const sessionNodeId = "session:current";
+
+  addGraphNode(nodes, {
+    id: sessionNodeId,
+    type: "session",
+    label: "Phiên đăng nhập hiện tại",
+    summary: {
+      base_url: sessionSummary.base_url,
+      roleid: sessionSummary.roleid,
+      role_name: sessionSummary.role_name,
+      orgid: sessionSummary.orgid,
+      org_name: sessionSummary.org_name
+    }
+  });
+
+  for (const app of appBlueprints) {
+    const appid = String(app.appid ?? "");
+    if (!appid) continue;
+    const appNodeId = graphNodeId("app", appid);
+
+    addGraphNode(nodes, {
+      id: appNodeId,
+      type: "app",
+      label: String(app.app_name ?? app.app_code ?? appid),
+      appid,
+      counts: asRecord(app.counts) ?? undefined,
+      summary: {
+        appid,
+        app_name: app.app_name,
+        app_code: app.app_code
+      },
+      detail_available: true
+    });
+    addGraphEdge(edges, { from: sessionNodeId, to: appNodeId, type: "session_has_app" });
+
+    const tables = toArrayValues(app.tables).filter((table): table is Record<string, unknown> => Boolean(table) && typeof table === "object");
+    tables.forEach((table, index) => {
+      const tableKey = table.tableid ?? table.tablename ?? table.alias ?? index;
+      const tableNodeId = graphNodeId("table", appid, tableKey);
+      rememberGraphLookup(tableLookup, appid, table.tableid, tableNodeId);
+      rememberGraphLookup(tableLookup, appid, table.tablename, tableNodeId);
+      rememberGraphLookup(tableLookup, appid, table.alias, tableNodeId);
+
+      addGraphNode(nodes, {
+        id: tableNodeId,
+        type: "table",
+        label: String(table.alias ?? table.tablename ?? table.tableid ?? tableKey),
+        appid,
+        summary: compactGraphSummary(table, [
+          "tableid",
+          "tablename",
+          "tabletype",
+          "alias",
+          "description",
+          "columnkey",
+          "columncode",
+          "columndisplay",
+          "columnfind",
+          "urlview",
+          "urledit",
+          "serviceid",
+          "servicetype",
+          "isreadonly",
+          "isview"
+        ]),
+        detail_available: true
+      });
+      addGraphEdge(edges, { from: appNodeId, to: tableNodeId, type: "app_has_table" });
+    });
+
+    const domains = toArrayValues(app.domains).filter((domain): domain is Record<string, unknown> => Boolean(domain) && typeof domain === "object");
+    domains.forEach((domain, index) => {
+      const domainKey = domain.domainid ?? domain.domainname ?? domain.name ?? index;
+      const domainNodeId = graphNodeId("domain", appid, domainKey);
+      rememberGraphLookup(domainLookup, appid, domain.domainid, domainNodeId);
+      rememberGraphLookup(domainLookup, appid, domain.domainname, domainNodeId);
+      rememberGraphLookup(domainLookup, appid, domain.name, domainNodeId);
+
+      addGraphNode(nodes, {
+        id: domainNodeId,
+        type: "domain",
+        label: String(domain.name ?? domain.domainname ?? domain.domainid ?? domainKey),
+        appid,
+        summary: compactGraphSummary(domain, ["domainid", "domainname", "name", "description", "datatype", "controltype"]),
+        detail_available: true
+      });
+      addGraphEdge(edges, { from: appNodeId, to: domainNodeId, type: "app_has_domain" });
+    });
+
+    const menus = toArrayValues(app.menus).filter((menu): menu is Record<string, unknown> => Boolean(menu) && typeof menu === "object");
+    menus.forEach((menu, index) => {
+      const menuKey = menu.menuid ?? menu.menuname ?? menu.translate ?? index;
+      const menuNodeId = graphNodeId("menu", appid, menuKey);
+      const windowId = menu.linkwindowid ?? menu.windowid;
+
+      addGraphNode(nodes, {
+        id: menuNodeId,
+        type: "menu",
+        label: String(menu.translate ?? menu.menuname ?? menu.menuid ?? menuKey),
+        appid,
+        summary: compactGraphSummary(menu, ["menuid", "menuname", "translate", "parentid", "seqno", "linktype", "linkwindowid", "windowid", "execname", "icon"]),
+        detail_available: true
+      });
+      addGraphEdge(edges, { from: appNodeId, to: menuNodeId, type: "app_has_menu" });
+
+      if (windowId !== undefined && windowId !== null && windowId !== "") {
+        const windowNodeId = graphNodeId("window", windowId);
+        addGraphNode(nodes, {
+          id: windowNodeId,
+          type: "window",
+          label: String(windowId),
+          appid,
+          summary: { windowid: windowId },
+          detail_available: true
+        });
+        addGraphEdge(edges, { from: menuNodeId, to: windowNodeId, type: "menu_links_window" });
+      }
+    });
+
+    const relates = toArrayValues(app.relates).filter((relation): relation is Record<string, unknown> => Boolean(relation) && typeof relation === "object");
+    relates.forEach((relation, index) => {
+      const relationKey = relation.relateid ?? relation.relatename ?? index;
+      const relationNodeId = graphNodeId("relation", appid, relationKey);
+
+      addGraphNode(nodes, {
+        id: relationNodeId,
+        type: "relation",
+        label: String(relation.relatename ?? relation.relateid ?? relationKey),
+        appid,
+        summary: compactGraphSummary(relation, ["relateid", "relatename", "parenttableid", "childtableid", "parentfield", "childfield", "relatetype", "description"]),
+        detail_available: true
+      });
+      addGraphEdge(edges, { from: appNodeId, to: relationNodeId, type: "app_has_relation" });
+
+      const parentTableNodeId = lookupGraphNode(tableLookup, appid, relation.parenttableid);
+      const childTableNodeId = lookupGraphNode(tableLookup, appid, relation.childtableid);
+      if (parentTableNodeId) addGraphEdge(edges, { from: relationNodeId, to: parentTableNodeId, type: "relation_parent_table" });
+      if (childTableNodeId) addGraphEdge(edges, { from: relationNodeId, to: childTableNodeId, type: "relation_child_table" });
+    });
+
+    const windows = toArrayValues(app.windows).filter((window): window is Record<string, unknown> => Boolean(window) && typeof window === "object");
+    for (const window of windows) {
+      const windowid = String(window.windowid ?? "");
+      if (!windowid) continue;
+      const windowNodeId = graphNodeId("window", windowid);
+      addGraphNode(nodes, {
+        id: windowNodeId,
+        type: "window",
+        label: String(window.label ?? windowid),
+        appid,
+        counts: {
+          tabs: window.tabs_count,
+          fields: window.fields_count,
+          menu_tools: window.menu_tools_count
+        },
+        summary: compactGraphSummary(window, ["windowid", "label", "parsed_config", "warning"]),
+        detail_available: true
+      });
+      addGraphEdge(edges, { from: appNodeId, to: windowNodeId, type: "app_has_window" });
+
+      const tabs = toArrayValues(window.tabs).filter((tab): tab is Record<string, unknown> => Boolean(tab) && typeof tab === "object");
+      tabs.forEach((tab, index) => {
+        const tabKey = tab.tabid ?? tab.tabname ?? tab.label ?? index;
+        const tabNodeId = graphNodeId("tab", windowid, tabKey);
+        rememberGraphLookup(tabLookup, windowid, tab.tabid, tabNodeId);
+
+        addGraphNode(nodes, {
+          id: tabNodeId,
+          type: "tab",
+          label: String(tab.label ?? tab.tabname ?? tab.tabid ?? tabKey),
+          appid,
+          summary: compactGraphSummary(tab, [
+            "tabid",
+            "tabname",
+            "label",
+            "parenttabid",
+            "tablevel",
+            "tableid",
+            "linktableid",
+            "linkchildfield",
+            "linkparentfield",
+            "relatetableid",
+            "relatechildfield",
+            "relateparentfield",
+            "workflowid",
+            "isviewonly",
+            "noinsert",
+            "noupdate",
+            "nodelete",
+            "noselect",
+            "noexport",
+            "seqno"
+          ]),
+          detail_available: true
+        });
+        addGraphEdge(edges, { from: windowNodeId, to: tabNodeId, type: "window_has_tab" });
+
+        const tableId = tab.tableid ?? tab.linktableid ?? asRecord(tab.linked_table)?.tableid;
+        const tableNodeId = lookupGraphNode(tableLookup, appid, tableId);
+        if (tableNodeId) {
+          addGraphEdge(edges, {
+            from: tabNodeId,
+            to: tableNodeId,
+            type: "tab_uses_table",
+            metadata: compactGraphSummary(tab, ["linkchildfield", "linkparentfield"])
+          });
+        }
+      });
+
+      tabs.forEach(tab => {
+        const tabKey = tab.tabid ?? tab.tabname ?? tab.label;
+        const tabNodeId = tabKey === undefined ? undefined : graphNodeId("tab", windowid, tabKey);
+        const parentNodeId = lookupGraphNode(tabLookup, windowid, tab.parenttabid);
+        if (tabNodeId && parentNodeId) {
+          addGraphEdge(edges, {
+            from: parentNodeId,
+            to: tabNodeId,
+            type: "tab_parent_child",
+            metadata: compactGraphSummary(tab, ["linkchildfield", "linkparentfield"])
+          });
+        }
+
+        const relationTableNodeId = lookupGraphNode(tableLookup, appid, tab.relatetableid);
+        if (tabNodeId && relationTableNodeId) {
+          addGraphEdge(edges, {
+            from: tabNodeId,
+            to: relationTableNodeId,
+            type: "tab_many_to_many_table",
+            metadata: compactGraphSummary(tab, ["relatechildfield", "relateparentfield"])
+          });
+        }
+      });
+
+      const fields = toArrayValues(window.fields).filter((field): field is Record<string, unknown> => Boolean(field) && typeof field === "object");
+      fields.forEach((field, index) => {
+        const fieldKey = field.fieldid ?? field.columnname ?? field.fieldname ?? index;
+        const fieldNodeId = graphNodeId("field", windowid, fieldKey);
+        const fieldTabNodeId = lookupGraphNode(tabLookup, windowid, field.tabid);
+
+        addGraphNode(nodes, {
+          id: fieldNodeId,
+          type: "field",
+          label: String(field.label ?? field.caption ?? field.columnname ?? field.fieldname ?? fieldKey),
+          appid,
+          summary: compactGraphSummary(field, [
+            "fieldid",
+            "fieldname",
+            "columnname",
+            "tablename",
+            "tableid",
+            "tabid",
+            "caption",
+            "label",
+            "datatype",
+            "controltype",
+            "domainid",
+            "defaultvalue",
+            "isrequired",
+            "isreadonly",
+            "isvisible",
+            "isprimarykey",
+            "seqno"
+          ]),
+          detail_available: true
+        });
+        addGraphEdge(edges, { from: fieldTabNodeId ?? windowNodeId, to: fieldNodeId, type: fieldTabNodeId ? "tab_has_field" : "window_has_field" });
+
+        const domainNodeId = lookupGraphNode(domainLookup, appid, field.domainid);
+        if (domainNodeId) addGraphEdge(edges, { from: fieldNodeId, to: domainNodeId, type: "field_uses_domain" });
+      });
+    }
+
+    const windowErrors = toArrayValues(app.window_errors).filter((error): error is Record<string, unknown> => Boolean(error) && typeof error === "object");
+    for (const error of windowErrors) {
+      const windowid = String(error.windowid ?? "");
+      if (!windowid) continue;
+      const windowNodeId = graphNodeId("window", windowid);
+      addGraphNode(nodes, {
+        id: windowNodeId,
+        type: "window",
+        label: windowid,
+        appid,
+        summary: { windowid, error: error.error },
+        detail_available: false
+      });
+      addGraphEdge(edges, { from: appNodeId, to: windowNodeId, type: "app_has_window_error" });
+    }
+  }
+
+  return finalizeSystemGraph(nodes, edges);
+}
+
+function filterGraphByNeighborhood(graph: SystemGraph, nodeIds: string[], depth: number): SystemGraph {
+  if (nodeIds.length === 0) return graph;
+
+  const adjacency = new Map<string, Set<string>>();
+  for (const edge of graph.edges) {
+    if (!adjacency.has(edge.from)) adjacency.set(edge.from, new Set());
+    if (!adjacency.has(edge.to)) adjacency.set(edge.to, new Set());
+    adjacency.get(edge.from)?.add(edge.to);
+    adjacency.get(edge.to)?.add(edge.from);
+  }
+
+  const visited = new Set<string>();
+  const queue = nodeIds
+    .filter(id => graph.nodes.some(node => node.id === id))
+    .map(id => ({ id, level: 0 }));
+
+  for (const item of queue) visited.add(item.id);
+
+  while (queue.length) {
+    const current = queue.shift();
+    if (!current || current.level >= depth) continue;
+    for (const next of adjacency.get(current.id) ?? []) {
+      if (visited.has(next)) continue;
+      visited.add(next);
+      queue.push({ id: next, level: current.level + 1 });
+    }
+  }
+
+  const nodes = graph.nodes.filter(node => visited.has(node.id));
+  const edges = graph.edges.filter(edge => visited.has(edge.from) && visited.has(edge.to));
+  return finalizeSystemGraph(new Map(nodes.map(node => [node.id, node])), new Map(edges.map(edge => [`${edge.from}|${edge.type}|${edge.to}`, edge])));
+}
+
+function cleanDetailRecord(record: Record<string, unknown>, includeFields: boolean): Record<string, unknown> {
+  const detail: Record<string, unknown> = { ...record };
+  delete detail.raw_metadata;
+  delete detail.raw;
+
+  if (!includeFields && Array.isArray(detail.windows)) {
+    detail.windows = detail.windows
+      .filter((window): window is Record<string, unknown> => Boolean(window) && typeof window === "object")
+      .map(window => {
+        const copy: Record<string, unknown> = { ...window };
+        delete copy.fields;
+        delete copy.raw;
+        return copy;
+      });
+  }
+
+  return detail;
+}
+
+function collectBlueprintDetails(
+  appBlueprints: Record<string, unknown>[],
+  nodeIds: string[],
+  includeFields: boolean
+): Record<string, unknown>[] {
+  const selected = new Set(nodeIds);
+  if (selected.size === 0) return [];
+
+  const details: Record<string, unknown>[] = [];
+
+  for (const app of appBlueprints) {
+    const appid = String(app.appid ?? "");
+    if (!appid) continue;
+    const appNodeId = graphNodeId("app", appid);
+    if (selected.has(appNodeId)) {
+      details.push({ node_id: appNodeId, type: "app", data: cleanDetailRecord(app, includeFields) });
+    }
+
+    for (const [index, table] of toArrayValues(app.tables).filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object").entries()) {
+      const tableNodeId = graphNodeId("table", appid, table.tableid ?? table.tablename ?? table.alias ?? index);
+      if (selected.has(tableNodeId)) details.push({ node_id: tableNodeId, type: "table", data: table });
+    }
+
+    for (const [index, menu] of toArrayValues(app.menus).filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object").entries()) {
+      const menuNodeId = graphNodeId("menu", appid, menu.menuid ?? menu.menuname ?? menu.translate ?? index);
+      if (selected.has(menuNodeId)) details.push({ node_id: menuNodeId, type: "menu", data: menu });
+    }
+
+    for (const [index, domain] of toArrayValues(app.domains).filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object").entries()) {
+      const domainNodeId = graphNodeId("domain", appid, domain.domainid ?? domain.domainname ?? domain.name ?? index);
+      if (selected.has(domainNodeId)) details.push({ node_id: domainNodeId, type: "domain", data: domain });
+    }
+
+    for (const [index, relation] of toArrayValues(app.relates).filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object").entries()) {
+      const relationNodeId = graphNodeId("relation", appid, relation.relateid ?? relation.relatename ?? index);
+      if (selected.has(relationNodeId)) details.push({ node_id: relationNodeId, type: "relation", data: relation });
+    }
+
+    for (const window of toArrayValues(app.windows).filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")) {
+      const windowid = String(window.windowid ?? "");
+      if (!windowid) continue;
+      const windowNodeId = graphNodeId("window", windowid);
+      if (selected.has(windowNodeId)) details.push({ node_id: windowNodeId, type: "window", data: cleanDetailRecord(window, includeFields) });
+
+      for (const [index, tab] of toArrayValues(window.tabs).filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object").entries()) {
+        const tabNodeId = graphNodeId("tab", windowid, tab.tabid ?? tab.tabname ?? tab.label ?? index);
+        if (selected.has(tabNodeId)) details.push({ node_id: tabNodeId, type: "tab", data: tab });
+      }
+
+      if (includeFields) {
+        for (const [index, field] of toArrayValues(window.fields).filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object").entries()) {
+          const fieldNodeId = graphNodeId("field", windowid, field.fieldid ?? field.columnname ?? field.fieldname ?? index);
+          if (selected.has(fieldNodeId)) details.push({ node_id: fieldNodeId, type: "field", data: field });
+        }
+      }
+    }
+  }
+
+  return details;
+}
+
 async function buildZilcodeSystemBlueprint(
   env: Env,
   session: ZilcodeSession,
   args: Record<string, unknown>
 ): Promise<Record<string, unknown>> {
+  const mode = getBlueprintMode(args);
   const appidFilter = getStringArg(args, "appid");
-  const includeFields = getOptionalBooleanArg(args, "include_fields", true);
+  const includeFields = getOptionalBooleanArg(args, "include_fields", mode === "detail");
   const includeRaw = getOptionalBooleanArg(args, "include_raw", false);
   const maxApps = getLimitArg(args, "max_apps", 5, 100);
   const maxWindowsPerApp = getLimitArg(args, "max_windows_per_app", 20, 300);
+  const nodeIds = getNodeIdsArg(args);
+  const depth = getLimitArg(args, "depth", 1, 4);
   const apps = listSessionApplicationSummaries(session)
     .filter(app => !appidFilter || String(app.appid ?? "") === appidFilter)
     .slice(0, maxApps);
@@ -2452,28 +3027,44 @@ async function buildZilcodeSystemBlueprint(
     }
   }
 
+  const sessionSummary = {
+    base_url: session.base_url,
+    user: stripSensitiveUserFields(session.user),
+    roleid: session.roleid,
+    role_name: getSelectedRoleName(session),
+    orgid: session.orgid,
+    org_name: getSelectedOrgName(session)
+  };
+  const graph = buildSystemGraphFromBlueprint(sessionSummary, appBlueprints);
+  const focusedGraph = mode === "graph" ? graph : filterGraphByNeighborhood(graph, nodeIds, depth);
+  const details = mode === "detail" || mode === "subgraph"
+    ? collectBlueprintDetails(appBlueprints, nodeIds, includeFields)
+    : [];
+
   return {
-    session: {
-      base_url: session.base_url,
-      user: stripSensitiveUserFields(session.user),
-      roleid: session.roleid,
-      role_name: getSelectedRoleName(session),
-      orgid: session.orgid,
-      org_name: getSelectedOrgName(session)
-    },
+    mode,
+    session: sessionSummary,
     filters: {
       appid: appidFilter || undefined,
+      node_ids: nodeIds.length ? nodeIds : undefined,
+      depth: mode === "subgraph" ? depth : undefined,
       include_fields: includeFields,
       include_raw: includeRaw,
       max_apps: maxApps,
       max_windows_per_app: maxWindowsPerApp
     },
     apps_count: appBlueprints.length,
-    apps: appBlueprints,
+    graph: focusedGraph,
+    details_count: details.length || undefined,
+    details: details.length ? details : undefined,
     errors: errors.length ? errors : undefined,
     note: apps.length === 0
       ? "Phiên hiện tại không có app nào hoặc appid không khớp. Hãy đăng nhập và chọn role/org role system trước."
-      : "Blueprint là bản đồ read-only để agent hiểu cấu trúc hệ thống. Nếu window config không parse được, cần bổ sung parser format config của Zilcode."
+      : mode === "graph"
+        ? "Đây là graph compact. Nếu cần dữ liệu chi tiết, gọi lại tool với mode=subgraph hoặc mode=detail và node_id/node_ids từ graph.nodes."
+        : details.length
+          ? "Đã trả graph vùng liên quan và dữ liệu chi tiết cho node_id/node_ids đã chọn."
+          : "Không tìm thấy detail cho node_id/node_ids đã truyền. Hãy dùng đúng id trong graph.nodes."
   };
 }
 
