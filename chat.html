@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="vi">
 <head>
 <meta charset="UTF-8">
@@ -196,8 +196,7 @@
   .tool-badge.rag_search .icon { background: #dbeafe; color: #1d4ed8; }
   .tool-badge.general_chat .icon { background: #e5e7eb; color: #374151; }
   .tool-badge.draw_chart .icon { background: #fae8ff; color: #86198f; }
-  .tool-badge.get_workflow .icon { background: #dcfce7; color: #166534; }
-  .tool-badge.get_screen_context .icon { background: #fef9c3; color: #854d0e; }
+  .tool-badge.zilcode_system_blueprint .icon { background: #dcfce7; color: #166534; }
 
   .tool-badge .spinner {
     width: 10px; height: 10px;
@@ -449,32 +448,32 @@
     <button class="suggestion-btn" id="zilLoginBtn" onclick="loginZilcode()">Login</button>
     <button class="suggestion-btn" id="zilLogoutBtn" onclick="logoutZilcode()">Logout</button>
     </div>
-    <span id="authStatus">Chưa đăng nhập Zilcode</span>
+    <span id="authStatus">ChÆ°a Ä‘Äƒng nháº­p Zilcode</span>
     <div id="roleOrgPicker" class="role-org-picker" hidden>
-      <select id="zilRoleSelect" aria-label="Chọn role Zilcode"></select>
-      <select id="zilOrgSelect" aria-label="Chọn organization Zilcode"></select>
-      <button class="suggestion-btn" onclick="confirmRoleOrgSelection()">Dùng role/org</button>
+      <select id="zilRoleSelect" aria-label="Chá»n role Zilcode"></select>
+      <select id="zilOrgSelect" aria-label="Chá»n organization Zilcode"></select>
+      <button class="suggestion-btn" onclick="confirmRoleOrgSelection()">DÃ¹ng role/org</button>
     </div>
   </div>
 </header>
 
 <div id="messages">
   <div class="empty-state" id="emptyState">
-    <div class="big">⚡</div>
-    <p>Hỏi bất kỳ điều gì về Zilcode</p>
+    <div class="big">âš¡</div>
+    <p>Há»i báº¥t ká»³ Ä‘iá»u gÃ¬ vá» Zilcode</p>
     <div class="suggestions">
-      <button class="suggestion-btn" onclick="send('Zilcode là gì?')">Zilcode là gì?</button>
-      <button class="suggestion-btn" onclick="send('z-Flow hoạt động như thế nào?')">z-Flow hoạt động thế nào?</button>
-      <button class="suggestion-btn" onclick="send('Show me workflow wf-001')">Show workflow wf-001</button>
-      <button class="suggestion-btn" onclick="send('Tính năng z-Admin gồm những gì?')">Tính năng z-Admin</button>
+      <button class="suggestion-btn" onclick="send('Zilcode lÃ  gÃ¬?')">Zilcode lÃ  gÃ¬?</button>
+      <button class="suggestion-btn" onclick="send('z-Flow hoáº¡t Ä‘á»™ng nhÆ° tháº¿ nÃ o?')">z-Flow hoáº¡t Ä‘á»™ng tháº¿ nÃ o?</button>
+      <button class="suggestion-btn" onclick="send('TÃ i khoáº£n role system cá»§a tÃ´i Ä‘ang cÃ³ nhá»¯ng app, window, tab, báº£ng nÃ o?')">System blueprint</button>
+      <button class="suggestion-btn" onclick="send('TÃ­nh nÄƒng z-Admin gá»“m nhá»¯ng gÃ¬?')">TÃ­nh nÄƒng z-Admin</button>
     </div>
   </div>
 </div>
 
 <div class="input-area">
   <div class="input-row">
-    <textarea id="userInput" rows="1" placeholder="Nhập câu hỏi..." onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
-    <button id="sendBtn" onclick="sendMessage()" title="Gửi">
+    <textarea id="userInput" rows="1" placeholder="Nháº­p cÃ¢u há»i..." onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
+    <button id="sendBtn" onclick="sendMessage()" title="Gá»­i">
       <svg viewBox="0 0 24 24"><path d="M2 21l21-9L2 3v7l15 2-15 2v7z"/></svg>
     </button>
   </div>
@@ -482,23 +481,10 @@
 
 <script>
   const TOOL_META = {
-    general_chat: { label: 'general_chat', icon: '💬', cls: 'general_chat' },
-    rag_search: { label: 'rag_search', icon: '🔍', cls: 'rag_search' },
-    draw_chart: { label: 'draw_chart', icon: '📊', cls: 'draw_chart' },
-    get_workflow: { label: 'get_workflow', icon: '⚙', cls: 'get_workflow' },
-    get_screen_context: { label: 'get_screen_context', icon: '🖥', cls: 'get_screen_context' },
-    zilcode_get_session_info: { label: 'zilcode_session', icon: 'Z', cls: 'get_workflow' },
-    zilcode_list_applications: { label: 'zilcode_apps', icon: 'Z', cls: 'get_workflow' },
-    zilcode_list_accessible_tables: { label: 'zilcode_tables_all', icon: 'Z', cls: 'get_workflow' },
-    zilcode_get_user_permissions: { label: 'zilcode_permissions', icon: 'Z', cls: 'get_workflow' },
-    zilcode_get_app_metadata: { label: 'zilcode_app_metadata', icon: 'Z', cls: 'get_workflow' },
-    zilcode_search_windows: { label: 'zilcode_search_windows', icon: 'Z', cls: 'get_workflow' },
-    zilcode_get_window_config: { label: 'zilcode_window_config', icon: 'Z', cls: 'get_workflow' },
-    zilcode_list_tables: { label: 'zilcode_tables', icon: 'Z', cls: 'get_workflow' },
-    zilcode_get_table_metadata: { label: 'zilcode_table_metadata', icon: 'Z', cls: 'get_workflow' },
-    zilcode_search_records: { label: 'zilcode_search_records', icon: 'Z', cls: 'get_workflow' },
-    zilcode_get_record: { label: 'zilcode_get_record', icon: 'Z', cls: 'get_workflow' },
-    zilcode_get_domain_values: { label: 'zilcode_domain_values', icon: 'Z', cls: 'get_workflow' },
+    general_chat: { label: 'general_chat', icon: 'ðŸ’¬', cls: 'general_chat' },
+    rag_search: { label: 'rag_search', icon: 'ðŸ”', cls: 'rag_search' },
+    draw_chart: { label: 'draw_chart', icon: 'ðŸ“Š', cls: 'draw_chart' },
+    zilcode_get_system_blueprint: { label: 'zilcode_system_blueprint', icon: 'Z', cls: 'zilcode_system_blueprint' },
   };
 
   const CHAT_HISTORY_STORAGE_KEY = 'zilcode_chat_history_v1';
@@ -659,9 +645,9 @@
     const defaultRole = getOptionId(roles[0], ['id', 'roleid']);
     const defaultOrg = orgs.length ? getOptionId(orgs[0], ['id', 'orgid']) : '0';
 
-    const roleid = window.prompt('Nhập roleid Zilcode cần dùng:', defaultRole);
+    const roleid = window.prompt('Nháº­p roleid Zilcode cáº§n dÃ¹ng:', defaultRole);
     if (!roleid) return;
-    const orgid = window.prompt('Nhập orgid Zilcode cần dùng:', defaultOrg || '0') || '0';
+    const orgid = window.prompt('Nháº­p orgid Zilcode cáº§n dÃ¹ng:', defaultOrg || '0') || '0';
 
     const res = await fetch(getUrl() + '/auth/select-role-org', {
       method: 'POST',
@@ -669,7 +655,7 @@
       body: JSON.stringify({ roleid, orgid })
     });
     const selected = await res.json();
-    if (!selected.success) throw new Error(selected.error || 'Không chọn được role/org');
+    if (!selected.success) throw new Error(selected.error || 'KhÃ´ng chá»n Ä‘Æ°á»£c role/org');
     setAuthStatus(`Zilcode: ${selected.base_url || '-'} | role ${selected.roleid}, org ${selected.orgid}`, true);
   }
 
@@ -682,18 +668,18 @@
     const orgSelect = document.getElementById('zilOrgSelect');
 
     if (roles.length === 0) {
-      throw new Error('Zilcode không trả về danh sách role để chọn.');
+      throw new Error('Zilcode khÃ´ng tráº£ vá» danh sÃ¡ch role Ä‘á»ƒ chá»n.');
     }
 
     pendingRoleOrgData = data;
     fillSelect(roleSelect, roles, ROLE_ID_KEYS, ROLE_LABEL_KEYS);
     fillSelect(orgSelect, orgs, ORG_ID_KEYS, ORG_LABEL_KEYS, {
       value: '0',
-      label: 'Không chọn tổ chức'
+      label: 'KhÃ´ng chá»n tá»• chá»©c'
     });
 
     document.getElementById('roleOrgPicker').hidden = false;
-    setAuthStatus('Chọn role và organization bằng tên bên dưới, sau đó bấm Dùng role/org.');
+    setAuthStatus('Chá»n role vÃ  organization báº±ng tÃªn bÃªn dÆ°á»›i, sau Ä‘Ã³ báº¥m DÃ¹ng role/org.');
   }
 
   async function confirmRoleOrgSelection() {
@@ -701,7 +687,7 @@
     const orgid = document.getElementById('zilOrgSelect').value || '0';
 
     if (!roleid) {
-      setAuthStatus('Chưa chọn role Zilcode.');
+      setAuthStatus('ChÆ°a chá»n role Zilcode.');
       return;
     }
 
@@ -712,11 +698,11 @@
         body: JSON.stringify({ roleid, orgid })
       });
       const selected = await res.json();
-      if (!selected.success) throw new Error(selected.error || 'Không chọn được role/org');
+      if (!selected.success) throw new Error(selected.error || 'KhÃ´ng chá»n Ä‘Æ°á»£c role/org');
       hideRoleOrgPicker();
       setLoggedInStatus(selected);
     } catch (err) {
-      setAuthStatus(err.message || 'Không chọn được role/org');
+      setAuthStatus(err.message || 'KhÃ´ng chá»n Ä‘Æ°á»£c role/org');
     }
   }
 
@@ -733,13 +719,13 @@
     }
 
     if (!username || !sitecode || !password) {
-      setAuthStatus('Thiếu username/sitecode/password');
+      setAuthStatus('Thiáº¿u username/sitecode/password');
       return;
     }
 
     const btn = document.getElementById('zilLoginBtn');
     btn.disabled = true;
-    setAuthStatus('Đang đăng nhập...');
+    setAuthStatus('Äang Ä‘Äƒng nháº­p...');
 
     try {
       const res = await fetch(getUrl() + '/auth/login', {
@@ -748,21 +734,21 @@
         body: JSON.stringify({ username, sitecode, password, zilcode_base })
       });
       const data = await res.json();
-      if (!data.success) throw new Error(data.error || 'Đăng nhập thất bại');
+      if (!data.success) throw new Error(data.error || 'ÄÄƒng nháº­p tháº¥t báº¡i');
 
       zilcodeSessionId = data.session_id || '';
       sessionStorage.setItem(ZILCODE_SESSION_STORAGE_KEY, zilcodeSessionId);
       document.getElementById('zilPassword').value = '';
 
       if (data.needs_role_org) {
-        setAuthStatus('Cần chọn role/org');
+        setAuthStatus('Cáº§n chá»n role/org');
         await selectRoleOrgFromLogin(data);
       } else {
         hideRoleOrgPicker();
         setLoggedInStatus(data);
       }
     } catch (err) {
-      setAuthStatus(err.message || 'Lỗi đăng nhập');
+      setAuthStatus(err.message || 'Lá»—i Ä‘Äƒng nháº­p');
     } finally {
       btn.disabled = false;
     }
@@ -771,7 +757,7 @@
   async function refreshZilcodeAuth() {
     if (!zilcodeSessionId) {
       hideRoleOrgPicker();
-      setAuthStatus('Chưa đăng nhập Zilcode');
+      setAuthStatus('ChÆ°a Ä‘Äƒng nháº­p Zilcode');
       return;
     }
 
@@ -787,7 +773,7 @@
       zilcodeSessionId = '';
       sessionStorage.removeItem(ZILCODE_SESSION_STORAGE_KEY);
       hideRoleOrgPicker();
-      setAuthStatus('Phiên Zilcode hết hạn');
+      setAuthStatus('PhiÃªn Zilcode háº¿t háº¡n');
     }
   }
 
@@ -803,7 +789,7 @@
       zilcodeSessionId = '';
       sessionStorage.removeItem(ZILCODE_SESSION_STORAGE_KEY);
       hideRoleOrgPicker();
-      setAuthStatus('Chưa đăng nhập Zilcode');
+      setAuthStatus('ChÆ°a Ä‘Äƒng nháº­p Zilcode');
     }
   }
 
@@ -847,7 +833,7 @@
     details.className = 'debug-steps';
 
     const summary = document.createElement('summary');
-    summary.textContent = `Debug flow (${debugSteps.length} bước)`;
+    summary.textContent = `Debug flow (${debugSteps.length} bÆ°á»›c)`;
     details.appendChild(summary);
 
     debugSteps.forEach((step, index) => {
@@ -888,7 +874,7 @@
 
     if (role === 'assistant' && tools.length > 0) {
       tools.forEach(tool => {
-        const meta = TOOL_META[tool] || { label: tool, icon: '🔧', cls: '' };
+        const meta = TOOL_META[tool] || { label: tool, icon: 'ðŸ”§', cls: '' };
         const badge = document.createElement('div');
         badge.className = `tool-badge ${meta.cls}`;
         badge.innerHTML = `<span class="icon">${meta.icon}</span>${meta.label}`;
@@ -933,7 +919,7 @@
         const rank = source.rerank_rank ? `rank ${source.rerank_rank}` : 'rank n/a';
         meta.textContent = [source.section_path || source.heading, score, rank]
           .filter(Boolean)
-          .join(' · ');
+          .join(' Â· ');
         item.appendChild(meta);
 
         sourceList.appendChild(item);
@@ -966,8 +952,8 @@
       const provider = embeddingDebug.provider === 'openrouter' ? 'OpenRouter' : 'Cloudflare';
       const model = embeddingDebug.model || 'unknown model';
       const dimensions = typeof embeddingDebug.dimensions === 'number'
-        ? `${embeddingDebug.dimensions} chiều`
-        : 'không rõ số chiều';
+        ? `${embeddingDebug.dimensions} chiá»u`
+        : 'khÃ´ng rÃµ sá»‘ chiá»u';
       const mode = embeddingDebug.fallback ? 'fallback' : 'primary';
 
       const label = document.createElement('strong');
@@ -1013,25 +999,6 @@
   function removeTyping() {
     const el = document.getElementById('typing-indicator');
     if (el) el.remove();
-  }
-
-  function appendToolBadge(toolName) {
-    const container = document.getElementById('messages');
-    const wrapper = document.createElement('div');
-    wrapper.className = 'msg assistant';
-    wrapper.id = `tool-badge-${toolName}`;
-
-    const meta = TOOL_META[toolName] || { label: toolName, icon: '🔧', cls: '' };
-    const badge = document.createElement('div');
-    badge.className = `tool-badge ${meta.cls}`;
-    badge.innerHTML = `<span class="spinner"></span><span class="icon">${meta.icon}</span>calling ${meta.label}...`;
-    wrapper.appendChild(badge);
-    container.appendChild(wrapper);
-    container.scrollTop = container.scrollHeight;
-  }
-
-  function removeToolBadges() {
-    document.querySelectorAll('[id^="tool-badge-"]').forEach(el => el.remove());
   }
 
   async function sendMessage() {
@@ -1080,7 +1047,7 @@
         msg.className = 'msg assistant';
         const err = document.createElement('div');
         err.className = 'error-bubble';
-        err.textContent = '❌ ' + (data.error || 'Unknown error');
+        err.textContent = 'âŒ ' + (data.error || 'Unknown error');
         msg.appendChild(err);
 
         const debugStepsElement = buildDebugStepsElement(data.debug_steps || []);
@@ -1096,7 +1063,7 @@
       msg.className = 'msg assistant';
       const errEl = document.createElement('div');
       errEl.className = 'error-bubble';
-      errEl.textContent = '❌ Không kết nối được Worker. Kiểm tra URL và CORS.';
+      errEl.textContent = 'âŒ KhÃ´ng káº¿t ná»‘i Ä‘Æ°á»£c Worker. Kiá»ƒm tra URL vÃ  CORS.';
       msg.appendChild(errEl);
       container.appendChild(msg);
     }
@@ -1111,3 +1078,4 @@
 </script>
 </body>
 </html>
+

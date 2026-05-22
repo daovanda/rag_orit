@@ -2,7 +2,7 @@
  * scripts/ingest.ts
  *
  * One-time (or on-update) ingestion script.
- * Reads doc/*.md, chunks by heading + size, embeds with the configured provider,
+ * Reads all Markdown files under doc, chunks by heading + size, embeds with the configured provider,
  * upserts vectors into Vectorize and chunk text into KV.
  *
  * Run:
@@ -44,19 +44,25 @@ const CHUNK_OVERLAP_CHARS = 160;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type DocType = "admin" | "user" | "intro" | "general";
+type DocType = "admin" | "user" | "intro" | "logic" | "general";
 
 interface DocProfile {
   title: string;
   doc_type: DocType;
   audience: string;
+  doc_group: "guide" | "agent_logic" | "general";
+  logic_area?: string;
 }
 
 interface ChunkMetadata {
   module: string;
   filename: string;
+  source_path: string;
+  source_dir: string;
   title: string;
   doc_type: DocType;
+  doc_group: "guide" | "agent_logic" | "general";
+  logic_area?: string;
   audience: string;
   heading: string;
   heading_level: number;
@@ -96,10 +102,11 @@ interface OpenRouterEmbeddingResponse {
  *   distinguish "người dùng" questions from "quản trị" questions.
  */
 function chunkMarkdown(text: string, filename: string): Chunk[] {
-  const module = path.basename(filename, ".md");
+  const sourcePath = filename.replace(/\\/g, "/");
+  const module = getModuleName(sourcePath);
   const normalized = text.replace(/\r\n/g, "\n").trim();
   const title = getDocumentTitle(normalized, module);
-  const profile = getDocProfile(filename, title);
+  const profile = getDocProfile(sourcePath, title);
   const sections = parseMarkdownSections(normalized);
   const chunks: Chunk[] = [];
   let chunkIndex = 0;
@@ -110,9 +117,13 @@ function chunkMarkdown(text: string, filename: string): Chunk[] {
     for (let partIndex = 0; partIndex < parts.length; partIndex++) {
       const metadata: ChunkMetadata = {
         module,
-        filename,
+        filename: path.basename(sourcePath),
+        source_path: sourcePath,
+        source_dir: path.dirname(sourcePath) === "." ? "" : path.dirname(sourcePath),
         title: profile.title,
         doc_type: profile.doc_type,
+        doc_group: profile.doc_group,
+        logic_area: profile.logic_area,
         audience: profile.audience,
         heading: section.heading,
         heading_level: section.headingLevel,
@@ -139,13 +150,41 @@ function getDocumentTitle(text: string, fallback: string): string {
   return match?.[1]?.trim() || fallback;
 }
 
+function getModuleName(sourcePath: string): string {
+  const parsed = path.parse(sourcePath);
+  if (!parsed.dir || parsed.dir === ".") return parsed.name;
+  return `${parsed.dir.replace(/[\\/]+/g, "__")}__${parsed.name}`;
+}
+
+function getLogicArea(lowerPath: string): string {
+  if (lowerPath.includes("rest-api")) return "rest_api_contract";
+  if (lowerPath.includes("runtime")) return "runtime_architecture";
+  if (lowerPath.includes("domain")) return "domain_model";
+  if (lowerPath.includes("window-tab-field")) return "window_tab_field_config";
+  if (lowerPath.includes("agent-operating")) return "agent_operating_model";
+  if (lowerPath.includes("tool-safety")) return "tool_safety_rules";
+  if (lowerPath.includes("editing")) return "editing_rules";
+  return "zilcode_logic";
+}
+
 function getDocProfile(filename: string, title: string): DocProfile {
-  const lower = filename.toLowerCase();
+  const lower = filename.replace(/\\/g, "/").toLowerCase();
+
+  if (lower.startsWith("logic/") || lower.includes("/logic/")) {
+    return {
+      title,
+      doc_type: "logic",
+      doc_group: "agent_logic",
+      logic_area: getLogicArea(lower),
+      audience: "agent AI, tool-calling planner, developer tích hợp Zilcode"
+    };
+  }
 
   if (lower.includes("admin")) {
     return {
       title,
       doc_type: "admin",
+      doc_group: "guide",
       audience: "quản trị viên, người cấu hình hệ thống"
     };
   }
@@ -154,6 +193,7 @@ function getDocProfile(filename: string, title: string): DocProfile {
     return {
       title,
       doc_type: "user",
+      doc_group: "guide",
       audience: "người dùng cuối"
     };
   }
@@ -162,6 +202,7 @@ function getDocProfile(filename: string, title: string): DocProfile {
     return {
       title,
       doc_type: "intro",
+      doc_group: "guide",
       audience: "người mới tìm hiểu Zilcode"
     };
   }
@@ -169,6 +210,7 @@ function getDocProfile(filename: string, title: string): DocProfile {
   return {
     title,
     doc_type: "general",
+    doc_group: "general",
     audience: "người dùng Zilcode"
   };
 }
@@ -240,7 +282,7 @@ function buildChildHeadingOverview(
     "",
     "Các mục con:",
     ...childHeadings.map(heading => `- ${heading}`)
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 }
 
 function splitSectionText(sectionText: string): string[] {
@@ -312,13 +354,16 @@ function splitLongText(text: string): string[] {
 
 function buildEmbeddingText(text: string, metadata: ChunkMetadata): string {
   return [
+    `Nguon: ${metadata.source_path}`,
+    `Nhom tai lieu: ${metadata.doc_group}`,
+    metadata.logic_area ? `Mang logic: ${metadata.logic_area}` : undefined,
     `Tài liệu: ${metadata.title}`,
     `Loại tài liệu: ${metadata.doc_type}`,
     `Đối tượng: ${metadata.audience}`,
     `Mục: ${metadata.section_path}`,
     "",
     text
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 }
 
 // ─── Embedding + Cloudflare API helpers ───────────────────────────────────────
@@ -457,6 +502,28 @@ async function putKVBulk(pairs: { key: string; value: string }[]) {
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
+function listMarkdownFilesRecursive(rootDir: string): string[] {
+  const files: string[] = [];
+
+  function walk(currentDir: string) {
+    for (const entry of fs.readdirSync(currentDir, { withFileTypes: true })) {
+      const fullPath = path.join(currentDir, entry.name);
+
+      if (entry.isDirectory()) {
+        walk(fullPath);
+        continue;
+      }
+
+      if (entry.isFile() && entry.name.toLowerCase().endsWith(".md")) {
+        files.push(path.relative(rootDir, fullPath).replace(/\\/g, "/"));
+      }
+    }
+  }
+
+  walk(rootDir);
+  return files.sort();
+}
+
 async function main() {
   if (!CF_ACCOUNT_ID || !CF_API_TOKEN || !KV_NAMESPACE_ID) {
     console.error(
@@ -482,11 +549,8 @@ async function main() {
   console.log(`Embedding dimensions: ${EMBEDDING_DIMENSIONS}`);
   console.log(`Vectorize index: ${VECTORIZE_INDEX}`);
 
-  // 1. Read all .md files
-  const mdFiles = fs
-    .readdirSync(DOCS_DIR)
-    .filter(f => f.endsWith(".md"))
-    .sort();
+  // 1. Read all .md files, including doc/logic/*.md for agent operating knowledge.
+  const mdFiles = listMarkdownFilesRecursive(DOCS_DIR);
 
   if (mdFiles.length === 0) {
     console.error(`No .md files found in ${DOCS_DIR}`);
