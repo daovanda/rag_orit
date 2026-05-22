@@ -1535,10 +1535,61 @@ function formatToolResultsForFinalAnswer(toolResults: ToolResultRecord[]): strin
   return toolResults
     .map((result, index) => [
       `[KET_QUA_CONG_CU ${index + 1}: ${result.name}]`,
-      result.content,
+      compactToolContentForFinalAnswer(result),
       `[HET_KET_QUA_CONG_CU ${index + 1}]`
     ].join("\n"))
     .join("\n\n");
+}
+
+function compactToolContentForFinalAnswer(result: ToolResultRecord): string {
+  if (result.name !== "zilcode_get_system_blueprint") return result.content;
+
+  try {
+    const data = JSON.parse(result.content) as Record<string, unknown>;
+    const graph = asRecord(data.graph);
+    const nodes = Array.isArray(graph?.nodes)
+      ? graph.nodes
+        .filter((node): node is Record<string, unknown> => Boolean(node) && typeof node === "object")
+        .map(node => ({
+          id: node.id,
+          type: node.type,
+          label: node.label,
+          appid: node.appid,
+          counts: node.counts,
+          summary: node.summary
+        }))
+      : [];
+    const edges = Array.isArray(graph?.edges)
+      ? graph.edges
+        .filter((edge): edge is Record<string, unknown> => Boolean(edge) && typeof edge === "object")
+        .map(edge => ({
+          from: edge.from,
+          to: edge.to,
+          type: edge.type,
+          metadata: edge.metadata
+        }))
+      : [];
+
+    return JSON.stringify({
+      mode: data.mode,
+      session: asRecord(data.overview)?.session ?? data.session,
+      filters: data.filters,
+      apps_count: data.apps_count,
+      overview: data.overview,
+      graph: graph ? {
+        node_counts: graph.node_counts,
+        edge_count: graph.edge_count,
+        nodes,
+        edges
+      } : undefined,
+      details_count: data.details_count,
+      details: data.details,
+      errors: data.errors,
+      note: data.note
+    }, null, 2);
+  } catch {
+    return result.content;
+  }
 }
 
 function truncateToolContext(context: string): string {
@@ -1650,7 +1701,15 @@ Hãy trả lời bằng cùng ngôn ngữ với người hỏi.
 Dựa vào kết quả công cụ read-only đã cung cấp để trả lời câu hỏi.
 Không nhắc đến tool/function nội bộ.
 Nếu kết quả có lỗi hoặc phần chưa lấy được, hãy nói rõ phần nào chưa đọc được thay vì bỏ qua.
-Nếu dữ liệu quá nhiều, hãy tóm tắt theo cấu trúc dễ đọc: phiên đăng nhập, danh sách app, bảng, window/menu, tab, domain/relation và các lỗi phát sinh nếu có.`
+Nếu kết quả có trường overview, hãy ưu tiên dùng overview để trả lời phần tổng quan; chỉ dùng graph/details để bổ sung khi cần.
+Viết cho người dùng cuối đọc, không viết như log kỹ thuật. Không mở đầu bằng tên tool. Không dùng bảng Markdown dài.
+Với câu hỏi tổng quan như "hệ thống của tôi hiện tại", hãy trình bày ngắn gọn theo thứ tự:
+1. Người dùng đang đăng nhập với role/org nào.
+2. Hệ thống đang có bao nhiêu app.
+3. Mỗi app chính dùng để làm gì hoặc đang có bao nhiêu bảng/menu/window/domain/relation.
+4. Nêu vài ví dụ tiêu biểu, không liệt kê toàn bộ bảng nếu có nhiều.
+5. Nói rõ phần nào chưa đọc được hoặc có lỗi.
+Kết thúc bằng một gợi ý hỏi sâu tự nhiên, ví dụ xem chi tiết app, window, bảng hoặc quan hệ.`
       },
       ...chatHistory,
       { role: "user", content: userMessage },
@@ -1695,6 +1754,7 @@ Nếu Zilcode là chủ đề chính cần giải thích, hoặc người dùng 
 Dùng draw_chart khi người dùng yêu cầu vẽ/tạo ảnh biểu đồ, sơ đồ, flowchart, timeline, mindmap, dashboard mockup hoặc infographic. Với biểu đồ cần số liệu chính xác tuyệt đối, hãy nói ngắn gọn rằng ảnh AI chỉ mang tính minh họa và vẫn có thể tạo ảnh nếu người dùng muốn.
 Bộ công cụ hiện tại gồm: general_chat, rag_search, draw_chart, zilcode_get_system_blueprint.
 Khi cần đọc hệ thống Zilcode thật, dùng zilcode_get_system_blueprint theo flow graph-first: gọi mode=graph trước để lấy bản đồ compact gồm apps, windows, tabs, tables, domains, relations và các cạnh quan hệ. Nếu graph đã đủ để trả lời thì trả lời ngay. Nếu cần đào sâu một app/window/tab/table/domain/relation cụ thể, gọi lại mode=subgraph hoặc mode=detail với node_id/node_ids lấy từ graph; không yêu cầu full blueprint khi chưa có node liên quan.
+Khi trả lời từ system blueprint, hãy viết dễ hiểu cho người dùng cuối: ưu tiên trường overview nếu có, không nhắc tên tool, không dùng bảng dài, không liệt kê toàn bộ bảng khi người dùng chỉ hỏi tổng quan. Hãy tóm tắt role/org, số app, số bảng/menu/window/domain/relation, vài ví dụ tiêu biểu và phần lỗi/chưa đọc được nếu có.
 Khi dùng rag_search, thường chỉ gọi một lần với query tổng hợp tốt. Chỉ gọi lại nếu kết quả chưa đủ và query mới khác rõ ràng về ý định hoặc phạm vi; không gọi lại cùng query hoặc query tương đương.
 Dùng zilcode_get_system_blueprint khi người dùng hỏi dữ liệu/cấu trúc hệ thống Zilcode thật của tài khoản đang đăng nhập: app, window/menu, tab, table, domain, relation, field, quyền hoặc các ràng buộc tạo app. Nếu chưa đăng nhập Zilcode, hãy yêu cầu người dùng đăng nhập ở giao diện chat trước. Không dùng zilcode_get_system_blueprint cho chào hỏi hoặc kiến thức chung có thể trả lời bằng general_chat/RAG.
 Với câu hỏi ngoài phạm vi Zilcode, hãy dùng general_chat.
@@ -2499,7 +2559,7 @@ function compactGraphSummary(record: Record<string, unknown>, keys: string[]): R
     const value = getCaseInsensitiveValue(record, key);
     if (value === undefined || value === null || value === "") continue;
     if (typeof value === "string") {
-      summary[key] = value.length > 300 ? `${value.slice(0, 300)}...` : value;
+      summary[key] = value.length > 140 ? `${value.slice(0, 140)}...` : value;
     } else if (typeof value === "number" || typeof value === "boolean") {
       summary[key] = value;
     }
@@ -2590,15 +2650,9 @@ function buildSystemGraphFromBlueprint(
           "tablename",
           "tabletype",
           "alias",
-          "description",
           "columnkey",
           "columncode",
           "columndisplay",
-          "columnfind",
-          "urlview",
-          "urledit",
-          "serviceid",
-          "servicetype",
           "isreadonly",
           "isview"
         ]),
@@ -2637,7 +2691,7 @@ function buildSystemGraphFromBlueprint(
         type: "menu",
         label: String(menu.translate ?? menu.menuname ?? menu.menuid ?? menuKey),
         appid,
-        summary: compactGraphSummary(menu, ["menuid", "menuname", "translate", "parentid", "seqno", "linktype", "linkwindowid", "windowid", "execname", "icon"]),
+        summary: compactGraphSummary(menu, ["menuid", "menuname", "translate", "parentid", "seqno", "linktype", "linkwindowid", "windowid"]),
         detail_available: true
       });
       addGraphEdge(edges, { from: appNodeId, to: menuNodeId, type: "app_has_menu" });
@@ -2942,6 +2996,64 @@ function collectBlueprintDetails(
   return details;
 }
 
+function buildOverviewExamples(
+  records: unknown,
+  keys: string[],
+  limit: number
+): Record<string, unknown>[] {
+  return toArrayValues(records)
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+    .slice(0, limit)
+    .map(record => compactGraphSummary(record, keys));
+}
+
+function buildSystemOverview(
+  sessionSummary: Record<string, unknown>,
+  appBlueprints: Record<string, unknown>[],
+  graph: SystemGraph,
+  errors: Record<string, unknown>[]
+): Record<string, unknown> {
+  const user = asRecord(sessionSummary.user);
+  const apps = appBlueprints.map(app => ({
+    appid: app.appid,
+    app_name: app.app_name,
+    app_code: app.app_code,
+    counts: app.counts,
+    examples: {
+      tables: buildOverviewExamples(app.tables, ["tableid", "tablename", "alias", "tabletype", "columnkey", "columndisplay"], 8),
+      menus: buildOverviewExamples(app.menus, ["menuid", "menuname", "translate", "linkwindowid", "parentid"], 6),
+      windows: buildOverviewExamples(app.windows, ["windowid", "label", "tabs_count", "fields_count", "warning"], 6),
+      domains: buildOverviewExamples(app.domains, ["domainid", "domainname", "name", "datatype", "controltype"], 6),
+      relations: buildOverviewExamples(app.relates, ["relateid", "relatename", "parenttableid", "childtableid", "parentfield", "childfield"], 6)
+    }
+  }));
+
+  return {
+    intent: "Tóm tắt thân thiện cho người dùng về hệ thống Zilcode hiện tại; không cần liệt kê toàn bộ node khi người dùng chỉ hỏi tổng quan.",
+    session: {
+      base_url: sessionSummary.base_url,
+      user: user ? pickRecordFields(user, ["userid", "username", "fullname", "email", "siteid", "sitecode", "sitename"]) : undefined,
+      roleid: sessionSummary.roleid,
+      role_name: sessionSummary.role_name,
+      orgid: sessionSummary.orgid,
+      org_name: sessionSummary.org_name
+    },
+    totals: {
+      apps: appBlueprints.length,
+      nodes: graph.nodes.length,
+      edges: graph.edges.length,
+      node_counts: graph.node_counts,
+      app_errors: errors.length,
+      window_errors: appBlueprints.reduce((total, app) => total + toArrayValues(app.window_errors).length, 0)
+    },
+    apps,
+    reading_notes: [
+      "Graph chỉ là bản đồ tổng quan để biết các thành phần và quan hệ chính.",
+      "Khi cần chi tiết bảng/window/tab/field cụ thể, dùng node_id trong graph để lấy detail."
+    ]
+  };
+}
+
 async function buildZilcodeSystemBlueprint(
   env: Env,
   session: ZilcodeSession,
@@ -3040,6 +3152,7 @@ async function buildZilcodeSystemBlueprint(
   const details = mode === "detail" || mode === "subgraph"
     ? collectBlueprintDetails(appBlueprints, nodeIds, includeFields)
     : [];
+  const overview = buildSystemOverview(sessionSummary, appBlueprints, graph, errors);
 
   return {
     mode,
@@ -3054,6 +3167,7 @@ async function buildZilcodeSystemBlueprint(
       max_windows_per_app: maxWindowsPerApp
     },
     apps_count: appBlueprints.length,
+    overview,
     graph: focusedGraph,
     details_count: details.length || undefined,
     details: details.length ? details : undefined,
