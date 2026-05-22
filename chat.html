@@ -441,39 +441,39 @@
   </div>
   <div class="auth-panel">
     <div class="auth-controls">
-    <input type="text" id="zilBase" placeholder="Zilcode Base" value="https://dvnb.zilcode.vn" autocomplete="url" />
+    <input type="text" id="zilBase" placeholder="Zilcode Base" value="https://demo.zilcode.com" autocomplete="url" />
     <input type="text" id="zilUsername" placeholder="Username" autocomplete="username" />
     <input type="text" id="zilSitecode" placeholder="SiteCode" autocomplete="organization" />
     <input type="password" id="zilPassword" placeholder="Password" autocomplete="current-password" />
     <button class="suggestion-btn" id="zilLoginBtn" onclick="loginZilcode()">Login</button>
     <button class="suggestion-btn" id="zilLogoutBtn" onclick="logoutZilcode()">Logout</button>
     </div>
-    <span id="authStatus">ChÆ°a Ä‘Äƒng nháº­p Zilcode</span>
+    <span id="authStatus">Chưa đăng nhập Zilcode</span>
     <div id="roleOrgPicker" class="role-org-picker" hidden>
-      <select id="zilRoleSelect" aria-label="Chá»n role Zilcode"></select>
-      <select id="zilOrgSelect" aria-label="Chá»n organization Zilcode"></select>
-      <button class="suggestion-btn" onclick="confirmRoleOrgSelection()">DÃ¹ng role/org</button>
+      <select id="zilRoleSelect" aria-label="Chọn role Zilcode"></select>
+      <select id="zilOrgSelect" aria-label="Chọn organization Zilcode"></select>
+      <button class="suggestion-btn" onclick="confirmRoleOrgSelection()">Dùng role/org</button>
     </div>
   </div>
 </header>
 
 <div id="messages">
   <div class="empty-state" id="emptyState">
-    <div class="big">âš¡</div>
-    <p>Há»i báº¥t ká»³ Ä‘iá»u gÃ¬ vá» Zilcode</p>
+    <div class="big">⚡</div>
+    <p>Hỏi bất kỳ điều gì về Zilcode</p>
     <div class="suggestions">
-      <button class="suggestion-btn" onclick="send('Zilcode lÃ  gÃ¬?')">Zilcode lÃ  gÃ¬?</button>
-      <button class="suggestion-btn" onclick="send('z-Flow hoáº¡t Ä‘á»™ng nhÆ° tháº¿ nÃ o?')">z-Flow hoáº¡t Ä‘á»™ng tháº¿ nÃ o?</button>
-      <button class="suggestion-btn" onclick="send('TÃ i khoáº£n role system cá»§a tÃ´i Ä‘ang cÃ³ nhá»¯ng app, window, tab, báº£ng nÃ o?')">System blueprint</button>
-      <button class="suggestion-btn" onclick="send('TÃ­nh nÄƒng z-Admin gá»“m nhá»¯ng gÃ¬?')">TÃ­nh nÄƒng z-Admin</button>
+      <button class="suggestion-btn" onclick="send('Zilcode là gì?')">Zilcode là gì?</button>
+      <button class="suggestion-btn" onclick="send('z-Flow hoạt động như thế nào?')">z-Flow hoạt động thế nào?</button>
+      <button class="suggestion-btn" onclick="send('Tài khoản role system của tôi đang có những app, window, tab, bảng nào?')">System blueprint</button>
+      <button class="suggestion-btn" onclick="send('Tính năng z-Admin gồm những gì?')">Tính năng z-Admin</button>
     </div>
   </div>
 </div>
 
 <div class="input-area">
   <div class="input-row">
-    <textarea id="userInput" rows="1" placeholder="Nháº­p cÃ¢u há»i..." onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
-    <button id="sendBtn" onclick="sendMessage()" title="Gá»­i">
+    <textarea id="userInput" rows="1" placeholder="Nhập câu hỏi..." onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
+    <button id="sendBtn" onclick="sendMessage()" title="Gửi">
       <svg viewBox="0 0 24 24"><path d="M2 21l21-9L2 3v7l15 2-15 2v7z"/></svg>
     </button>
   </div>
@@ -481,9 +481,9 @@
 
 <script>
   const TOOL_META = {
-    general_chat: { label: 'general_chat', icon: 'ðŸ’¬', cls: 'general_chat' },
-    rag_search: { label: 'rag_search', icon: 'ðŸ”', cls: 'rag_search' },
-    draw_chart: { label: 'draw_chart', icon: 'ðŸ“Š', cls: 'draw_chart' },
+    general_chat: { label: 'general_chat', icon: '💬', cls: 'general_chat' },
+    rag_search: { label: 'rag_search', icon: '🔍', cls: 'rag_search' },
+    draw_chart: { label: 'draw_chart', icon: '📊', cls: 'draw_chart' },
     zilcode_get_system_blueprint: { label: 'zilcode_system_blueprint', icon: 'Z', cls: 'zilcode_system_blueprint' },
   };
 
@@ -565,10 +565,22 @@
     return headers;
   }
 
+  function repairMojibakeText(value) {
+    if (typeof value !== 'string') return value;
+    if (!/[ÃÂÄÆâð]|á[º»]/.test(value)) return value;
+
+    try {
+      return decodeURIComponent(escape(value));
+    } catch {
+      return value;
+    }
+  }
+
   function setAuthStatus(text, ok = false) {
     const el = document.getElementById('authStatus');
-    el.textContent = text;
-    el.title = text;
+    const safeText = repairMojibakeText(String(text));
+    el.textContent = safeText;
+    el.title = safeText;
     el.style.color = ok ? '#166534' : '#666';
   }
 
@@ -597,11 +609,13 @@
   }
 
   function formatRoleOrgStatus(data) {
-    const roleLabel = data.role_name
-      ? `${data.role_name} (${data.roleid || '-'})`
+    const roleName = repairMojibakeText(data.role_name || '');
+    const orgName = repairMojibakeText(data.org_name || '');
+    const roleLabel = roleName
+      ? `${roleName} (${data.roleid || '-'})`
       : `role ${data.roleid || '-'}`;
-    const orgLabel = data.org_name
-      ? `${data.org_name} (${data.orgid ?? 0})`
+    const orgLabel = orgName
+      ? `${orgName} (${data.orgid ?? 0})`
       : `org ${data.orgid ?? 0}`;
 
     return `Zilcode: ${data.base_url || '-'} | ${roleLabel}, ${orgLabel}`;
@@ -645,9 +659,9 @@
     const defaultRole = getOptionId(roles[0], ['id', 'roleid']);
     const defaultOrg = orgs.length ? getOptionId(orgs[0], ['id', 'orgid']) : '0';
 
-    const roleid = window.prompt('Nháº­p roleid Zilcode cáº§n dÃ¹ng:', defaultRole);
+    const roleid = window.prompt('Nhập roleid Zilcode cần dùng:', defaultRole);
     if (!roleid) return;
-    const orgid = window.prompt('Nháº­p orgid Zilcode cáº§n dÃ¹ng:', defaultOrg || '0') || '0';
+    const orgid = window.prompt('Nhập orgid Zilcode cần dùng:', defaultOrg || '0') || '0';
 
     const res = await fetch(getUrl() + '/auth/select-role-org', {
       method: 'POST',
@@ -655,7 +669,7 @@
       body: JSON.stringify({ roleid, orgid })
     });
     const selected = await res.json();
-    if (!selected.success) throw new Error(selected.error || 'KhÃ´ng chá»n Ä‘Æ°á»£c role/org');
+    if (!selected.success) throw new Error(selected.error || 'Không chọn được role/org');
     setAuthStatus(`Zilcode: ${selected.base_url || '-'} | role ${selected.roleid}, org ${selected.orgid}`, true);
   }
 
@@ -668,18 +682,18 @@
     const orgSelect = document.getElementById('zilOrgSelect');
 
     if (roles.length === 0) {
-      throw new Error('Zilcode khÃ´ng tráº£ vá» danh sÃ¡ch role Ä‘á»ƒ chá»n.');
+      throw new Error('Zilcode không trả về danh sách role để chọn.');
     }
 
     pendingRoleOrgData = data;
     fillSelect(roleSelect, roles, ROLE_ID_KEYS, ROLE_LABEL_KEYS);
     fillSelect(orgSelect, orgs, ORG_ID_KEYS, ORG_LABEL_KEYS, {
       value: '0',
-      label: 'KhÃ´ng chá»n tá»• chá»©c'
+      label: 'Không chọn tổ chức'
     });
 
     document.getElementById('roleOrgPicker').hidden = false;
-    setAuthStatus('Chá»n role vÃ  organization báº±ng tÃªn bÃªn dÆ°á»›i, sau Ä‘Ã³ báº¥m DÃ¹ng role/org.');
+    setAuthStatus('Chọn role và organization bằng tên bên dưới, sau đó bấm Dùng role/org.');
   }
 
   async function confirmRoleOrgSelection() {
@@ -687,7 +701,7 @@
     const orgid = document.getElementById('zilOrgSelect').value || '0';
 
     if (!roleid) {
-      setAuthStatus('ChÆ°a chá»n role Zilcode.');
+      setAuthStatus('Chưa chọn role Zilcode.');
       return;
     }
 
@@ -698,11 +712,11 @@
         body: JSON.stringify({ roleid, orgid })
       });
       const selected = await res.json();
-      if (!selected.success) throw new Error(selected.error || 'KhÃ´ng chá»n Ä‘Æ°á»£c role/org');
+      if (!selected.success) throw new Error(selected.error || 'Không chọn được role/org');
       hideRoleOrgPicker();
       setLoggedInStatus(selected);
     } catch (err) {
-      setAuthStatus(err.message || 'KhÃ´ng chá»n Ä‘Æ°á»£c role/org');
+      setAuthStatus(err.message || 'Không chọn được role/org');
     }
   }
 
@@ -719,13 +733,13 @@
     }
 
     if (!username || !sitecode || !password) {
-      setAuthStatus('Thiáº¿u username/sitecode/password');
+      setAuthStatus('Thiếu username/sitecode/password');
       return;
     }
 
     const btn = document.getElementById('zilLoginBtn');
     btn.disabled = true;
-    setAuthStatus('Äang Ä‘Äƒng nháº­p...');
+    setAuthStatus('Đang đăng nhập...');
 
     try {
       const res = await fetch(getUrl() + '/auth/login', {
@@ -734,21 +748,21 @@
         body: JSON.stringify({ username, sitecode, password, zilcode_base })
       });
       const data = await res.json();
-      if (!data.success) throw new Error(data.error || 'ÄÄƒng nháº­p tháº¥t báº¡i');
+      if (!data.success) throw new Error(data.error || 'Đăng nhập thất bại');
 
       zilcodeSessionId = data.session_id || '';
       sessionStorage.setItem(ZILCODE_SESSION_STORAGE_KEY, zilcodeSessionId);
       document.getElementById('zilPassword').value = '';
 
       if (data.needs_role_org) {
-        setAuthStatus('Cáº§n chá»n role/org');
+        setAuthStatus('Cần chọn role/org');
         await selectRoleOrgFromLogin(data);
       } else {
         hideRoleOrgPicker();
         setLoggedInStatus(data);
       }
     } catch (err) {
-      setAuthStatus(err.message || 'Lá»—i Ä‘Äƒng nháº­p');
+      setAuthStatus(err.message || 'Lỗi đăng nhập');
     } finally {
       btn.disabled = false;
     }
@@ -757,7 +771,7 @@
   async function refreshZilcodeAuth() {
     if (!zilcodeSessionId) {
       hideRoleOrgPicker();
-      setAuthStatus('ChÆ°a Ä‘Äƒng nháº­p Zilcode');
+      setAuthStatus('Chưa đăng nhập Zilcode');
       return;
     }
 
@@ -773,7 +787,7 @@
       zilcodeSessionId = '';
       sessionStorage.removeItem(ZILCODE_SESSION_STORAGE_KEY);
       hideRoleOrgPicker();
-      setAuthStatus('PhiÃªn Zilcode háº¿t háº¡n');
+      setAuthStatus('Phiên Zilcode hết hạn');
     }
   }
 
@@ -789,7 +803,7 @@
       zilcodeSessionId = '';
       sessionStorage.removeItem(ZILCODE_SESSION_STORAGE_KEY);
       hideRoleOrgPicker();
-      setAuthStatus('ChÆ°a Ä‘Äƒng nháº­p Zilcode');
+      setAuthStatus('Chưa đăng nhập Zilcode');
     }
   }
 
@@ -833,7 +847,7 @@
     details.className = 'debug-steps';
 
     const summary = document.createElement('summary');
-    summary.textContent = `Debug flow (${debugSteps.length} bÆ°á»›c)`;
+    summary.textContent = `Debug flow (${debugSteps.length} bước)`;
     details.appendChild(summary);
 
     debugSteps.forEach((step, index) => {
@@ -874,7 +888,7 @@
 
     if (role === 'assistant' && tools.length > 0) {
       tools.forEach(tool => {
-        const meta = TOOL_META[tool] || { label: tool, icon: 'ðŸ”§', cls: '' };
+        const meta = TOOL_META[tool] || { label: tool, icon: '🔧', cls: '' };
         const badge = document.createElement('div');
         badge.className = `tool-badge ${meta.cls}`;
         badge.innerHTML = `<span class="icon">${meta.icon}</span>${meta.label}`;
@@ -919,7 +933,7 @@
         const rank = source.rerank_rank ? `rank ${source.rerank_rank}` : 'rank n/a';
         meta.textContent = [source.section_path || source.heading, score, rank]
           .filter(Boolean)
-          .join(' Â· ');
+          .join(' · ');
         item.appendChild(meta);
 
         sourceList.appendChild(item);
@@ -952,8 +966,8 @@
       const provider = embeddingDebug.provider === 'openrouter' ? 'OpenRouter' : 'Cloudflare';
       const model = embeddingDebug.model || 'unknown model';
       const dimensions = typeof embeddingDebug.dimensions === 'number'
-        ? `${embeddingDebug.dimensions} chiá»u`
-        : 'khÃ´ng rÃµ sá»‘ chiá»u';
+        ? `${embeddingDebug.dimensions} chiều`
+        : 'không rõ số chiều';
       const mode = embeddingDebug.fallback ? 'fallback' : 'primary';
 
       const label = document.createElement('strong');
@@ -1047,7 +1061,7 @@
         msg.className = 'msg assistant';
         const err = document.createElement('div');
         err.className = 'error-bubble';
-        err.textContent = 'âŒ ' + (data.error || 'Unknown error');
+        err.textContent = '❌ ' + (data.error || 'Unknown error');
         msg.appendChild(err);
 
         const debugStepsElement = buildDebugStepsElement(data.debug_steps || []);
@@ -1063,7 +1077,7 @@
       msg.className = 'msg assistant';
       const errEl = document.createElement('div');
       errEl.className = 'error-bubble';
-      errEl.textContent = 'âŒ KhÃ´ng káº¿t ná»‘i Ä‘Æ°á»£c Worker. Kiá»ƒm tra URL vÃ  CORS.';
+      errEl.textContent = '❌ Không kết nối được Worker. Kiểm tra URL và CORS.';
       msg.appendChild(errEl);
       container.appendChild(msg);
     }

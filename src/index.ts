@@ -13,7 +13,7 @@ export interface Env {
   OPENROUTER_EMBEDDING_MODEL?: string;
 }
 
-// â”€â”€â”€ Models â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Models ───────────────────────────────────────────────────────────────────
 
 const LLAMA_CHAT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 const CHAT_MODEL = "@cf/openai/gpt-oss-120b";
@@ -36,11 +36,11 @@ const RAG_RERANK_TEXT_MAX_CHARS = 900;
 const RAG_VECTOR_DIMENSIONS = 1024;
 const MAX_HISTORY_MESSAGES = 6;
 const MAX_HISTORY_CONTENT_CHARS = 1200;
-const DEFAULT_ZILCODE_BASE = "https://dvnb.zilcode.vn";
+const DEFAULT_ZILCODE_BASE = "https://demo.zilcode.com";
 const ZILCODE_SESSION_PREFIX = "zilcode_session:";
 const DEFAULT_SESSION_TTL_SECONDS = 60 * 60 * 8;
 
- // â”€â”€â”€ CORS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ // ─── CORS ─────────────────────────────────────────────────────────────────────
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -48,19 +48,19 @@ const CORS = {
   "Access-Control-Allow-Headers": "Content-Type, X-Zilcode-Session",
 };
 
-// â”€â”€â”€ Tool definitions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Tool definitions ─────────────────────────────────────────────────────────
 
 const TOOLS = [
   {
     name: "general_chat",
     description:
-      "Tra loi hoi thoai thong thuong bang kien thuc san co cua tro ly. Dung cho chao hoi, cam on, hoi tro ly la ai/co the lam gi, cau hoi ngoai Zilcode, hoac cau hoi kien thuc chung khong can tra cuu tai lieu Zilcode.",
+      "Trả lời hội thoại thông thường bằng kiến thức sẵn có của trợ lý. Dùng cho chào hỏi, cảm ơn, hỏi trợ lý là ai/có thể làm gì, câu hỏi ngoài Zilcode, hoặc câu hỏi kiến thức chung không cần tra cứu tài liệu Zilcode.",
     parameters: {
       type: "object",
       properties: {
         message: {
           type: "string",
-          description: "Tin nhan nguoi dung can tra loi truc tiep"
+          description: "Tin nhắn người dùng cần trả lời trực tiếp"
         }
       },
       required: ["message"]
@@ -69,13 +69,13 @@ const TOOLS = [
   {
     name: "rag_search",
     description:
-      "Tra cuu kho tai lieu Zilcode da ingest, gom tai lieu huong dan su dung, quan tri va doc/logic ve cach Zilcode hoat dong. Dung khi can giai thich tinh nang, huong dan thao tac, kien truc, API contract, domain model, window/tab/field config, hoac can kien thuc logic de goi tool Zilcode dung hon.",
+      "Tra cứu kho tài liệu Zilcode đã ingest, gồm tài liệu hướng dẫn sử dụng, quản trị và doc/logic về cách Zilcode hoạt động. Dùng khi cần giải thích tính năng, hướng dẫn thao tác, kiến trúc, API contract, domain model, window/tab/field config, hoặc cần kiến thức logic để gọi tool Zilcode đúng hơn.",
     parameters: {
       type: "object",
       properties: {
         query: {
           type: "string",
-          description: "Cau truy van tim kiem tai lieu. Giu thuat ngu Zilcode quan trong va them ngu canh neu co."
+          description: "Câu truy vấn tìm kiếm tài liệu. Giữ thuật ngữ Zilcode quan trọng và thêm ngữ cảnh nếu có."
         }
       },
       required: ["query"]
@@ -84,13 +84,13 @@ const TOOLS = [
   {
     name: "draw_chart",
     description:
-      "Tao anh bieu do, so do, flowchart, timeline, mindmap, dashboard mockup hoac infographic bang model anh Flux. Dung khi nguoi dung yeu cau ve hoac tao hinh minh hoa truc quan.",
+      "Tạo ảnh biểu đồ, sơ đồ, flowchart, timeline, mindmap, dashboard mockup hoặc infographic bằng model ảnh Flux. Dùng khi người dùng yêu cầu vẽ hoặc tạo hình minh họa trực quan.",
     parameters: {
       type: "object",
       properties: {
         prompt: {
           type: "string",
-          description: "Mo ta anh bieu do/so do can tao: loai bieu do, du lieu chinh, bo cuc, phong cach, mau sac va ngon ngu nhan neu co."
+          description: "Mô tả ảnh biểu đồ/sơ đồ cần tạo: loại biểu đồ, dữ liệu chính, bố cục, phong cách, màu sắc và ngôn ngữ nhãn nếu có."
         },
         width: {
           type: "string",
@@ -107,29 +107,29 @@ const TOOLS = [
   {
     name: "zilcode_get_system_blueprint",
     description:
-      "Read-only tool. Lay ban do tong hop he thong Zilcode cua phien dang nhap hien tai: applications, menus/windows, window cache/config, tabs, fields, tables, domains, relations va cac rang buoc app -> window -> tab -> table. Dung khi can hieu he thong that cua tai khoan role system de tu van tao app/window/tab/table hoac kiem tra cau truc dang co.",
+      "Read-only tool. Lấy bản đồ tổng hợp hệ thống Zilcode của phiên đăng nhập hiện tại: applications, menus/windows, window cache/config, tabs, fields, tables, domains, relations và các ràng buộc app -> window -> tab -> table. Dùng khi cần hiểu hệ thống thật của tài khoản role system để tư vấn tạo app/window/tab/table hoặc kiểm tra cấu trúc đang có.",
     parameters: {
       type: "object",
       properties: {
         appid: {
           type: "string",
-          description: "Optional appid. Bo trong de quet tat ca app trong phien hien tai."
+          description: "Optional appid. Bỏ trống để quét tất cả app trong phiên hiện tại."
         },
         include_fields: {
           type: "string",
-          description: "true/false. Mac dinh true. Dat false neu chi can app/window/tab/table summary."
+          description: "true/false. Mặc định true. Đặt false nếu chỉ cần app/window/tab/table summary."
         },
         include_raw: {
           type: "string",
-          description: "true/false. Mac dinh false. Chi bat true khi debug vi raw payload co the lon."
+          description: "true/false. Mặc định false. Chỉ bật true khi debug vì raw payload có thể lớn."
         },
         max_apps: {
           type: "string",
-          description: "So app toi da can doc, mac dinh 20."
+          description: "Số app tối đa cần đọc, mặc định 20."
         },
         max_windows_per_app: {
           type: "string",
-          description: "So window/cache toi da moi app, mac dinh 100."
+          description: "Số window/cache tối đa mỗi app, mặc định 100."
         }
       }
     }
@@ -275,9 +275,9 @@ function getNumberArg(
 function buildChartPrompt(prompt: string): string {
   return [
     prompt,
-    "Táº¡o áº£nh dáº¡ng biá»ƒu Ä‘á»“/sÆ¡ Ä‘á»“ sáº¡ch, dá»… Ä‘á»c, bá»‘ cá»¥c rÃµ rÃ ng.",
-    "Phong cÃ¡ch: hiá»‡n Ä‘áº¡i, chuyÃªn nghiá»‡p, ná»n sÃ¡ng, mÃ u sáº¯c cÃ¢n báº±ng.",
-    "Náº¿u cÃ³ chá»¯ trong áº£nh, dÃ¹ng tiáº¿ng Viá»‡t tá»± nhiÃªn vÃ  giá»¯ nhÃ£n ngáº¯n gá»n."
+    "Tạo ảnh dạng biểu đồ/sơ đồ sạch, dễ đọc, bố cục rõ ràng.",
+    "Phong cách: hiện đại, chuyên nghiệp, nền sáng, màu sắc cân bằng.",
+    "Nếu có chữ trong ảnh, dùng tiếng Việt tự nhiên và giữ nhãn ngắn gọn."
   ].join("\n");
 }
 
@@ -318,7 +318,7 @@ function normalizeMessagesForOpenRouter(messages: AIMessage[]): OpenRouterMessag
     if (message.role === "tool") {
       return {
         role: "user",
-        content: `Káº¿t quáº£ cÃ´ng cá»¥${message.tool_call_id ? ` (${message.tool_call_id})` : ""}:\n${message.content}`
+        content: `Kết quả công cụ${message.tool_call_id ? ` (${message.tool_call_id})` : ""}:\n${message.content}`
       };
     }
 
@@ -346,7 +346,7 @@ function getRuntimeToolDescription(name: string, description: string): string {
 
   return `${description}
 
-Bo sung sau ingest: rag_search cung co the tra cuu doc/logic/*.md. Dung no khi can hieu cach Zilcode hoat dong, domain model, REST API contract, runtime architecture, window/tab/field config, tool safety rules, hoac khi can lay kien thuc logic de chon/goi cac tool zilcode_ dung hon va ket hop voi du lieu that.`;
+Bổ sung sau ingest: rag_search cũng có thể tra cứu doc/logic/*.md. Dùng nó khi cần hiểu cách Zilcode hoạt động, domain model, REST API contract, runtime architecture, window/tab/field config, tool safety rules, hoặc khi cần lấy kiến thức logic để chọn/gọi các tool Zilcode đúng hơn và kết hợp với dữ liệu thật.`;
 }
 
 function buildCloudflareChatRequest(
@@ -473,7 +473,7 @@ async function callOpenRouterChat(
   env: Env
 ): Promise<ChatModelResponse> {
   if (!env.OPENROUTER_API_KEY || !env.OPENROUTER_MODEL) {
-    throw new Error("Thiáº¿u OPENROUTER_API_KEY hoáº·c OPENROUTER_MODEL Ä‘á»ƒ fallback sang OpenRouter.");
+    throw new Error("Thiếu OPENROUTER_API_KEY hoặc OPENROUTER_MODEL để fallback sang OpenRouter.");
   }
 
   const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -503,7 +503,7 @@ async function callOpenRouterChat(
   }
 
   if (!response.ok) {
-    throw new Error(`OpenRouter API lá»—i ${response.status}: ${getErrorText(data)}`);
+    throw new Error(`OpenRouter API lỗi ${response.status}: ${getErrorText(data)}`);
   }
 
   return normalizeOpenRouterResponse(data);
@@ -535,7 +535,7 @@ async function runChatModel(
     return await callCloudflareChatModel(cfModel, request, env);
   } catch (error) {
     if (isCloudflareInternalModelError(error) && cfModel !== INTERNAL_CHAT_FALLBACK_MODEL) {
-      console.log(`[CHAT_MODEL] ${cfModel} lá»—i ná»™i bá»™, fallback sang ${INTERNAL_CHAT_FALLBACK_MODEL}`);
+      console.log(`[CHAT_MODEL] ${cfModel} lỗi nội bộ, fallback sang ${INTERNAL_CHAT_FALLBACK_MODEL}`);
       return callCloudflareChatModel(INTERNAL_CHAT_FALLBACK_MODEL, request, env);
     }
 
@@ -555,7 +555,7 @@ async function callOpenRouterEmbedding(
   const model = env.OPENROUTER_EMBEDDING_MODEL ?? env.OPENROUTER_MODEL;
 
   if (!env.OPENROUTER_API_KEY || !model) {
-    throw new Error("Thiáº¿u OPENROUTER_API_KEY vÃ  OPENROUTER_EMBEDDING_MODEL/OPENROUTER_MODEL Ä‘á»ƒ fallback embedding sang OpenRouter.");
+    throw new Error("Thiếu OPENROUTER_API_KEY và OPENROUTER_EMBEDDING_MODEL/OPENROUTER_MODEL để fallback embedding sang OpenRouter.");
   }
 
   const response = await fetch("https://openrouter.ai/api/v1/embeddings", {
@@ -582,7 +582,7 @@ async function callOpenRouterEmbedding(
   }
 
   if (!response.ok) {
-    throw new Error(`OpenRouter Embeddings API lá»—i ${response.status}: ${getErrorText(data)}`);
+    throw new Error(`OpenRouter Embeddings API lỗi ${response.status}: ${getErrorText(data)}`);
   }
 
   const payload = data as {
@@ -593,12 +593,12 @@ async function callOpenRouterEmbedding(
   const embedding = payload.data?.[0]?.embedding;
 
   if (!embedding?.length) {
-    throw new Error("OpenRouter Embeddings API khÃ´ng tráº£ vá» embedding.");
+    throw new Error("OpenRouter Embeddings API không trả về embedding.");
   }
 
   if (embedding.length !== RAG_VECTOR_DIMENSIONS) {
     throw new Error(
-      `Embedding OpenRouter cÃ³ ${embedding.length} chiá»u, nhÆ°ng Vectorize index hiá»‡n táº¡i cáº§n ${RAG_VECTOR_DIMENSIONS} chiá»u. Cáº§n dÃ¹ng embedding model há»— trá»£ dimensions=${RAG_VECTOR_DIMENSIONS} hoáº·c táº¡o láº¡i Vectorize index vÃ  ingest láº¡i.`
+      `Embedding OpenRouter có ${embedding.length} chiều, nhưng Vectorize index hiện tại cần ${RAG_VECTOR_DIMENSIONS} chiều. Cần dùng embedding model hỗ trợ dimensions=${RAG_VECTOR_DIMENSIONS} hoặc tạo lại Vectorize index và ingest lại.`
     );
   }
 
@@ -651,7 +651,7 @@ async function generateChartImage(
 ): Promise<GeneratedImage> {
   const prompt = getStringArg(args, "prompt");
   if (!prompt) {
-    throw new Error("Báº¯t buá»™c pháº£i cÃ³ prompt Ä‘á»ƒ táº¡o biá»ƒu Ä‘á»“.");
+    throw new Error("Bắt buộc phải có prompt để tạo biểu đồ.");
   }
 
   const width = getNumberArg(args, "width", DEFAULT_CHART_WIDTH);
@@ -667,7 +667,7 @@ async function generateChartImage(
   const contentType = formResponse.headers.get("content-type");
 
   if (!body || !contentType) {
-    throw new Error("KhÃ´ng táº¡o Ä‘Æ°á»£c multipart body cho yÃªu cáº§u táº¡o áº£nh.");
+    throw new Error("Không tạo được multipart body cho yêu cầu tạo ảnh.");
   }
 
   const response = await env.AI.run(CHART_IMAGE_MODEL, {
@@ -678,7 +678,7 @@ async function generateChartImage(
   }) as { image?: string };
 
   if (!response.image) {
-    throw new Error("MÃ´ hÃ¬nh áº£nh khÃ´ng tráº£ vá» dá»¯ liá»‡u image.");
+    throw new Error("Mô hình ảnh không trả về dữ liệu image.");
   }
 
   const dataUrl = response.image.startsWith("data:")
@@ -695,7 +695,7 @@ async function generateChartImage(
 }
 
 function formatScore(score?: number): string {
-  return typeof score === "number" ? score.toFixed(3) : "khÃ´ng cÃ³";
+  return typeof score === "number" ? score.toFixed(3) : "không có";
 }
 
 function truncateForRerank(text: string): string {
@@ -773,32 +773,32 @@ function getAmbiguousRagQueryReason(query: string, chatHistory: AIMessage[]): st
   if (!normalized) return null;
 
   const contextualPatterns = [
-    /(^|\s)(nÃ³|Ä‘Ã³|nÃ y|kia)(\s|$)/u,
-    /(^|\s)(cÃ¡i|pháº§n|má»¥c|chá»—|bÆ°á»›c|trang|mÃ n hÃ¬nh|module|chá»©c nÄƒng|tÃ­nh nÄƒng|workflow|node)\s+(Ä‘Ã³|nÃ y|kia)(\s|$)/u,
-    /(^|\s)(á»Ÿ trÃªn|nhÆ° trÃªn|vá»«a rá»“i|vá»«a nÃ³i|ban nÃ£y|tiáº¿p theo|sau Ä‘Ã³)(\s|$)/u,
-    /(^|\s)(cÃ²n|váº­y|tháº¿)\s+(thÃ¬|nÃ³|pháº§n|bÆ°á»›c|má»¥c|cÃ¡i)(\s|$)/u
+    /(^|\s)(nó|đó|này|kia)(\s|$)/u,
+    /(^|\s)(cái|phần|mục|chỗ|bước|trang|màn hình|module|chức năng|tính năng|workflow|node)\s+(đó|này|kia)(\s|$)/u,
+    /(^|\s)(ở trên|như trên|vừa rồi|vừa nói|ban nãy|tiếp theo|sau đó)(\s|$)/u,
+    /(^|\s)(còn|vậy|thế)\s+(thì|nó|phần|bước|mục|cái)(\s|$)/u
   ];
 
   if (contextualPatterns.some(pattern => pattern.test(normalized))) {
-    return "query cÃ³ Ä‘áº¡i tá»« hoáº·c tham chiáº¿u phá»¥ thuá»™c lá»‹ch sá»­ chat";
+    return "query có đại từ hoặc tham chiếu phụ thuộc lịch sử chat";
   }
 
   const genericQueries = [
-    "lÃ  gÃ¬",
-    "dÃ¹ng tháº¿ nÃ o",
-    "sá»­ dá»¥ng tháº¿ nÃ o",
-    "hÆ°á»›ng dáº«n tÃ´i",
-    "lÃ m sao",
-    "lÃ m tháº¿ nÃ o",
-    "cÃ¡ch lÃ m",
-    "tiáº¿p theo",
-    "sá»­a lá»—i",
-    "giáº£i thÃ­ch thÃªm",
-    "nÃ³i rÃµ hÆ¡n"
+    "là gì",
+    "dùng thế nào",
+    "sử dụng thế nào",
+    "hướng dẫn tôi",
+    "làm sao",
+    "làm thế nào",
+    "cách làm",
+    "tiếp theo",
+    "sửa lỗi",
+    "giải thích thêm",
+    "nói rõ hơn"
   ];
 
   if (genericQueries.includes(normalized)) {
-    return "query quÃ¡ ngáº¯n hoáº·c quÃ¡ chung, cáº§n lá»‹ch sá»­ Ä‘á»ƒ lÃ m rÃµ";
+    return "query quá ngắn hoặc quá chung, cần lịch sử để làm rõ";
   }
 
   return null;
@@ -808,7 +808,7 @@ function formatHistoryForRewrite(chatHistory: AIMessage[]): string {
   return chatHistory
     .slice(-MAX_HISTORY_MESSAGES)
     .map(message => {
-      const role = message.role === "user" ? "NgÆ°á»i dÃ¹ng" : "Trá»£ lÃ½";
+      const role = message.role === "user" ? "Người dùng" : "Trợ lý";
       return `${role}: ${normalizeSpaces(message.content).slice(0, MAX_HISTORY_CONTENT_CHARS)}`;
     })
     .join("\n");
@@ -818,8 +818,8 @@ function cleanRewrittenQuery(raw: string, fallback: string): string {
   const cleaned = normalizeSpaces(
     raw
       .replace(/```json|```/g, "")
-      .replace(/^(truy váº¥n|query|rewritten query|cÃ¢u truy váº¥n)\s*[:ï¼š-]\s*/i, "")
-  ).replace(/^["'â€œâ€]+|["'â€œâ€]+$/g, "").trim();
+      .replace(/^(truy vấn|query|rewritten query|câu truy vấn)\s*[:：-]\s*/i, "")
+  ).replace(/^["'“”]+|["'“”]+$/g, "").trim();
 
   if (!cleaned || cleaned.length < 4) return fallback;
   return cleaned.slice(0, 320).trim();
@@ -835,7 +835,7 @@ async function maybeRewriteRagQuery(
   const reason = getAmbiguousRagQueryReason(originalQuery, chatHistory);
 
   if (!reason) {
-    addDebugStep(debugSteps, "rag.query_rewrite", "skip", chatHistory.length ? "Query Ä‘Ã£ Ä‘á»§ rÃµ, khÃ´ng cáº§n rewrite." : "KhÃ´ng cÃ³ history Ä‘á»ƒ rewrite.", {
+    addDebugStep(debugSteps, "rag.query_rewrite", "skip", chatHistory.length ? "Query đã đủ rõ, không cần rewrite." : "Không có history để rewrite.", {
       original_query: originalQuery,
       history_messages: chatHistory.length
     });
@@ -846,13 +846,13 @@ async function maybeRewriteRagQuery(
         original_query: originalQuery,
         rewritten_query: originalQuery,
         used: false,
-        reason: chatHistory.length ? "query Ä‘Ã£ Ä‘á»§ rÃµ, khÃ´ng cáº§n rewrite" : "khÃ´ng cÃ³ history Ä‘á»ƒ rewrite"
+        reason: chatHistory.length ? "query đã đủ rõ, không cần rewrite" : "không có history để rewrite"
       }
     };
   }
 
   try {
-    addDebugStep(debugSteps, "rag.query_rewrite", "start", "Rewrite query mÆ¡ há»“ báº±ng history.", {
+    addDebugStep(debugSteps, "rag.query_rewrite", "start", "Rewrite query mơ hồ bằng history.", {
       model: QUERY_REWRITE_MODEL,
       original_query: originalQuery,
       reason,
@@ -865,21 +865,21 @@ async function maybeRewriteRagQuery(
       messages: [
         {
           role: "system",
-          content: `Báº¡n lÃ  bá»™ rewrite query cho há»‡ thá»‘ng RAG tÃ i liá»‡u Zilcode.
-Nhiá»‡m vá»¥: dá»±a vÃ o lá»‹ch sá»­ há»™i thoáº¡i vÃ  cÃ¢u há»i hiá»‡n táº¡i, viáº¿t láº¡i thÃ nh má»™t truy váº¥n tÃ¬m kiáº¿m Ä‘á»™c láº­p, rÃµ nghÄ©a.
-Chá»‰ tráº£ vá» Ä‘Ãºng má»™t cÃ¢u truy váº¥n, khÃ´ng giáº£i thÃ­ch, khÃ´ng markdown, khÃ´ng JSON.
-Giá»¯ thuáº­t ngá»¯ Zilcode quan trá»ng nhÆ° App Builder, SQL Cloud, User, Role, Organization, Application, Window, Tab, Field, Workflow náº¿u cÃ³.
-Náº¿u cÃ¢u há»i hiá»‡n táº¡i Ä‘Ã£ rÃµ sau khi xÃ©t lá»‹ch sá»­, váº«n viáº¿t láº¡i thÃ nh cÃ¢u truy váº¥n ngáº¯n gá»n vÃ  Ä‘áº§y Ä‘á»§ ngá»¯ cáº£nh.`
+          content: `Bạn là bộ rewrite query cho hệ thống RAG tài liệu Zilcode.
+Nhiệm vụ: dựa vào lịch sử hội thoại và câu hỏi hiện tại, viết lại thành một truy vấn tìm kiếm độc lập, rõ nghĩa.
+Chỉ trả về đúng một câu truy vấn, không giải thích, không markdown, không JSON.
+Giữ thuật ngữ Zilcode quan trọng như App Builder, SQL Cloud, User, Role, Organization, Application, Window, Tab, Field, Workflow nếu có.
+Nếu câu hỏi hiện tại đã rõ sau khi xét lịch sử, vẫn viết lại thành câu truy vấn ngắn gọn và đầy đủ ngữ cảnh.`
         },
         {
           role: "user",
           content: [
-            "Lá»‹ch sá»­ há»™i thoáº¡i gáº§n nháº¥t:",
+            "Lịch sử hội thoại gần nhất:",
             formatHistoryForRewrite(chatHistory),
             "",
-            `CÃ¢u há»i/query hiá»‡n táº¡i: ${originalQuery}`,
+            `Câu hỏi/query hiện tại: ${originalQuery}`,
             "",
-            "Truy váº¥n tÃ¬m kiáº¿m Ä‘á»™c láº­p cho tÃ i liá»‡u Zilcode:"
+            "Truy vấn tìm kiếm độc lập cho tài liệu Zilcode:"
           ].join("\n")
         }
       ]
@@ -888,7 +888,7 @@ Náº¿u cÃ¢u há»i hiá»‡n táº¡i Ä‘Ã£ rÃµ sau khi xÃ©t lá�
     const rewrittenQuery = cleanRewrittenQuery(response.response ?? "", originalQuery);
     const used = rewrittenQuery.toLowerCase() !== originalQuery.toLowerCase();
 
-    addDebugStep(debugSteps, "rag.query_rewrite", "ok", used ? "ÄÃ£ rewrite query cho retrieval." : "Model giá»¯ nguyÃªn query gá»‘c.", {
+    addDebugStep(debugSteps, "rag.query_rewrite", "ok", used ? "Đã rewrite query cho retrieval." : "Model giữ nguyên query gốc.", {
       original_query: originalQuery,
       rewritten_query: rewrittenQuery,
       used
@@ -905,8 +905,8 @@ Náº¿u cÃ¢u há»i hiá»‡n táº¡i Ä‘Ã£ rÃµ sau khi xÃ©t lá�
       }
     };
   } catch (error) {
-    console.log(`[RAG_REWRITE] Lá»—i rewrite, dÃ¹ng query gá»‘c: ${getErrorText(error)}`);
-    addDebugStep(debugSteps, "rag.query_rewrite", "error", "Rewrite lá»—i, fallback vá» query gá»‘c.", {
+    console.log(`[RAG_REWRITE] Lỗi rewrite, dùng query gốc: ${getErrorText(error)}`);
+    addDebugStep(debugSteps, "rag.query_rewrite", "error", "Rewrite lỗi, fallback về query gốc.", {
       original_query: originalQuery,
       error: getErrorText(error)
     });
@@ -917,7 +917,7 @@ Náº¿u cÃ¢u há»i hiá»‡n táº¡i Ä‘Ã£ rÃµ sau khi xÃ©t lá�
         original_query: originalQuery,
         rewritten_query: originalQuery,
         used: false,
-        reason: `rewrite lá»—i, dÃ¹ng query gá»‘c: ${getErrorText(error)}`,
+        reason: `rewrite lỗi, dùng query gốc: ${getErrorText(error)}`,
         model: QUERY_REWRITE_MODEL
       }
     };
@@ -932,7 +932,7 @@ async function rerankRagCandidates(
 ): Promise<RagCandidate[]> {
   if (candidates.length === 0) return [];
 
-  addDebugStep(debugSteps, "rag.rerank", "start", "Báº¯t Ä‘áº§u rerank cÃ¡c chunk tá»« Vectorize.", {
+  addDebugStep(debugSteps, "rag.rerank", "start", "Bắt đầu rerank các chunk từ Vectorize.", {
     model: CHAT_MODEL,
     candidates: candidates.length,
     query
@@ -951,10 +951,10 @@ async function rerankRagCandidates(
     messages: [
       {
         role: "system",
-        content: `Báº¡n lÃ  bá»™ rerank tÃ i liá»‡u cho chatbot RAG Zilcode.
-Nhiá»‡m vá»¥: xáº¿p háº¡ng cÃ¡c chunk theo má»©c liÃªn quan vá»›i cÃ¢u há»i ngÆ°á»i dÃ¹ng.
-Æ¯u tiÃªn chunk tráº£ lá»i trá»±c tiáº¿p cÃ¢u há»i, Ä‘Ãºng Ä‘á»‘i tÆ°á»£ng ngÆ°á»i dÃ¹ng/quáº£n trá»‹, vÃ  cÃ³ ná»™i dung thao tÃ¡c cá»¥ thá»ƒ.
-Chá»‰ tráº£ vá» JSON há»£p lá»‡, khÃ´ng giáº£i thÃ­ch thÃªm.
+        content: `Bạn là bộ rerank tài liệu cho chatbot RAG Zilcode.
+Nhiệm vụ: xếp hạng các chunk theo mức liên quan với câu hỏi người dùng.
+Ưu tiên chunk trả lời trực tiếp câu hỏi, đúng đối tượng người dùng/quản trị, và có nội dung thao tác cụ thể.
+Chỉ trả về JSON hợp lệ, không giải thích thêm.
 Schema: {"ranked_ids":["chunk-id-1","chunk-id-2"]}`
       },
       {
@@ -971,7 +971,7 @@ Schema: {"ranked_ids":["chunk-id-1","chunk-id-2"]}`
   const rankedIds = getStringArray(parsed?.ranked_ids);
 
   if (!rankedIds.length) {
-    addDebugStep(debugSteps, "rag.rerank", "skip", "Rerank khÃ´ng tráº£ JSON há»£p lá»‡, fallback theo Ä‘iá»ƒm Vectorize.", {
+    addDebugStep(debugSteps, "rag.rerank", "skip", "Rerank không trả JSON hợp lệ, fallback theo điểm Vectorize.", {
       selected_ids: sortByVectorScore(candidates).slice(0, RAG_MAX_CONTEXT_CHUNKS).map(candidate => candidate.id)
     });
 
@@ -1000,7 +1000,7 @@ Schema: {"ranked_ids":["chunk-id-1","chunk-id-2"]}`
     .slice(0, RAG_MAX_CONTEXT_CHUNKS)
     .map((candidate, index) => ({ ...candidate, rerank_rank: index + 1 }));
 
-  addDebugStep(debugSteps, "rag.rerank", "ok", "ÄÃ£ chá»n cÃ¡c chunk tá»‘t nháº¥t sau rerank.", {
+  addDebugStep(debugSteps, "rag.rerank", "ok", "Đã chọn các chunk tốt nhất sau rerank.", {
     selected_ids: selected.map(candidate => candidate.id)
   });
 
@@ -1013,7 +1013,7 @@ async function searchRag(
   chatHistory: AIMessage[] = [],
   debugSteps?: DebugStep[]
 ): Promise<ToolExecutionResult> {
-  addDebugStep(debugSteps, "rag.search", "start", "Báº¯t Ä‘áº§u RAG search.", {
+  addDebugStep(debugSteps, "rag.search", "start", "Bắt đầu RAG search.", {
     original_query: query,
     history_messages: chatHistory.length
   });
@@ -1021,7 +1021,7 @@ async function searchRag(
   const rewritten = await maybeRewriteRagQuery(query, chatHistory, env, debugSteps);
   const retrievalQuery = rewritten.query;
 
-  addDebugStep(debugSteps, "rag.embedding", "start", "Embedding query dÃ¹ng cho retrieval.", {
+  addDebugStep(debugSteps, "rag.embedding", "start", "Embedding query dùng cho retrieval.", {
     query: retrievalQuery,
     model: EMBEDDING_MODEL
   });
@@ -1029,7 +1029,7 @@ async function searchRag(
   const embeddingResult = await embedQuery(retrievalQuery, env);
   const queryVector = embeddingResult.vector;
 
-  addDebugStep(debugSteps, "rag.embedding", "ok", "Embedding query hoÃ n táº¥t.", {
+  addDebugStep(debugSteps, "rag.embedding", "ok", "Embedding query hoàn tất.", {
     provider: embeddingResult.debug.provider,
     model: embeddingResult.debug.model,
     dimensions: embeddingResult.debug.dimensions,
@@ -1047,14 +1047,14 @@ async function searchRag(
   });
 
   const vectorMatches = matches.matches as VectorMatch[];
-  addDebugStep(debugSteps, "rag.vectorize", "ok", "Vectorize tráº£ káº¿t quáº£.", {
+  addDebugStep(debugSteps, "rag.vectorize", "ok", "Vectorize trả kết quả.", {
     matches: vectorMatches.length,
     top_score: vectorMatches[0]?.score
   });
 
   if (!vectorMatches.length) {
     return {
-      content: "KhÃ´ng tÃ¬m tháº¥y tÃ i liá»‡u liÃªn quan.",
+      content: "Không tìm thấy tài liệu liên quan.",
       embedding_debug: embeddingResult.debug,
       rag_query_debug: rewritten.debug
     };
@@ -1064,7 +1064,7 @@ async function searchRag(
     typeof match.score !== "number" || match.score >= RAG_MIN_SCORE
   );
 
-  addDebugStep(debugSteps, "rag.filter", "ok", "Lá»c match theo ngÆ°á»¡ng score.", {
+  addDebugStep(debugSteps, "rag.filter", "ok", "Lọc match theo ngưỡng score.", {
     before: vectorMatches.length,
     after: filteredMatches.length,
     min_score: RAG_MIN_SCORE
@@ -1072,14 +1072,14 @@ async function searchRag(
 
   if (!filteredMatches.length) {
     return {
-      content: `KhÃ´ng tÃ¬m tháº¥y tÃ i liá»‡u Ä‘á»§ liÃªn quan. Äiá»ƒm liÃªn quan cao nháº¥t lÃ  ${formatScore(vectorMatches[0]?.score)}, tháº¥p hÆ¡n ngÆ°á»¡ng ${RAG_MIN_SCORE}.`,
+      content: `Không tìm thấy tài liệu đủ liên quan. Điểm liên quan cao nhất là ${formatScore(vectorMatches[0]?.score)}, thấp hơn ngưỡng ${RAG_MIN_SCORE}.`,
       embedding_debug: embeddingResult.debug,
       rag_query_debug: rewritten.debug
     };
   }
 
   const candidates: RagCandidate[] = [];
-  addDebugStep(debugSteps, "rag.kv", "start", "Láº¥y ná»™i dung chunk tá»« KV.", {
+  addDebugStep(debugSteps, "rag.kv", "start", "Lấy nội dung chunk từ KV.", {
     requested_chunks: filteredMatches.length
   });
 
@@ -1096,13 +1096,13 @@ async function searchRag(
     });
   }
 
-  addDebugStep(debugSteps, "rag.kv", "ok", "ÄÃ£ táº£i ná»™i dung chunk tá»« KV.", {
+  addDebugStep(debugSteps, "rag.kv", "ok", "Đã tải nội dung chunk từ KV.", {
     loaded_chunks: candidates.length
   });
 
   if (!candidates.length) {
     return {
-      content: "KhÃ´ng tÃ¬m tháº¥y ná»™i dung chunk tÆ°Æ¡ng á»©ng trong KV.",
+      content: "Không tìm thấy nội dung chunk tương ứng trong KV.",
       embedding_debug: embeddingResult.debug,
       rag_query_debug: rewritten.debug
     };
@@ -1111,10 +1111,10 @@ async function searchRag(
   const reranked = await rerankRagCandidates(retrievalQuery, candidates, env, debugSteps);
   const content = reranked
     .map((candidate, index) => [
-      `[Nguá»“n ${index + 1}: ${candidate.source_label}]`,
+      `[Nguồn ${index + 1}: ${candidate.source_label}]`,
       `ID: ${candidate.id}`,
-      `Äiá»ƒm Vectorize: ${formatScore(candidate.vector_score)}`,
-      `Thá»© háº¡ng rerank: ${candidate.rerank_rank ?? index + 1}`,
+      `Điểm Vectorize: ${formatScore(candidate.vector_score)}`,
+      `Thứ hạng rerank: ${candidate.rerank_rank ?? index + 1}`,
       "",
       candidate.text
     ].join("\n"))
@@ -1168,7 +1168,7 @@ function normalizeZilcodeBaseInput(value?: string): string | undefined {
   try {
     url = new URL(raw);
   } catch {
-    throw new Error("ZILCODE_BASE khong hop le. Hay nhap URL day du, vi du https://dvnb.zilcode.vn");
+    throw new Error("ZILCODE_BASE không hợp lệ. Hãy nhập URL đầy đủ, ví dụ https://demo.zilcode.com");
   }
 
   if (url.protocol !== "https:" && url.hostname !== "localhost" && url.hostname !== "127.0.0.1") {
@@ -1184,7 +1184,7 @@ function normalizeZilcodeBaseInput(value?: string): string | undefined {
     || hostname.endsWith(".zilcode.com");
 
   if (!allowed) {
-    throw new Error("ZILCODE_BASE chi duoc phep la domain Zilcode, localhost hoac 127.0.0.1.");
+    throw new Error("ZILCODE_BASE chỉ được phép là domain Zilcode, localhost hoặc 127.0.0.1.");
   }
 
   return `${url.protocol}//${url.host}`;
@@ -1322,7 +1322,7 @@ async function callZilcodeJson<T = unknown>(
   }
 
   if (!response.ok) {
-    throw new Error(`Zilcode API lá»—i ${response.status} táº¡i ${endpoint}: ${getErrorText(data)}`);
+    throw new Error(`Zilcode API lỗi ${response.status} tại ${endpoint}: ${getErrorText(data)}`);
   }
 
   return data as ZilcodeApiEnvelope<T>;
@@ -1330,7 +1330,7 @@ async function callZilcodeJson<T = unknown>(
 
 function assertZilcodeSuccess<T>(envelope: ZilcodeApiEnvelope<T>): T {
   if (envelope.success === false) {
-    throw new Error(`Zilcode API tráº£ lá»—i: ${getErrorText(envelope.result ?? envelope.error)}`);
+    throw new Error(`Zilcode API trả lỗi: ${getErrorText(envelope.result ?? envelope.error)}`);
   }
 
   return envelope.result as T;
@@ -1364,7 +1364,7 @@ function tryParseJsonObject(value: unknown): unknown | null {
 function noZilcodeSessionResult(): ToolExecutionResult {
   return {
     content: JSON.stringify({
-      error: "ChÆ°a Ä‘Äƒng nháº­p Zilcode trong chatbot. HÃ£y Ä‘Äƒng nháº­p báº±ng form Zilcode á»Ÿ giao diá»‡n chat trÆ°á»›c khi dÃ¹ng tool Ä‘á»c dá»¯ liá»‡u Zilcode."
+      error: "Chưa đăng nhập Zilcode trong chatbot. Hãy đăng nhập bằng form Zilcode ở giao diện chat trước khi dùng tool đọc dữ liệu Zilcode."
     }, null, 2)
   };
 }
@@ -1381,9 +1381,9 @@ async function executeTool(
 
     case "general_chat": {
       const message = getStringArg(tool.arguments, "message");
-      if (!message) return { content: "Lá»—i: báº¯t buá»™c pháº£i cÃ³ tin nháº¯n Ä‘á»ƒ tráº£ lá»i." };
+      if (!message) return { content: "Lỗi: bắt buộc phải có tin nhắn để trả lời." };
 
-      addDebugStep(debugSteps, "tool.general_chat", "start", "Gá»i model chat thÆ°á»ng.", {
+      addDebugStep(debugSteps, "tool.general_chat", "start", "Gọi model chat thường.", {
         model: GENERAL_CHAT_MODEL,
         history_messages: chatHistory.length
       });
@@ -1393,34 +1393,34 @@ async function executeTool(
         messages: [
           {
             role: "system",
-            content: `Báº¡n lÃ  trá»£ lÃ½ há»™i thoáº¡i.
-HÃ£y tráº£ lá»i trá»±c tiáº¿p báº±ng cÃ¹ng ngÃ´n ngá»¯ vá»›i ngÆ°á»i há»i, trá»« khi ngÆ°á»i há»i yÃªu cáº§u ngÃ´n ngá»¯ khÃ¡c.
-Báº¡n cÃ³ thá»ƒ dÃ¹ng kiáº¿n thá»©c sáºµn cÃ³ Ä‘á»ƒ tráº£ lá»i cÃ¢u há»i chung.
-Náº¿u ngÆ°á»i dÃ¹ng há»i báº¡n lÃ  ai, hÃ£y nÃ³i báº¡n lÃ  trá»£ lÃ½ AI cÃ³ thá»ƒ trÃ² chuyá»‡n thÃ´ng thÆ°á»ng vÃ  há»— trá»£ tra cá»©u thÃ´ng tin Zilcode khi cáº§n.
-Tráº£ lá»i ngáº¯n gá»n, tá»± nhiÃªn, khÃ´ng nháº¯c Ä‘áº¿n function/tool ná»™i bá»™.`
+            content: `Bạn là trợ lý hội thoại.
+Hãy trả lời trực tiếp bằng cùng ngôn ngữ với người hỏi, trừ khi người hỏi yêu cầu ngôn ngữ khác.
+Bạn có thể dùng kiến thức sẵn có để trả lời câu hỏi chung.
+Nếu người dùng hỏi bạn là ai, hãy nói bạn là trợ lý AI có thể trò chuyện thông thường và hỗ trợ tra cứu thông tin Zilcode khi cần.
+Trả lời ngắn gọn, tự nhiên, không nhắc đến function/tool nội bộ.`
           },
           ...chatHistory,
           { role: "user", content: message }
         ]
       }, env);
 
-      addDebugStep(debugSteps, "tool.general_chat", "ok", "general_chat tráº£ káº¿t quáº£.", {
+      addDebugStep(debugSteps, "tool.general_chat", "ok", "general_chat trả kết quả.", {
         response_chars: (response.response ?? "").length
       });
 
-      return { content: response.response ?? "KhÃ´ng táº¡o Ä‘Æ°á»£c cÃ¢u tráº£ lá»i." };
+      return { content: response.response ?? "Không tạo được câu trả lời." };
     }
 
     case "rag_search": {
       const query = getStringArg(tool.arguments, "query");
-      if (!query) return { content: "Lá»—i: báº¯t buá»™c pháº£i cÃ³ cÃ¢u truy váº¥n." };
+      if (!query) return { content: "Lỗi: bắt buộc phải có câu truy vấn." };
       return searchRag(query, env, chatHistory, debugSteps);
     }
 
     case "zilcode_get_system_blueprint": {
       if (!zilcodeSession) return noZilcodeSessionResult();
 
-      addDebugStep(debugSteps, "tool.zilcode_get_system_blueprint", "start", "Lay ban do tong hop he thong Zilcode.", {
+      addDebugStep(debugSteps, "tool.zilcode_get_system_blueprint", "start", "Lấy bản đồ tổng hợp hệ thống Zilcode.", {
         appid: getStringArg(tool.arguments, "appid") || undefined,
         include_fields: getOptionalBooleanArg(tool.arguments, "include_fields", true),
         include_raw: getOptionalBooleanArg(tool.arguments, "include_raw", false)
@@ -1428,7 +1428,7 @@ Tráº£ lá»i ngáº¯n gá»n, tá»± nhiÃªn, khÃ´ng nháº¯c Ä‘
 
       const blueprint = await buildZilcodeSystemBlueprint(env, zilcodeSession.session, tool.arguments);
 
-      addDebugStep(debugSteps, "tool.zilcode_get_system_blueprint", "ok", "Da lay system blueprint.", {
+      addDebugStep(debugSteps, "tool.zilcode_get_system_blueprint", "ok", "Đã lấy system blueprint.", {
         apps_count: blueprint.apps_count,
         errors: Array.isArray(blueprint.errors) ? blueprint.errors.length : 0
       });
@@ -1437,11 +1437,11 @@ Tráº£ lá»i ngáº¯n gá»n, tá»± nhiÃªn, khÃ´ng nháº¯c Ä‘
     }
 
     default:
-      return { content: `KhÃ´ng nháº­n diá»‡n Ä‘Æ°á»£c cÃ´ng cá»¥: ${tool.name}` };
+      return { content: `Không nhận diện được công cụ: ${tool.name}` };
   }
 }
 
-// â”€â”€â”€ Types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 
 interface ChatHistoryMessage {
@@ -1498,7 +1498,7 @@ interface ToolResultRecord {
   content: string;
 }
 
-// â”€â”€â”€ Agentic loop â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Agentic loop ─────────────────────────────────────────────────────────────
 
 const MAX_ITERATIONS = 6;
 const AVAILABLE_TOOL_NAMES = new Set(TOOLS.map(tool => tool.name));
@@ -1548,7 +1548,7 @@ async function createFinalAnswerFromRag(
   chatHistory: AIMessage[] = [],
   debugSteps?: DebugStep[]
 ): Promise<string> {
-  addDebugStep(debugSteps, "rag.final_answer", "start", "Táº¡o cÃ¢u tráº£ lá»i cuá»‘i tá»« context RAG.", {
+  addDebugStep(debugSteps, "rag.final_answer", "start", "Tạo câu trả lời cuối từ context RAG.", {
     model: CHAT_MODEL,
     tool_results: toolResults.length,
     history_messages: chatHistory.length
@@ -1560,26 +1560,26 @@ async function createFinalAnswerFromRag(
     messages: [
       {
         role: "system",
-        content: `Báº¡n lÃ  trá»£ lÃ½ há»— trá»£ Zilcode.
-HÃ£y tráº£ lá»i báº±ng cÃ¹ng ngÃ´n ngá»¯ vá»›i ngÆ°á»i há»i.
-Dá»±a chá»§ yáº¿u vÃ o káº¿t quáº£ rag_search trong ngá»¯ cáº£nh Ä‘Æ°á»£c cung cáº¥p.
-Náº¿u cÃ³ káº¿t quáº£ general_chat trong ngá»¯ cáº£nh, chá»‰ xem lÃ  thÃ´ng tin phá»¥; khÃ´ng dÃ¹ng nÃ³ Ä‘á»ƒ phá»§ Ä‘á»‹nh hoáº·c thay tháº¿ tÃ i liá»‡u Zilcode.
-Náº¿u tÃ i liá»‡u khÃ´ng Ä‘á»§ thÃ´ng tin, hÃ£y nÃ³i rÃµ pháº§n nÃ o chÆ°a tÃ¬m tháº¥y trong tÃ i liá»‡u hiá»‡n cÃ³.
-KhÃ´ng nháº¯c Ä‘áº¿n tool/function ná»™i bá»™.
-TÃ i liá»‡u nguá»“n cÃ³ thá»ƒ chá»©a cÃº phÃ¡p Markdown nhÆ° ###, -, +, ** hoáº·c dáº¥u backtick. KhÃ´ng sao chÃ©p cÃ¡c kÃ½ tá»± Ä‘á»‹nh dáº¡ng Ä‘Ã³ vÃ o cÃ¢u tráº£ lá»i cuá»‘i; hÃ£y chuyá»ƒn thÃ nh vÄƒn báº£n sáº¡ch, tá»± nhiÃªn.
-Tráº£ lá»i Ä‘Ãºng má»©c chi tiáº¿t theo yÃªu cáº§u cá»§a ngÆ°á»i dÃ¹ng. Náº¿u ngÆ°á»i dÃ¹ng yÃªu cáº§u chi tiáº¿t, hÃ£y chia thÃ nh cÃ¡c pháº§n/bÆ°á»›c rÃµ rÃ ng; náº¿u khÃ´ng yÃªu cáº§u chi tiáº¿t, hÃ£y tráº£ lá»i gá»n.`
+        content: `Bạn là trợ lý hỗ trợ Zilcode.
+Hãy trả lời bằng cùng ngôn ngữ với người hỏi.
+Dựa chủ yếu vào kết quả rag_search trong ngữ cảnh được cung cấp.
+Nếu có kết quả general_chat trong ngữ cảnh, chỉ xem là thông tin phụ; không dùng nó để phủ định hoặc thay thế tài liệu Zilcode.
+Nếu tài liệu không đủ thông tin, hãy nói rõ phần nào chưa tìm thấy trong tài liệu hiện có.
+Không nhắc đến tool/function nội bộ.
+Tài liệu nguồn có thể chứa cú pháp Markdown như ###, -, +, ** hoặc dấu backtick. Không sao chép các ký tự định dạng đó vào câu trả lời cuối; hãy chuyển thành văn bản sạch, tự nhiên.
+Trả lời đúng mức chi tiết theo yêu cầu của người dùng. Nếu người dùng yêu cầu chi tiết, hãy chia thành các phần/bước rõ ràng; nếu không yêu cầu chi tiết, hãy trả lời gọn.`
       },
       ...chatHistory,
       { role: "user", content: userMessage },
       {
         role: "assistant",
-        content: `Ngá»¯ cáº£nh tá»« cÃ¡c cÃ´ng cá»¥:\n${formatToolResultsForFinalAnswer(toolResults)}`
+        content: `Ngữ cảnh từ các công cụ:\n${formatToolResultsForFinalAnswer(toolResults)}`
       }
     ]
   }, env);
 
-  const answer = cleanMarkdownArtifacts(response.response ?? "KhÃ´ng táº¡o Ä‘Æ°á»£c cÃ¢u tráº£ lá»i.");
-  addDebugStep(debugSteps, "rag.final_answer", "ok", "ÄÃ£ táº¡o cÃ¢u tráº£ lá»i cuá»‘i tá»« RAG.", {
+  const answer = cleanMarkdownArtifacts(response.response ?? "Không tạo được câu trả lời.");
+  addDebugStep(debugSteps, "rag.final_answer", "ok", "Đã tạo câu trả lời cuối từ RAG.", {
     answer_chars: answer.length
   });
 
@@ -1594,7 +1594,7 @@ async function runAgenticLoop(
   zilcodeSession?: ZilcodeSessionState | null
 ): Promise<AgenticLoopResult> {
 
-  addDebugStep(debugSteps, "agent.start", "start", "Báº¯t Ä‘áº§u agentic loop.", {
+  addDebugStep(debugSteps, "agent.start", "start", "Bắt đầu agentic loop.", {
     message_chars: userMessage.length,
     history_messages: chatHistory.length,
     tools: TOOLS.map(tool => tool.name)
@@ -1603,21 +1603,21 @@ async function runAgenticLoop(
   const messages: AIMessage[] = [
     {
       role: "system",
-      content: `Báº¡n lÃ  trá»£ lÃ½ AI há»™i thoáº¡i vÃ  trá»£ lÃ½ há»— trá»£ ná»n táº£ng Zilcode.
-HÃ£y tráº£ lá»i báº±ng cÃ¹ng ngÃ´n ngá»¯ vá»›i ngÆ°á»i há»i. Náº¿u ngÆ°á»i há»i yÃªu cáº§u má»™t ngÃ´n ngá»¯ hoáº·c phong cÃ¡ch cá»¥ thá»ƒ, hÃ£y lÃ m theo yÃªu cáº§u Ä‘Ã³.
-Báº¡n cÃ³ cÃ¡c cÃ´ng cá»¥ Ä‘á»ƒ xá»­ lÃ½ tá»«ng loáº¡i yÃªu cáº§u. HÃ£y chá»n cÃ´ng cá»¥ phÃ¹ há»£p nháº¥t thay vÃ¬ nÃ³i ráº±ng yÃªu cáº§u náº±m ngoÃ i pháº¡m vi cÃ´ng cá»¥.
-DÃ¹ng general_chat cho chÃ o há»i, cáº£m Æ¡n, trÃ² chuyá»‡n thÃ´ng thÆ°á»ng, há»i báº¡n lÃ  ai/cÃ³ thá»ƒ lÃ m gÃ¬, há»i báº¡n cÃ³ tráº£ lá»i ngoÃ i Zilcode khÃ´ng, cÃ¢u há»i kiáº¿n thá»©c chung, hoáº·c cÃ¢u há»i khÃ´ng liÃªn quan Ä‘áº¿n Zilcode.
-Chá»‰ dÃ¹ng rag_search khi cÃ¢u há»i cáº§n thÃ´ng tin cá»¥ thá»ƒ tá»« tÃ i liá»‡u Zilcode, vÃ­ dá»¥ tÃ­nh nÄƒng, khÃ¡i niá»‡m, hÆ°á»›ng dáº«n thao tÃ¡c, hoáº·c cÃ¡ch sá»­ dá»¥ng Zilcode.
-Náº¿u Zilcode lÃ  chá»§ Ä‘á» chÃ­nh cáº§n giáº£i thÃ­ch, hoáº·c ngÆ°á»i dÃ¹ng há»i Zilcode lÃ  gÃ¬, tÃ­nh nÄƒng/cÃ¡ch dÃ¹ng/hÆ°á»›ng dáº«n thao tÃ¡c trong Zilcode, hÃ£y Æ°u tiÃªn rag_search thay vÃ¬ general_chat.
-DÃ¹ng draw_chart khi ngÆ°á»i dÃ¹ng yÃªu cáº§u váº½/táº¡o áº£nh biá»ƒu Ä‘á»“, sÆ¡ Ä‘á»“, flowchart, timeline, mindmap, dashboard mockup hoáº·c infographic. Vá»›i biá»ƒu Ä‘á»“ cáº§n sá»‘ liá»‡u chÃ­nh xÃ¡c tuyá»‡t Ä‘á»‘i, hÃ£y nÃ³i ngáº¯n gá»n ráº±ng áº£nh AI chá»‰ mang tÃ­nh minh há»a vÃ  váº«n cÃ³ thá»ƒ táº¡o áº£nh náº¿u ngÆ°á»i dÃ¹ng muá»‘n.
-Bo cong cu hien tai gom: general_chat, rag_search, draw_chart, zilcode_get_system_blueprint. Khi can doc he thong Zilcode that, dung zilcode_get_system_blueprint de lay mot lan ban do apps, windows, tabs, tables, domains, relations va rang buoc app -> window -> tab -> table.
-Khi dÃ¹ng rag_search, thÆ°á»ng chá»‰ gá»i má»™t láº§n vá»›i query tá»•ng há»£p tá»‘t. Chá»‰ gá»i láº¡i náº¿u káº¿t quáº£ chÆ°a Ä‘á»§ vÃ  query má»›i khÃ¡c rÃµ rÃ ng vá» Ã½ Ä‘á»‹nh hoáº·c pháº¡m vi; khÃ´ng gá»i láº¡i cÃ¹ng query hoáº·c query tÆ°Æ¡ng Ä‘Æ°Æ¡ng.
-Dung zilcode_get_system_blueprint khi nguoi dung hoi du lieu/cau truc he thong Zilcode that cua tai khoan dang dang nhap: app, window/menu, tab, table, domain, relation, field, quyen hoac cac rang buoc tao app. Neu chua dang nhap Zilcode, hay yeu cau nguoi dung dang nhap o giao dien chat truoc. Khong dung zilcode_get_system_blueprint cho chao hoi hoac kien thuc chung co the tra loi bang general_chat/RAG.
-Vá»›i cÃ¢u há»i ngoÃ i pháº¡m vi Zilcode, hÃ£y dÃ¹ng general_chat.
-Sau khi Ä‘Ã£ cÃ³ Ä‘á»§ thÃ´ng tin tá»« cÃ´ng cá»¥, hÃ£y tráº£ lá»i ngay thay vÃ¬ tiáº¿p tá»¥c gá»i thÃªm cÃ´ng cá»¥. Náº¿u general_chat Ä‘Ã£ tráº£ lá»i vÃ  chÆ°a dÃ¹ng rag_search, hÃ£y dÃ¹ng ná»™i dung Ä‘Ã³ lÃ m cÆ¡ sá»Ÿ cho cÃ¢u tráº£ lá»i cuá»‘i cÃ¹ng.
-Khi Ä‘Ã£ dÃ¹ng rag_search vÃ  cÃ³ káº¿t quáº£, khÃ´ng gá»i general_chat Ä‘á»ƒ há»i láº¡i kiáº¿n thá»©c chung; hÃ£y tá»•ng há»£p cÃ¢u tráº£ lá»i tá»« káº¿t quáº£ rag_search.
-Khi Ä‘Ã£ dÃ¹ng rag_search nhÆ°ng khÃ´ng tÃ¬m tháº¥y thÃ´ng tin phÃ¹ há»£p, hÃ£y nÃ³i rÃµ lÃ  chÆ°a tÃ¬m tháº¥y trong tÃ i liá»‡u hiá»‡n cÃ³ thay vÃ¬ bá»‹a ná»™i dung.
-Tráº£ lá»i Ä‘Ãºng má»©c chi tiáº¿t theo yÃªu cáº§u cá»§a ngÆ°á»i dÃ¹ng, cá»¥ thá»ƒ vÃ  Æ°u tiÃªn cÃ¡c bÆ°á»›c thao tÃ¡c rÃµ rÃ ng.`
+      content: `Bạn là trợ lý AI hội thoại và trợ lý hỗ trợ nền tảng Zilcode.
+Hãy trả lời bằng cùng ngôn ngữ với người hỏi. Nếu người hỏi yêu cầu một ngôn ngữ hoặc phong cách cụ thể, hãy làm theo yêu cầu đó.
+Bạn có các công cụ để xử lý từng loại yêu cầu. Hãy chọn công cụ phù hợp nhất thay vì nói rằng yêu cầu nằm ngoài phạm vi công cụ.
+Dùng general_chat cho chào hỏi, cảm ơn, trò chuyện thông thường, hỏi bạn là ai/có thể làm gì, hỏi bạn có trả lời ngoài Zilcode không, câu hỏi kiến thức chung, hoặc câu hỏi không liên quan đến Zilcode.
+Chỉ dùng rag_search khi câu hỏi cần thông tin cụ thể từ tài liệu Zilcode, ví dụ tính năng, khái niệm, hướng dẫn thao tác, hoặc cách sử dụng Zilcode.
+Nếu Zilcode là chủ đề chính cần giải thích, hoặc người dùng hỏi Zilcode là gì, tính năng/cách dùng/hướng dẫn thao tác trong Zilcode, hãy ưu tiên rag_search thay vì general_chat.
+Dùng draw_chart khi người dùng yêu cầu vẽ/tạo ảnh biểu đồ, sơ đồ, flowchart, timeline, mindmap, dashboard mockup hoặc infographic. Với biểu đồ cần số liệu chính xác tuyệt đối, hãy nói ngắn gọn rằng ảnh AI chỉ mang tính minh họa và vẫn có thể tạo ảnh nếu người dùng muốn.
+ Bộ công cụ hiện tại gồm: general_chat, rag_search, draw_chart, zilcode_get_system_blueprint. Khi cần đọc hệ thống Zilcode thật, dùng zilcode_get_system_blueprint để lấy một lần bản đồ apps, windows, tabs, tables, domains, relations và ràng buộc app -> window -> tab -> table.
+Khi dùng rag_search, thường chỉ gọi một lần với query tổng hợp tốt. Chỉ gọi lại nếu kết quả chưa đủ và query mới khác rõ ràng về ý định hoặc phạm vi; không gọi lại cùng query hoặc query tương đương.
+Dùng zilcode_get_system_blueprint khi người dùng hỏi dữ liệu/cấu trúc hệ thống Zilcode thật của tài khoản đang đăng nhập: app, window/menu, tab, table, domain, relation, field, quyền hoặc các ràng buộc tạo app. Nếu chưa đăng nhập Zilcode, hãy yêu cầu người dùng đăng nhập ở giao diện chat trước. Không dùng zilcode_get_system_blueprint cho chào hỏi hoặc kiến thức chung có thể trả lời bằng general_chat/RAG.
+Với câu hỏi ngoài phạm vi Zilcode, hãy dùng general_chat.
+Sau khi đã có đủ thông tin từ công cụ, hãy trả lời ngay thay vì tiếp tục gọi thêm công cụ. Nếu general_chat đã trả lời và chưa dùng rag_search, hãy dùng nội dung đó làm cơ sở cho câu trả lời cuối cùng.
+Khi đã dùng rag_search và có kết quả, không gọi general_chat để hỏi lại kiến thức chung; hãy tổng hợp câu trả lời từ kết quả rag_search.
+Khi đã dùng rag_search nhưng không tìm thấy thông tin phù hợp, hãy nói rõ là chưa tìm thấy trong tài liệu hiện có thay vì bịa nội dung.
+Trả lời đúng mức chi tiết theo yêu cầu của người dùng, cụ thể và ưu tiên các bước thao tác rõ ràng.`
     },
     ...chatHistory,
     {
@@ -1634,8 +1634,8 @@ Tráº£ lá»i Ä‘Ãºng má»©c chi tiáº¿t theo yÃªu cáº§u cá»�
   let hasRagSearchResult = false;
 
   for (let i = 0; i < MAX_ITERATIONS; i++) {
-    console.log(`[VÃ’NG Láº¶P] Láº§n ${i + 1}`);
-    addDebugStep(debugSteps, "agent.tool_selection", "start", "Model chá»n tool hoáº·c tráº£ lá»i trá»±c tiáº¿p.", {
+    console.log(`[VÒNG LẶP] Lần ${i + 1}`);
+    addDebugStep(debugSteps, "agent.tool_selection", "start", "Model chọn tool hoặc trả lời trực tiếp.", {
       iteration: i + 1,
       model: CHAT_MODEL,
       messages: messages.length,
@@ -1649,14 +1649,14 @@ Tráº£ lá»i Ä‘Ãºng má»©c chi tiáº¿t theo yÃªu cáº§u cá»�
     }, env);
 
     if (!response.tool_calls || response.tool_calls.length === 0) {
-      console.log(`[VÃ’NG Láº¶P] KhÃ´ng cÃ³ tool call, tráº£ vá» cÃ¢u tráº£ lá»i cuá»‘i cÃ¹ng`);
-      addDebugStep(debugSteps, "agent.tool_selection", "ok", "Model khÃ´ng gá»i tool, tráº£ lá»i trá»±c tiáº¿p.", {
+      console.log(`[VÒNG LẶP] Không có tool call, trả về câu trả lời cuối cùng`);
+      addDebugStep(debugSteps, "agent.tool_selection", "ok", "Model không gọi tool, trả lời trực tiếp.", {
         iteration: i + 1,
         response_chars: (response.response ?? "").length
       });
 
       return {
-        answer: response.response ?? "KhÃ´ng táº¡o Ä‘Æ°á»£c cÃ¢u tráº£ lá»i.",
+        answer: response.response ?? "Không tạo được câu trả lời.",
         toolsCalled
       };
     }
@@ -1667,14 +1667,14 @@ Tráº£ lá»i Ä‘Ãºng má»©c chi tiáº¿t theo yÃªu cáº§u cá»�
       .map(toolCall => toolCall.name);
 
     if (!supportedToolCalls.length) {
-      addDebugStep(debugSteps, "agent.tool_selection", "skip", "Model chon tool khong con duoc ho tro, bo qua tool call.", {
+      addDebugStep(debugSteps, "agent.tool_selection", "skip", "Model chọn tool không còn được hỗ trợ, bỏ qua tool call.", {
         iteration: i + 1,
         tool_calls: response.tool_calls.map(toolCall => toolCall.name),
         skipped_tool_calls: skippedUnsupportedToolCalls
       });
 
       return {
-        answer: response.response ?? "Model Ã„â€˜ÃƒÂ£ chÃ¡Â»Ân tool khÃƒÂ´ng cÃƒÂ²n Ã„â€˜Ã†Â°Ã¡Â»Â£c hÃ¡Â»â€” trÃ¡Â»Â£. HÃƒÂ£y thÃ¡Â»Â­ hÃ¡Â»Âi lÃ¡ÂºÂ¡i theo cÃƒÂ¡ch khÃƒÂ¡c.",
+        answer: response.response ?? "Model đã chọn tool không còn được hỗ trợ. Hãy thử hỏi lại theo cách khác.",
         toolsCalled
       };
     }
@@ -1684,7 +1684,7 @@ Tráº£ lá»i Ä‘Ãºng má»©c chi tiáº¿t theo yÃªu cáº§u cá»�
       ? supportedToolCalls.filter(toolCall => toolCall.name !== "general_chat")
       : supportedToolCalls;
 
-    addDebugStep(debugSteps, "agent.tool_selection", "ok", "Model Ä‘Ã£ chá»n tool.", {
+    addDebugStep(debugSteps, "agent.tool_selection", "ok", "Model đã chọn tool.", {
       iteration: i + 1,
       tool_calls: response.tool_calls.map(toolCall => toolCall.name),
       executed_tool_calls: toolCallsToExecute.map(toolCall => toolCall.name),
@@ -1695,23 +1695,23 @@ Tráº£ lá»i Ä‘Ãºng má»©c chi tiáº¿t theo yÃªu cáº§u cá»�
     let generalChatResult: string | null = null;
 
     for (const toolCall of toolCallsToExecute) {
-      console.log(`[CÃ”NG Cá»¤] Gá»i: ${toolCall.name}`, toolCall.arguments);
+      console.log(`[CÔNG CỤ] Gọi: ${toolCall.name}`, toolCall.arguments);
       toolsCalled.push(toolCall.name);
-      addDebugStep(debugSteps, "tool.call", "start", `Gá»i tool ${toolCall.name}.`, {
+      addDebugStep(debugSteps, "tool.call", "start", `Gọi tool ${toolCall.name}.`, {
         name: toolCall.name,
         arguments: toolCall.arguments
       });
 
       if (toolCall.name === "draw_chart") {
         const image = await generateChartImage(toolCall.arguments, env);
-        addDebugStep(debugSteps, "tool.draw_chart", "ok", "ÄÃ£ táº¡o áº£nh biá»ƒu Ä‘á»“.", {
+        addDebugStep(debugSteps, "tool.draw_chart", "ok", "Đã tạo ảnh biểu đồ.", {
           width: image.width,
           height: image.height,
           model: CHART_IMAGE_MODEL
         });
 
         return {
-          answer: "MÃ¬nh Ä‘Ã£ táº¡o biá»ƒu Ä‘á»“ theo yÃªu cáº§u. LÆ°u Ã½: áº£nh do mÃ´ hÃ¬nh táº¡o sinh phÃ¹ há»£p Ä‘á»ƒ minh há»a, khÃ´ng nÃªn dÃ¹ng lÃ m biá»ƒu Ä‘á»“ sá»‘ liá»‡u cáº§n Ä‘á»™ chÃ­nh xÃ¡c tuyá»‡t Ä‘á»‘i.",
+          answer: "Mình đã tạo biểu đồ theo yêu cầu. Lưu ý: ảnh do mô hình tạo sinh phù hợp để minh họa, không nên dùng làm biểu đồ số liệu cần độ chính xác tuyệt đối.",
           toolsCalled,
           images: [image]
         };
@@ -1726,8 +1726,8 @@ Tráº£ lá»i Ä‘Ãºng má»©c chi tiáº¿t theo yÃªu cáº§u cá»�
       );
       const toolResult = toolExecution.content;
 
-      console.log(`[CÃ”NG Cá»¤] Äá»™ dÃ i káº¿t quáº£: ${toolResult.length} kÃ½ tá»±`);
-      addDebugStep(debugSteps, "tool.call", "ok", `Tool ${toolCall.name} Ä‘Ã£ tráº£ káº¿t quáº£.`, {
+      console.log(`[CÔNG CỤ] Độ dài kết quả: ${toolResult.length} ký tự`);
+      addDebugStep(debugSteps, "tool.call", "ok", `Tool ${toolCall.name} đã trả kết quả.`, {
         name: toolCall.name,
         result_chars: toolResult.length
       });
@@ -1788,7 +1788,7 @@ Tráº£ lá»i Ä‘Ãºng má»©c chi tiáº¿t theo yÃªu cáº§u cá»�
     }
 
     if (generalChatResult) {
-      addDebugStep(debugSteps, "general.final_answer", "start", "Táº¡o cÃ¢u tráº£ lá»i cuá»‘i tá»« general_chat.", {
+      addDebugStep(debugSteps, "general.final_answer", "start", "Tạo câu trả lời cuối từ general_chat.", {
         model: CHAT_MODEL,
         history_messages: chatHistory.length
       });
@@ -1798,31 +1798,31 @@ Tráº£ lá»i Ä‘Ãºng má»©c chi tiáº¿t theo yÃªu cáº§u cá»�
         messages: [
           {
             role: "system",
-            content: `Báº¡n lÃ  trá»£ lÃ½ AI há»™i thoáº¡i.
-HÃ£y tráº£ lá»i cuá»‘i cÃ¹ng báº±ng cÃ¹ng ngÃ´n ngá»¯ vá»›i ngÆ°á»i há»i.
-Dá»±a trÃªn ná»™i dung tá»« general_chat, tráº£ lá»i tá»± nhiÃªn vÃ  khÃ´ng nháº¯c Ä‘áº¿n tool/function ná»™i bá»™.`
+            content: `Bạn là trợ lý AI hội thoại.
+Hãy trả lời cuối cùng bằng cùng ngôn ngữ với người hỏi.
+Dựa trên nội dung từ general_chat, trả lời tự nhiên và không nhắc đến tool/function nội bộ.`
           },
           ...chatHistory,
           { role: "user", content: userMessage },
           {
             role: "assistant",
-            content: `Ná»™i dung tá»« general_chat:\n${generalChatResult}`
+            content: `Nội dung từ general_chat:\n${generalChatResult}`
           }
         ]
       }, env);
 
-      addDebugStep(debugSteps, "general.final_answer", "ok", "ÄÃ£ táº¡o cÃ¢u tráº£ lá»i cuá»‘i tá»« general_chat.", {
+      addDebugStep(debugSteps, "general.final_answer", "ok", "Đã tạo câu trả lời cuối từ general_chat.", {
         answer_chars: (finalResponse.response ?? "").length
       });
 
       return {
-        answer: finalResponse.response ?? "KhÃ´ng táº¡o Ä‘Æ°á»£c cÃ¢u tráº£ lá»i.",
+        answer: finalResponse.response ?? "Không tạo được câu trả lời.",
         toolsCalled
       };
     }
   }
 
-  addDebugStep(debugSteps, "agent.stop", "error", "Äáº¡t sá»‘ vÃ²ng gá»i tool tá»‘i Ä‘a.", {
+  addDebugStep(debugSteps, "agent.stop", "error", "Đạt số vòng gọi tool tối đa.", {
     max_iterations: MAX_ITERATIONS
   });
 
@@ -1845,12 +1845,12 @@ Dá»±a trÃªn ná»™i dung tá»« general_chat, tráº£ lá»i tá»± 
   }
 
   return {
-    answer: "ÄÃ£ Ä‘áº¡t sá»‘ vÃ²ng gá»i cÃ´ng cá»¥ tá»‘i Ä‘a nhÆ°ng chÆ°a táº¡o Ä‘Æ°á»£c cÃ¢u tráº£ lá»i cuá»‘i cÃ¹ng.",
+    answer: "Đã đạt số vòng gọi công cụ tối đa nhưng chưa tạo được câu trả lời cuối cùng.",
     toolsCalled
   };
 }
 
-// â”€â”€â”€ Zilcode auth handlers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Zilcode auth handlers ──────────────────────────────────────────────────
 
 function getRecordId(record: unknown, keys: string[]): string | number | undefined {
   if (!record || typeof record !== "object") return undefined;
@@ -1898,7 +1898,7 @@ function getSelectedRoleName(session: ZilcodeSession): string | undefined {
 
 function getSelectedOrgName(session: ZilcodeSession): string | undefined {
   if (session.orgid === undefined || session.orgid === null || String(session.orgid) === "0") {
-    return "KhÃ´ng chá»n tá»• chá»©c";
+    return "Không chọn tổ chức";
   }
 
   const org = findRecordById(session.orgs, session.orgid, ORG_ID_KEYS);
@@ -2266,7 +2266,7 @@ function summarizeWindowBlueprint(
       parsed_config: parsedConfig,
       parsed_layout: parsedLayout
     } : undefined,
-    warning: parsedConfig ? undefined : "configjson khong parse duoc bang JSON.parse; co the dang o dang nen/format rieng cua Zilcode."
+    warning: parsedConfig ? undefined : "configjson không parse được bằng JSON.parse; có thể đang ở dạng nén/format riêng của Zilcode."
   };
 }
 
@@ -2372,8 +2372,8 @@ async function buildZilcodeSystemBlueprint(
     apps: appBlueprints,
     errors: errors.length ? errors : undefined,
     note: apps.length === 0
-      ? "Phien hien tai khong co app nao hoac appid khong khop. Hay dang nhap va chon role/org role system truoc."
-      : "Blueprint la ban do read-only de agent hieu cau truc he thong. Neu window config khong parse duoc, can bo sung parser format config cua Zilcode."
+      ? "Phiên hiện tại không có app nào hoặc appid không khớp. Hãy đăng nhập và chọn role/org role system trước."
+      : "Blueprint là bản đồ read-only để agent hiểu cấu trúc hệ thống. Nếu window config không parse được, cần bổ sung parser format config của Zilcode."
   };
 }
 
@@ -2419,7 +2419,7 @@ async function handleZilcodeLogin(request: Request, env: Env): Promise<Response>
 
   if (!username || !sitecode || !password) {
     return Response.json(
-      { success: false, error: "Báº¯t buá»™c pháº£i cÃ³ username, sitecode vÃ  password." },
+      { success: false, error: "Bắt buộc phải có username, sitecode và password." },
       { status: 400, headers: CORS }
     );
   }
@@ -2436,7 +2436,7 @@ async function handleZilcodeLogin(request: Request, env: Env): Promise<Response>
   const user = assertZilcodeSuccess(envelope);
   const token = String(user.token ?? "");
   if (!token) {
-    throw new Error("Zilcode login thÃ nh cÃ´ng nhÆ°ng response khÃ´ng cÃ³ token.");
+    throw new Error("Zilcode login thành công nhưng response không có token.");
   }
 
   const now = new Date();
@@ -2482,7 +2482,7 @@ async function handleZilcodeSelectRoleOrg(request: Request, env: Env): Promise<R
   const state = await loadZilcodeSession(request, env);
   if (!state) {
     return Response.json(
-      { success: false, error: "ChÆ°a cÃ³ phiÃªn Zilcode hoáº·c phiÃªn Ä‘Ã£ háº¿t háº¡n." },
+      { success: false, error: "Chưa có phiên Zilcode hoặc phiên đã hết hạn." },
       { status: 401, headers: CORS }
     );
   }
@@ -2494,7 +2494,7 @@ async function handleZilcodeSelectRoleOrg(request: Request, env: Env): Promise<R
 
   if (body.roleid === undefined || body.roleid === "") {
     return Response.json(
-      { success: false, error: "Báº¯t buá»™c pháº£i cÃ³ roleid." },
+      { success: false, error: "Bắt buộc phải có roleid." },
       { status: 400, headers: CORS }
     );
   }
@@ -2528,34 +2528,34 @@ async function handleZilcodeLogout(request: Request, env: Env): Promise<Response
   return Response.json({ success: true }, { headers: CORS });
 }
 
-// â”€â”€â”€ Worker handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Worker handler ───────────────────────────────────────────────────────────
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
 
     const url = new URL(request.url);
 
-    // â”€â”€ OPTIONS â€” CORS preflight â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── OPTIONS — CORS preflight ─────────────────────────────────────────────
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: CORS });
     }
 
-    // â”€â”€ GET / â€” health check â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── GET / — health check ─────────────────────────────────────────────────
     if (url.pathname === "/") {
       return Response.json({
         success: true,
-        message: "Workers AI Ä‘ang cháº¡y",
+        message: "Workers AI đang chạy",
         tools: TOOLS.map(t => t.name)
       }, { headers: CORS });
     }
 
-    // â”€â”€ POST /chat â€” agentic chat â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── POST /chat — agentic chat ────────────────────────────────────────────
     if (url.pathname === "/auth/login" && request.method === "POST") {
       try {
         return await handleZilcodeLogin(request, env);
       } catch (error) {
         return Response.json(
-          { success: false, error: error instanceof Error ? error.message : "Lá»—i Ä‘Äƒng nháº­p Zilcode." },
+          { success: false, error: error instanceof Error ? error.message : "Lỗi đăng nhập Zilcode." },
           { status: 500, headers: CORS }
         );
       }
@@ -2566,7 +2566,7 @@ export default {
         return await handleZilcodeSelectRoleOrg(request, env);
       } catch (error) {
         return Response.json(
-          { success: false, error: error instanceof Error ? error.message : "Lá»—i chá»n role/org Zilcode." },
+          { success: false, error: error instanceof Error ? error.message : "Lỗi chọn role/org Zilcode." },
           { status: 500, headers: CORS }
         );
       }
@@ -2588,7 +2588,7 @@ export default {
 
         if (!body.message) {
           return Response.json(
-            { success: false, error: "Báº¯t buá»™c pháº£i cÃ³ trÆ°á»ng message." },
+            { success: false, error: "Bắt buộc phải có trường message." },
             { status: 400, headers: CORS }
           );
         }
@@ -2597,14 +2597,14 @@ export default {
         debugSteps = debugEnabled ? [] as DebugStep[] : undefined;
         const zilcodeSession = await loadZilcodeSession(request, env);
 
-        addDebugStep(debugSteps, "request.received", "ok", "Worker nháº­n request /chat.", {
+        addDebugStep(debugSteps, "request.received", "ok", "Worker nhận request /chat.", {
           message_chars: body.message.length,
           raw_history_messages: Array.isArray(body.history) ? body.history.length : 0,
           has_zilcode_session: Boolean(zilcodeSession)
         });
 
         const chatHistory = sanitizeChatHistory(body.history);
-        addDebugStep(debugSteps, "history.sanitized", "ok", "LÃ m sáº¡ch history trÆ°á»›c khi Ä‘Æ°a vÃ o model.", {
+        addDebugStep(debugSteps, "history.sanitized", "ok", "Làm sạch history trước khi đưa vào model.", {
           history_messages: chatHistory.length,
           max_history_messages: MAX_HISTORY_MESSAGES
         });
@@ -2617,7 +2617,7 @@ export default {
           zilcodeSession
         );
 
-        addDebugStep(debugSteps, "response.ready", "ok", "Chuáº©n bá»‹ tráº£ response vá» client.", {
+        addDebugStep(debugSteps, "response.ready", "ok", "Chuẩn bị trả response về client.", {
           tools_called: toolsCalled,
           answer_chars: answer.length,
           sources: sources?.length ?? 0,
@@ -2636,14 +2636,14 @@ export default {
         }, { headers: CORS });
 
       } catch (error) {
-        addDebugStep(debugSteps, "response.error", "error", "Worker gáº·p lá»—i khi xá»­ lÃ½ /chat.", {
-          error: error instanceof Error ? error.message : "Lá»—i khÃ´ng xÃ¡c Ä‘á»‹nh"
+        addDebugStep(debugSteps, "response.error", "error", "Worker gặp lỗi khi xử lý /chat.", {
+          error: error instanceof Error ? error.message : "Lỗi không xác định"
         });
 
         return Response.json(
           {
             success: false,
-            error: error instanceof Error ? error.message : "Lá»—i khÃ´ng xÃ¡c Ä‘á»‹nh",
+            error: error instanceof Error ? error.message : "Lỗi không xác định",
             debug_steps: debugSteps
           },
           { status: 500, headers: CORS }
@@ -2651,14 +2651,14 @@ export default {
       }
     }
 
-    // â”€â”€ POST /embed â€” raw embedding â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── POST /embed — raw embedding ──────────────────────────────────────────
     if (url.pathname === "/embed" && request.method === "POST") {
       try {
         const body = await request.json() as { text?: string };
 
         if (!body.text) {
           return Response.json(
-            { success: false, error: "Báº¯t buá»™c pháº£i cÃ³ trÆ°á»ng text." },
+            { success: false, error: "Bắt buộc phải có trường text." },
             { status: 400, headers: CORS }
           );
         }
@@ -2670,14 +2670,14 @@ export default {
         return Response.json(
           {
             success: false,
-            error: error instanceof Error ? error.message : "Lá»—i khÃ´ng xÃ¡c Ä‘á»‹nh"
+            error: error instanceof Error ? error.message : "Lỗi không xác định"
           },
           { status: 500, headers: CORS }
         );
       }
     }
 
-    return new Response("KhÃ´ng tÃ¬m tháº¥y", { status: 404, headers: CORS });
+    return new Response("Không tìm thấy", { status: 404, headers: CORS });
   }
 };
 
