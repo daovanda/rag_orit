@@ -1,6 +1,6 @@
 ﻿// src/index.ts
 
-import zipsonModule from "./vendor/zipson.min.js";
+import * as zipsonModule from "./vendor/zipson.min.js";
 
 export interface Env {
   AI: Ai;
@@ -2182,9 +2182,12 @@ interface ZipsonRuntime {
 
 function getZipsonRuntime(): ZipsonRuntime {
   const moduleRuntime = zipsonModule as unknown as Partial<ZipsonRuntime> | undefined;
+  const defaultRuntime = (zipsonModule as unknown as { default?: Partial<ZipsonRuntime> }).default;
   const globalRuntime = (globalThis as unknown as { zipson?: ZipsonRuntime }).zipson;
   const runtime = typeof moduleRuntime?.parse === "function"
     ? moduleRuntime as ZipsonRuntime
+    : typeof defaultRuntime?.parse === "function"
+      ? defaultRuntime as ZipsonRuntime
     : globalRuntime;
 
   if (!runtime || typeof runtime.parse !== "function") {
