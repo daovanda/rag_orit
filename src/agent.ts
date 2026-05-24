@@ -17,6 +17,8 @@ import { asRecord, getStringArg, truncateDebugText } from "./utils";
 import {
   getWriteToolRoute,
   getWriteToolTarget,
+  applyAppBuilderPlan,
+  prepareAppBuilderPlan,
   validateAppBuilderPlan,
   writeAppBuilderRecord
 } from "./app-builder-write";
@@ -191,6 +193,50 @@ Trả lời ngắn gọn, tự nhiên, không nhắc đến function/tool nội 
       });
 
       return { content: JSON.stringify(validation, null, 2) };
+    }
+
+    case "app_builder_prepare_plan": {
+      if (!zilcodeSession) return noZilcodeSessionResult();
+
+      addDebugStep(debugSteps, "tool.app_builder_prepare_plan", "start", "Chuẩn bị pending plan App Builder.", {
+        has_plan: Boolean(tool.arguments.plan),
+        operations_count: Array.isArray(tool.arguments.operations) ? tool.arguments.operations.length : undefined
+      });
+
+      const prepared = await prepareAppBuilderPlan(env, zilcodeSession.session, zilcodeSession.id, tool.arguments);
+
+      addDebugStep(debugSteps, "tool.app_builder_prepare_plan", "ok", "Đã chuẩn bị pending plan App Builder.", {
+        status: prepared.status,
+        valid: prepared.valid,
+        plan_id: prepared.plan_id,
+        requires_confirmation: prepared.requires_confirmation,
+        blocking_errors_count: Array.isArray(prepared.blocking_errors) ? prepared.blocking_errors.length : 0,
+        warnings_count: Array.isArray(prepared.warnings) ? prepared.warnings.length : 0
+      });
+
+      return { content: JSON.stringify(prepared, null, 2) };
+    }
+
+    case "app_builder_apply_plan": {
+      if (!zilcodeSession) return noZilcodeSessionResult();
+
+      addDebugStep(debugSteps, "tool.app_builder_apply_plan", "start", "Apply pending plan App Builder.", {
+        plan_id: getStringArg(tool.arguments, "plan_id"),
+        confirmed: tool.arguments.confirmed === true || tool.arguments.confirmed === "true"
+      });
+
+      const applied = await applyAppBuilderPlan(env, zilcodeSession.session, zilcodeSession.id, tool.arguments);
+
+      addDebugStep(debugSteps, "tool.app_builder_apply_plan", applied.ok ? "ok" : "skip", "Đã chạy apply pending plan App Builder.", {
+        ok: applied.ok,
+        status: applied.status,
+        plan_id: applied.plan_id,
+        applied_count: applied.applied_count,
+        failed_count: applied.failed_count,
+        blocked: applied.blocked
+      });
+
+      return { content: JSON.stringify(applied, null, 2) };
     }
 
     default:
@@ -450,10 +496,25 @@ async function createFinalAnswerFromToolResults(
 Nếu context có app_builder_validate_plan:
 - valid=false hoặc có blocking_errors: liệt kê lỗi cần sửa, hỏi lại thông tin còn thiếu, không nói là đã tạo/cập nhật.
 - valid=true: trình bày plan ngắn gọn theo các bước sẽ ghi và hỏi người dùng xác nhận. Không nói là đã tạo. Không yêu cầu người dùng tự thao tác thủ công nếu agent có write tool.
+Nếu context có app_builder_prepare_plan:
+- valid=true và có plan_id: trình bày summary ngắn gọn, nêu plan_id nếu cần debug, và hỏi người dùng xác nhận để apply. Không nói là đã tạo.
+- valid=false hoặc status=invalid/need_user_input: liệt kê lỗi hoặc thông tin thiếu, hỏi lại đúng phần thiếu.
+Nếu context có app_builder_apply_plan:
+- ok=true: nói rõ đã apply xong, tóm tắt số bước đã thực hiện và nói đã verify lại blueprint.
+- ok=false/blocked=true: giải thích lý do chưa apply.
 Nếu context có write tool App Builder:
 - blocked=true: giải thích lý do bị chặn.
 - ok=true: nói rõ record đã ghi và cần đọc lại blueprint để xác minh.
-[HET_HUONG_DAN_TRA_LOI_APP_BUILDER_WRITE]`
+[HET_HUONG_DAN_TRA_LOI_APP_BUILDER_WRITE]`,
+    `[APP_BUILDER_PLAN_OUTPUT_RULES]
+Neu co app_builder_prepare_plan va valid=true:
+- Phai noi ro day moi la ke hoach cho xac nhan, chua ghi du lieu.
+- Phai dua plan_id vao cau tra loi theo dang: Plan ID: <plan_id>.
+- Hoi user xac nhan de thuc thi.
+Neu co app_builder_apply_plan:
+- Chi noi da tao/cap nhat khi ok=true.
+- Neu status=partial_success, noi ro da ghi duoc bao nhieu buoc va buoc nao loi.
+[END_APP_BUILDER_PLAN_OUTPUT_RULES]`
   ].join("\n\n"));
 
   addDebugStep(debugSteps, "tools.final_answer", "start", "Tạo câu trả lời cuối từ kết quả tool.", {
@@ -547,6 +608,27 @@ Trả lời đúng mức chi tiết theo yêu cầu của người dùng, cụ t
 - Mỗi create/update tool chỉ ghi một record metadata. Với thao tác nhiều bước, gọi các write tool theo thứ tự phụ thuộc: app -> table -> column -> window -> tab -> field -> menu/domain.
 - Sau bất kỳ write tool thành công nào, phải gọi lại zilcode_get_app_builder_blueprint để xác minh record và quan hệ đã xuất hiện đúng trước khi báo hoàn tất.
 - Không tự bịa ID. ID phải lấy từ blueprint hoặc từ kết quả create trả về. Update phải dùng key_value/where rõ ràng.`
+    },
+    {
+      role: "system",
+      content: `Quy trình chuẩn cho tạo/sửa App Builder:
+- Ưu tiên dùng app_builder_prepare_plan thay cho app_builder_validate_plan và các low-level create/update tool khi yêu cầu có nhiều bước hoặc cần tự resolve ID.
+- Khi người dùng muốn tạo app mới, thêm/sửa table, column, window, tab, field, menu hoặc domain: đọc zilcode_get_app_builder_blueprint nếu chưa có context, sau đó gọi app_builder_prepare_plan với plan nghiệp vụ.
+- app_builder_prepare_plan sẽ resolve ID, validate và lưu pending plan. Nếu tool trả valid=true và plan_id, hãy trình bày summary và hỏi người dùng xác nhận.
+- Khi người dùng xác nhận rõ ràng, gọi app_builder_apply_plan với plan_id và confirmed=true. Không tự dựng lại plan mới nếu đã có plan_id trong lượt trước.
+- app_builder_apply_plan là executor tuần tự: nó tự map appid/tableid/windowid/tabid/columnid sau mỗi bước và verify lại blueprint.
+- Các app_builder_create_*/app_builder_update_* chỉ dùng cho thao tác nhỏ một record khi đã có đủ ID, không dùng để tự điều phối một workflow lớn.`
+    },
+    {
+      role: "system",
+      content: `Dieu phoi workflow App Builder (bat buoc):
+- Neu user muon tao app moi hoac sua/them table, column, window, tab, field, menu, domain trong app da co, khong chi huong dan thao tac thu cong.
+- Neu thong tin nghiep vu da du de de xuat cau truc, hay goi zilcode_get_app_builder_blueprint truoc, sau do goi app_builder_prepare_plan.
+- Neu user noi "tu them", "tu de xuat", "demo co ban", "sao cho phu hop", hay tu lap cau truc hop ly thay vi hoi lai qua nhieu.
+- app_builder_prepare_plan la buoc validate va luu pending plan, chua ghi du lieu. Sau khi prepare thanh cong, chi trinh bay tom tat plan va hoi xac nhan.
+- Khi user xac nhan bang cac cau nhu "dong y", "co", "hay tao", "tien hanh", phai goi app_builder_apply_plan voi confirmed=true. Co the bo qua plan_id neu pending plan moi nhat cua session van con hieu luc.
+- Sau app_builder_apply_plan, dua ket qua thuc thi: so buoc da ghi, buoc loi neu co, va trang thai verify. Khong noi da tao neu apply_plan chua chay thanh cong.
+- Neu prepare_plan tra blocking_errors, sua plan neu co the; neu van thieu thong tin bat buoc moi hoi user.`
     },
     ...chatHistory,
     {

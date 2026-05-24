@@ -174,6 +174,51 @@ export const TOOLS = [
     }
   },
   {
+    name: "app_builder_prepare_plan",
+    description:
+      "Chuẩn bị kế hoạch tạo/sửa App Builder theo cơ chế Plan -> Resolve -> Validate -> Confirm. Tool đọc blueprint, resolve appid/tableid/windowid/tabid/columnid nếu có, chuẩn hóa operation, kiểm tra trùng/thiếu thông tin và lưu pending plan khi hợp lệ. Dùng tool này cho mọi yêu cầu tạo app, thêm/sửa table, column, window, tab, field, menu hoặc domain trước khi apply.",
+    parameters: {
+      type: "object",
+      properties: {
+        intent: {
+          type: "string",
+          description: "Ý định tổng quát, ví dụ create_app, add_table, add_column, update_table, create_window."
+        },
+        plan: {
+          type: "object",
+          description: "Plan cấp nghiệp vụ. Nên có app, tables, windows, menus hoặc operations/steps. Không cần tự truyền ID nếu có thể resolve từ blueprint."
+        },
+        operations: {
+          type: "array",
+          description: "Danh sách operation nếu không truyền trong plan.operations."
+        }
+      }
+    }
+  },
+  {
+    name: "app_builder_apply_plan",
+    description:
+      "Thực thi pending plan đã được app_builder_prepare_plan lưu và người dùng đã xác nhận. Tool chạy tuần tự ở backend, tự map ID sau mỗi bước, apply các create/update metadata App Builder và đọc lại blueprint để verify. Chỉ gọi khi confirmed=true; plan_id có thể bỏ trống nếu dùng pending plan mới nhất của phiên.",
+    parameters: {
+      type: "object",
+      properties: {
+        plan_id: {
+          type: "string",
+          description: "ID pending plan do app_builder_prepare_plan trả về. Có thể bỏ trống để dùng pending plan mới nhất trong phiên."
+        },
+        confirmed: {
+          type: "boolean",
+          description: "Bắt buộc true khi người dùng đã xác nhận rõ ràng."
+        },
+        confirmation_note: {
+          type: "string",
+          description: "Tóm tắt câu xác nhận của người dùng."
+        }
+      },
+      required: ["confirmed"]
+    }
+  },
+  {
     name: "app_builder_validate_plan",
     description:
       "Validate kế hoạch tạo/sửa App Builder trước khi ghi. Tool chỉ đọc blueprint, kiểm tra thiếu field bắt buộc, trùng app/table/window/menu/domain, thiếu quan hệ app/table/window/tab/column và trả blocking_errors/warnings. Luôn gọi trước các create/update tool.",
