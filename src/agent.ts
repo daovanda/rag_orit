@@ -444,7 +444,17 @@ async function createFinalAnswerFromToolResults(
   chatHistory: AIMessage[] = [],
   debugSteps?: DebugStep[]
 ): Promise<string> {
-  const toolContext = truncateToolContext(formatToolResultsForFinalAnswer(toolResults));
+  const toolContext = truncateToolContext([
+    formatToolResultsForFinalAnswer(toolResults),
+    `[HUONG_DAN_TRA_LOI_APP_BUILDER_WRITE]
+Nếu context có app_builder_validate_plan:
+- valid=false hoặc có blocking_errors: liệt kê lỗi cần sửa, hỏi lại thông tin còn thiếu, không nói là đã tạo/cập nhật.
+- valid=true: trình bày plan ngắn gọn theo các bước sẽ ghi và hỏi người dùng xác nhận. Không nói là đã tạo. Không yêu cầu người dùng tự thao tác thủ công nếu agent có write tool.
+Nếu context có write tool App Builder:
+- blocked=true: giải thích lý do bị chặn.
+- ok=true: nói rõ record đã ghi và cần đọc lại blueprint để xác minh.
+[HET_HUONG_DAN_TRA_LOI_APP_BUILDER_WRITE]`
+  ].join("\n\n"));
 
   addDebugStep(debugSteps, "tools.final_answer", "start", "Tạo câu trả lời cuối từ kết quả tool.", {
     model: CHAT_MODEL,
@@ -703,7 +713,10 @@ Trả lời đúng mức chi tiết theo yêu cầu của người dùng, cụ t
       messages.push({
         role: "tool",
         tool_call_id: toolCall.id ?? toolCall.name,
-        content: toolResult
+        content: truncateToolContext(compactToolContentForFinalAnswer({
+          name: toolCall.name,
+          content: toolResult
+        }))
       });
 
       if (toolCall.name === "general_chat") {

@@ -19,7 +19,7 @@ export const INTERNAL_CHAT_FALLBACK_MODEL = LLAMA_CHAT_MODEL;
 export const EMBEDDING_MODEL = "@cf/baai/bge-m3";
 export const CHART_IMAGE_MODEL = "@cf/black-forest-labs/flux-2-dev";
 
-export const TOOL_SELECTION_MAX_TOKENS = 512;
+export const TOOL_SELECTION_MAX_TOKENS = 2048;
 export const GENERAL_CHAT_MAX_TOKENS = 1024;
 export const RAG_FINAL_MAX_TOKENS = 2048;
 export const RAG_RERANK_MAX_TOKENS = 512;
