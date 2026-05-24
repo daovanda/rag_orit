@@ -441,8 +441,14 @@ function isAppBuilderWriteIntent(userMessage: string, chatHistory: AIMessage[]):
 function isAppBuilderConfirmation(userMessage: string, chatHistory: AIMessage[]): boolean {
   const current = normalizeIntentText(userMessage);
   const recentContext = normalizeIntentText(chatHistory.slice(-6).map(message => message.content).join("\n"));
-  const hasConfirmation = /\b(co|dong y|ok|okay|duoc|chot|xac nhan|hay tao|tao di|tien hanh|thuc hien|apply)\b/.test(current);
-  const hasPlanContext = /\b(plan id|ke hoach|xac nhan|prepare_plan|pending plan|tiep tuc|thuc thi|tao app|app builder)\b/.test(recentContext);
+  const compact = current.replace(/\s+/g, " ").trim();
+  const asksForNewOrChangedPlan = /\b(tu tao|thu tao|don gian hon|don giản hon|voi cac truong|cac truong|theo y|ten ung dung|ung dung do|app don gian|ke hoach moi|chinh lai|sua lai)\b/.test(compact);
+  if (asksForNewOrChangedPlan) return false;
+
+  const shortConfirmation = /^(co|dong y|ok|okay|duoc|chot|xac nhan|apply|tien hanh|thuc hien|tiep tuc|hay thuc hien|hay tao di|tao di)(\b|[.!?])/.test(compact);
+  const explicitExecution = /\b(thuc hien ke hoach|tien hanh ke hoach|apply plan|hay thuc hien ke hoach|hay tao di|tao di)\b/.test(compact);
+  const hasConfirmation = shortConfirmation || explicitExecution;
+  const hasPlanContext = /\b(plan id|ke hoach|xac nhan|prepare_plan|pending plan|thuc thi|thuc hien ke hoach)\b/.test(recentContext);
 
   return hasConfirmation && hasPlanContext;
 }

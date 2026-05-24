@@ -63,7 +63,7 @@ const TARGET_SPECS: Record<AppBuilderTarget, TargetSpec> = {
     target: "application",
     collection: "applications",
     idKey: "appid",
-    nameKeys: ["appcode", "appname"],
+    nameKeys: ["appname"],
     duplicateScopeKeys: [],
     parentRefs: []
   },
@@ -142,40 +142,40 @@ const TARGET_SPECS: Record<AppBuilderTarget, TargetSpec> = {
 
 const WRITE_FIELD_KEYS: Record<AppBuilderTarget, string[]> = {
   application: [
-    "appid", "appname", "appcode", "description", "siteid", "seqno", "active", "icon", "background"
+    "appid", "appname", "description", "siteid", "seqno", "icon", "background"
   ],
   table: [
     "tableid", "appid", "tablename", "tabletype", "alias", "description", "columnkey", "columncode",
     "columndisplay", "columnfind", "urlview", "urledit", "serviceid", "servicetype", "isreadonly",
-    "isview", "seqno", "active"
+    "isview", "seqno"
   ],
   column: [
     "columnid", "tableid", "tablename", "columnname", "caption", "label", "datatype", "columntype",
     "length", "precision", "scale", "isprimarykey", "isrequired", "isreadonly", "isvisible",
-    "defaultvalue", "description", "seqno", "active"
+    "defaultvalue", "description", "seqno"
   ],
   window: [
     "windowid", "appid", "windowname", "windowtype", "translate", "description", "execname",
-    "configjson", "layoutjson", "isopenfind", "seqno", "active"
+    "configjson", "layoutjson", "isopenfind", "seqno"
   ],
   tab: [
     "tabid", "windowid", "tabname", "translate", "parenttabid", "tablevel", "seqno", "tableid",
     "linktableid", "linkchildfield", "linkparentfield", "relatetableid", "relatechildfield",
     "relateparentfield", "workflowid", "isviewonly", "noinsert", "noupdate", "nodelete", "noselect",
-    "noexport", "active"
+    "noexport"
   ],
   field: [
     "fieldid", "fieldname", "columnid", "columnname", "tableid", "tabid", "caption", "label",
     "translate", "datatype", "fieldtype", "columntype", "controltype", "domainid", "defaultvalue",
-    "isrequired", "isreadonly", "isvisible", "isprimarykey", "width", "height", "seqno", "active"
+    "isrequired", "isrequire", "isreadonly", "isvisible", "isprimarykey", "width", "height", "seqno"
   ],
   menu: [
     "menuid", "menuname", "translate", "parentid", "seqno", "linktype", "linkwindowid",
-    "windowid", "appid", "execname", "icon", "reportid", "active"
+    "windowid", "appid", "execname", "icon", "reportid"
   ],
   domain: [
     "domainid", "domainname", "name", "description", "domainjson", "datatype", "controltype",
-    "iseditable", "seqno", "active"
+    "iseditable", "seqno"
   ]
 };
 
@@ -270,8 +270,8 @@ export async function writeAppBuilderRecord(
     };
   }
 
-  const record = getObjectArg(options.args, options.mode === "create" ? "record" : "patch");
-  if (!record) {
+  const rawRecord = getObjectArg(options.args, options.mode === "create" ? "record" : "patch");
+  if (!rawRecord) {
     return {
       ok: false,
       blocked: true,
@@ -282,6 +282,10 @@ export async function writeAppBuilderRecord(
   }
 
   const blueprint = await getValidationBlueprint(env, session);
+  const record = sanitizePayloadForWrite(
+    options.target,
+    mapRecordForTarget(options.target, rawRecord, blueprint)
+  );
   const validationAction: NormalizedAction = {
     index: 0,
     action: `${options.mode}_${options.target}`,
@@ -634,7 +638,6 @@ function applyCreateDefaults(
 ): Record<string, unknown> {
   const output = { ...record };
   if (target === "application") {
-    if (output.active === undefined) output.active = true;
     if (output.siteid === undefined) {
       const siteid = getCaseInsensitiveValue(session.user, "siteid");
       if (siteid !== undefined) output.siteid = siteid;
@@ -872,9 +875,10 @@ export async function applyAppBuilderPlan(
     max_records_per_table: "2000"
   });
 
+  await getPlanStore(env).delete(getCurrentPlanKey(sessionId));
+
   if (!failed.length) {
     await getPlanStore(env).delete(getPlanKey(sessionId, planId));
-    await getPlanStore(env).delete(getCurrentPlanKey(sessionId));
   }
 
   return {
@@ -1014,16 +1018,18 @@ function buildOperationsFromStructuredPlan(
   blueprint: Record<string, unknown>
 ): PreparedOperation[] {
   const operations: PreparedOperation[] = [];
-  const app = getObjectArg(plan, "app") ?? getObjectArg(getObjectArg(plan, "target") ?? {}, "app");
+  const explicitApp = getObjectArg(plan, "app") ?? getObjectArg(getObjectArg(plan, "target") ?? {}, "app");
+  const rootLooksLikeApp = !explicitApp
+    && Boolean(plan.name ?? plan.appname ?? plan.app_name)
+    && (getArrayArg(plan, "tables").length > 0 || getArrayArg(plan, "windows").length > 0 || getArrayArg(plan, "menus").length > 0);
+  const app = explicitApp ?? (rootLooksLikeApp ? plan : null);
   const existingAppId = app ? resolveAppId(blueprint, app) : undefined;
   const appName = app ? stringValue(app.appname ?? app.name ?? app.app_name) : "";
-  const appCode = app ? stringValue(app.appcode ?? app.code) || slugify(appName) : "";
   let appRef = existingAppId;
 
   if (app && !existingAppId) {
     const op = makePreparedOperation("create_application", "application", {
       appname: appName,
-      appcode: appCode,
       description: app.description
     }, operations.length);
     operations.push(op);
@@ -1053,8 +1059,8 @@ function buildOperationsFromStructuredPlan(
         columnname: normalizeDbName(stringValue(column.columnname ?? column.name ?? column.column_name)),
         caption: column.caption ?? column.label,
         label: column.label ?? column.caption,
-        datatype: normalizeDatatype(column.datatype ?? column.type),
-        columntype: column.columntype ?? normalizeDatatype(column.datatype ?? column.type),
+        datatype: normalizeDatatype(column.datatype ?? column.type ?? column.coltype),
+        columntype: column.columntype ?? normalizeDatatype(column.datatype ?? column.type ?? column.coltype),
         isprimarykey: column.isprimarykey ?? column.is_primary ?? column.primary_key,
         isrequired: column.isrequired ?? column.is_required,
         defaultvalue: column.defaultvalue ?? column.default,
@@ -1191,9 +1197,7 @@ function mapRecordForTarget(
     return removeBlankValues({
       ...record,
       appname,
-      appcode: stringValue(record.appcode ?? record.code) || slugify(appname),
-      description: record.description,
-      active: record.active ?? true
+      description: record.description
     });
   }
 
