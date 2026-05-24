@@ -108,9 +108,9 @@ const TOOLS = [
     }
   },
   {
-    name: "zilcode_get_system_blueprint",
+    name: "zilcode_get_app_builder_blueprint",
     description:
-      "Read-only tool. Lấy bản đồ graph hệ thống Zilcode của phiên đăng nhập hiện tại. Mặc định dùng mode=graph để lấy graph compact gồm apps, menus/windows, tabs, tables, domains, relations và các cạnh quan hệ. Nếu graph chưa đủ để trả lời, gọi lại mode=subgraph hoặc mode=detail với node_id/node_ids lấy từ graph để đào sâu phần liên quan. Không dùng tool này cho chào hỏi hoặc kiến thức chung.",
+      "Read-only tool dành cho Role System dùng App Builder. Lấy blueprint của chính App Builder: metadata schema, các record cấu hình hiện có, applications, tables, columns, windows, tabs, fields, menus, domains, relations và graph quan hệ để agent hiểu cách tạo/cấu hình app. Mặc định chỉ đọc App Builder, không quét toàn bộ app trong phiên. Nếu graph chưa đủ, gọi lại mode=subgraph hoặc mode=detail với node_id/node_ids.",
     parameters: {
       type: "object",
       properties: {
@@ -120,7 +120,7 @@ const TOOLS = [
         },
         appid: {
           type: "string",
-          description: "Optional appid. Bỏ trống để quét tất cả app trong phiên hiện tại."
+          description: "Optional appid của App Builder, mặc định 1. Chỉ đổi khi App Builder ở môi trường khác có appid khác."
         },
         node_id: {
           type: "string",
@@ -142,13 +142,17 @@ const TOOLS = [
           type: "string",
           description: "true/false. Mặc định false. Chỉ bật true khi debug vì raw payload có thể lớn."
         },
-        max_apps: {
+        include_records: {
           type: "string",
-          description: "Số app tối đa cần đọc, mặc định 5."
+          description: "true/false. Mặc định true. Đọc record cấu hình hiện có trong các bảng App Builder như NApplication, NTable, NColumn, NWindow, NTab, NField, NMenu."
+        },
+        max_records_per_table: {
+          type: "string",
+          description: "Số record tối đa đọc cho mỗi bảng cấu hình App Builder, mặc định 500."
         },
         max_windows_per_app: {
           type: "string",
-          description: "Số window/cache tối đa mỗi app, mặc định 20."
+          description: "Số window/cache tối đa của App Builder cần đọc, mặc định 50."
         }
       }
     }
@@ -1320,6 +1324,7 @@ async function callZilcodeJson<T = unknown>(
     token?: string;
     data?: unknown;
     baseUrl?: string;
+    headers?: Record<string, string>;
   } = {}
 ): Promise<ZilcodeApiEnvelope<T>> {
   const headers = new Headers({
@@ -1328,6 +1333,10 @@ async function callZilcodeJson<T = unknown>(
 
   if (options.token) {
     headers.set("Authorization", `Bearer ${options.token}`);
+  }
+
+  for (const [key, value] of Object.entries(options.headers ?? {})) {
+    headers.set(key, value);
   }
 
   const endpoint = resolveZilcodeUrl(env, pathOrUrl, options.baseUrl);
@@ -1429,21 +1438,23 @@ Trả lời ngắn gọn, tự nhiên, không nhắc đến function/tool nội 
       return searchRag(query, env, chatHistory, debugSteps);
     }
 
-    case "zilcode_get_system_blueprint": {
+    case "zilcode_get_app_builder_blueprint": {
       if (!zilcodeSession) return noZilcodeSessionResult();
       const mode = getBlueprintMode(tool.arguments);
 
-      addDebugStep(debugSteps, "tool.zilcode_get_system_blueprint", "start", "Lấy bản đồ tổng hợp hệ thống Zilcode.", {
+      addDebugStep(debugSteps, "tool.zilcode_get_app_builder_blueprint", "start", "Lấy App Builder blueprint.", {
         mode,
         appid: getStringArg(tool.arguments, "appid") || undefined,
         node_id: getStringArg(tool.arguments, "node_id") || undefined,
         node_ids: getNodeIdsArg(tool.arguments),
         depth: getLimitArg(tool.arguments, "depth", 1, 4),
         include_fields: getOptionalBooleanArg(tool.arguments, "include_fields", mode === "detail"),
-        include_raw: getOptionalBooleanArg(tool.arguments, "include_raw", false)
+        include_raw: getOptionalBooleanArg(tool.arguments, "include_raw", false),
+        include_records: getOptionalBooleanArg(tool.arguments, "include_records", true),
+        max_records_per_table: getLimitArg(tool.arguments, "max_records_per_table", 500, 5000)
       });
 
-      const blueprint = await buildZilcodeSystemBlueprint(env, zilcodeSession.session, tool.arguments);
+      const blueprint = await buildZilcodeAppBuilderBlueprint(env, zilcodeSession.session, tool.arguments);
       const graph = asRecord(blueprint.graph);
       const graphNodes = Array.isArray(graph?.nodes) ? graph.nodes.length : undefined;
       const graphEdges = Array.isArray(graph?.edges) ? graph.edges.length : undefined;
@@ -1475,8 +1486,11 @@ Trả lời ngắn gọn, tự nhiên, không nhắc đến function/tool nội 
             error: truncateDebugText(node.summary?.error)
           }))
         : [];
+      const recordErrors = Array.isArray(asRecord(blueprint.app_builder_records)?.errors)
+        ? asRecord(blueprint.app_builder_records)?.errors
+        : [];
 
-      addDebugStep(debugSteps, "tool.zilcode_get_system_blueprint", "ok", "Đã lấy system blueprint.", {
+      addDebugStep(debugSteps, "tool.zilcode_get_app_builder_blueprint", "ok", "Đã lấy App Builder blueprint.", {
         mode: blueprint.mode,
         scan: blueprint.scan,
         apps_count: blueprint.apps_count,
@@ -1485,7 +1499,9 @@ Trả lời ngắn gọn, tự nhiên, không nhắc đến function/tool nội 
         app_errors_count: appErrors.length,
         app_errors: appErrors,
         window_errors_count: windowErrors.length,
-        window_errors: windowErrors
+        window_errors: windowErrors,
+        record_errors_count: Array.isArray(recordErrors) ? recordErrors.length : 0,
+        record_errors: recordErrors
       });
 
       return { content: JSON.stringify(blueprint, null, 2) };
@@ -1569,7 +1585,7 @@ function formatToolResultsForFinalAnswer(toolResults: ToolResultRecord[]): strin
 }
 
 function compactToolContentForFinalAnswer(result: ToolResultRecord): string {
-  if (result.name !== "zilcode_get_system_blueprint") return result.content;
+  if (result.name !== "zilcode_get_app_builder_blueprint") return result.content;
 
   try {
     const data = JSON.parse(result.content) as Record<string, unknown>;
@@ -1604,6 +1620,7 @@ function compactToolContentForFinalAnswer(result: ToolResultRecord): string {
       filters: data.filters,
       apps_count: data.apps_count,
       overview: data.overview,
+      app_builder_records: data.app_builder_records,
       graph: graph ? {
         node_counts: graph.node_counts,
         edge_count: graph.edge_count,
@@ -1780,11 +1797,11 @@ Dùng general_chat cho chào hỏi, cảm ơn, trò chuyện thông thường, h
 Chỉ dùng rag_search khi câu hỏi cần thông tin cụ thể từ tài liệu Zilcode, ví dụ tính năng, khái niệm, hướng dẫn thao tác, hoặc cách sử dụng Zilcode.
 Nếu Zilcode là chủ đề chính cần giải thích, hoặc người dùng hỏi Zilcode là gì, tính năng/cách dùng/hướng dẫn thao tác trong Zilcode, hãy ưu tiên rag_search thay vì general_chat.
 Dùng draw_chart khi người dùng yêu cầu vẽ/tạo ảnh biểu đồ, sơ đồ, flowchart, timeline, mindmap, dashboard mockup hoặc infographic. Với biểu đồ cần số liệu chính xác tuyệt đối, hãy nói ngắn gọn rằng ảnh AI chỉ mang tính minh họa và vẫn có thể tạo ảnh nếu người dùng muốn.
-Bộ công cụ hiện tại gồm: general_chat, rag_search, draw_chart, zilcode_get_system_blueprint.
-Khi cần đọc hệ thống Zilcode thật, dùng zilcode_get_system_blueprint theo flow graph-first: gọi mode=graph trước để lấy bản đồ compact gồm apps, windows, tabs, tables, domains, relations và các cạnh quan hệ. Nếu graph đã đủ để trả lời thì trả lời ngay. Nếu cần đào sâu một app/window/tab/table/domain/relation cụ thể, gọi lại mode=subgraph hoặc mode=detail với node_id/node_ids lấy từ graph; không yêu cầu full blueprint khi chưa có node liên quan.
-Khi trả lời từ system blueprint, hãy viết dễ hiểu cho người dùng cuối: ưu tiên trường overview nếu có, không nhắc tên tool, không dùng bảng dài, không liệt kê toàn bộ bảng khi người dùng chỉ hỏi tổng quan. Hãy tóm tắt role/org, số app, số bảng/menu/window/domain/relation, vài ví dụ tiêu biểu và phần lỗi/chưa đọc được nếu có.
+Bộ công cụ hiện tại gồm: general_chat, rag_search, draw_chart, zilcode_get_app_builder_blueprint.
+Khi cần đọc cấu hình thật cho Role System dùng App Builder, dùng zilcode_get_app_builder_blueprint theo flow graph-first: gọi mode=graph trước để lấy bản đồ compact của App Builder gồm applications, tables, columns, windows, tabs, fields, menus, domains, relations và các cạnh quan hệ. Nếu graph đã đủ để trả lời thì trả lời ngay. Nếu cần đào sâu một app/window/tab/table/field cụ thể, gọi lại mode=subgraph hoặc mode=detail với node_id/node_ids lấy từ graph.
+Khi trả lời từ App Builder blueprint, hãy viết dễ hiểu cho người dùng cấu hình hệ thống: ưu tiên trường overview và app_builder_records nếu có, không nhắc tên tool, không dùng bảng dài khi không cần. Hãy tập trung vào app hiện có, bảng, cột, window, tab, field, menu và các ràng buộc cấu hình.
 Khi dùng rag_search, thường chỉ gọi một lần với query tổng hợp tốt. Chỉ gọi lại nếu kết quả chưa đủ và query mới khác rõ ràng về ý định hoặc phạm vi; không gọi lại cùng query hoặc query tương đương.
-Dùng zilcode_get_system_blueprint khi người dùng hỏi dữ liệu/cấu trúc hệ thống Zilcode thật của tài khoản đang đăng nhập: app, window/menu, tab, table, domain, relation, field, quyền hoặc các ràng buộc tạo app. Nếu chưa đăng nhập Zilcode, hãy yêu cầu người dùng đăng nhập ở giao diện chat trước. Không dùng zilcode_get_system_blueprint cho chào hỏi hoặc kiến thức chung có thể trả lời bằng general_chat/RAG.
+Dùng zilcode_get_app_builder_blueprint khi người dùng hỏi dữ liệu/cấu trúc App Builder thật của tài khoản đang đăng nhập: hiện có app nào, app có bảng nào, bảng có cột nào, window/tab/field/menu hiện có ra sao, hoặc cần chuẩn bị tạo app/window/tab/table/field. Nếu chưa đăng nhập Zilcode, hãy yêu cầu người dùng đăng nhập ở giao diện chat trước.
 Với câu hỏi ngoài phạm vi Zilcode, hãy dùng general_chat.
 Sau khi đã có đủ thông tin từ công cụ, hãy trả lời ngay thay vì tiếp tục gọi thêm công cụ. Nếu general_chat đã trả lời và chưa dùng rag_search, hãy dùng nội dung đó làm cơ sở cho câu trả lời cuối cùng.
 Khi đã dùng rag_search và có kết quả, không gọi general_chat để hỏi lại kiến thức chung; hãy tổng hợp câu trả lời từ kết quả rag_search.
@@ -1967,7 +1984,7 @@ Trả lời đúng mức chi tiết theo yêu cầu của người dùng, cụ t
         hasRagSearchResult = true;
       }
 
-      if (toolCall.name === "zilcode_get_system_blueprint") {
+      if (toolCall.name === "zilcode_get_app_builder_blueprint") {
         const blueprintMode = getBlueprintMode(toolCall.arguments);
         shouldLetModelInspectToolResult = blueprintMode === "graph" || blueprintMode === "subgraph";
       }
@@ -3243,7 +3260,314 @@ function buildSystemOverview(
   };
 }
 
-async function buildZilcodeSystemBlueprint(
+interface AppBuilderRecordSpec {
+  key: string;
+  description: string;
+  table_aliases: string[];
+  table_names: string[];
+  summary_keys: string[];
+}
+
+const APP_BUILDER_DEFAULT_APPID = "1";
+const APP_BUILDER_RECORD_SPECS: AppBuilderRecordSpec[] = [
+  {
+    key: "applications",
+    description: "Các app hiện có được tạo/cấu hình trong App Builder.",
+    table_aliases: ["NApplication"],
+    table_names: ["n_app"],
+    summary_keys: ["appid", "appname", "appcode", "description", "siteid", "seqno", "active"]
+  },
+  {
+    key: "tables",
+    description: "Các table/view metadata của các app.",
+    table_aliases: ["NTable"],
+    table_names: ["n_table"],
+    summary_keys: ["tableid", "tablename", "alias", "tabletype", "appid", "serviceid", "servicetype", "columnkey", "columncode", "columndisplay", "columnfind", "urlview", "urledit", "isreadonly", "isview", "seqno"]
+  },
+  {
+    key: "columns",
+    description: "Các column hiện có của table.",
+    table_aliases: ["NColumn"],
+    table_names: ["n_column"],
+    summary_keys: ["columnid", "columnname", "tablename", "tableid", "caption", "label", "datatype", "columntype", "isprimarykey", "isrequired", "defaultvalue", "seqno"]
+  },
+  {
+    key: "windows",
+    description: "Các window hiện có.",
+    table_aliases: ["NWindow"],
+    table_names: ["n_window"],
+    summary_keys: ["windowid", "windowname", "windowtype", "appid", "execname", "isopenfind", "translate", "seqno"]
+  },
+  {
+    key: "tabs",
+    description: "Các tab hiện có trong window.",
+    table_aliases: ["NTab"],
+    table_names: ["n_tab"],
+    summary_keys: ["tabid", "tabname", "parenttabid", "tablevel", "seqno", "tableid", "windowid", "linktableid", "linkchildfield", "linkparentfield", "relatetableid", "relatechildfield", "relateparentfield", "noinsert", "noupdate", "nodelete", "noselect", "noexport", "workflowid", "isviewonly"]
+  },
+  {
+    key: "fields",
+    description: "Các field hiện có trong tab/window.",
+    table_aliases: ["NField"],
+    table_names: ["n_field"],
+    summary_keys: ["fieldid", "fieldname", "columnname", "columnid", "tableid", "tabid", "translate", "fieldtype", "columntype", "domainid", "linktableid", "isreadonly", "isrequire", "hideingrid", "hideinform", "hideinfind", "seqno"]
+  },
+  {
+    key: "menus",
+    description: "Các menu hiện có và window mà menu mở.",
+    table_aliases: ["NMenu"],
+    table_names: ["n_menu"],
+    summary_keys: ["menuid", "menuname", "translate", "parentid", "seqno", "appid", "windowid", "linkwindowid", "execname", "icon", "reportid"]
+  },
+  {
+    key: "domains",
+    description: "Các domain/list giá trị dùng bởi field.",
+    table_aliases: ["NDomain"],
+    table_names: ["n_domain"],
+    summary_keys: ["domainid", "domainname", "name", "description", "datatype", "controltype", "iseditable", "domainjson"]
+  }
+];
+
+function findAppBuilderTable(
+  tables: Record<string, unknown>[],
+  spec: AppBuilderRecordSpec
+): Record<string, unknown> | undefined {
+  return tables.find(table => {
+    const alias = String(table.alias ?? "").toLowerCase();
+    const tablename = String(table.tablename ?? "").toLowerCase();
+    return spec.table_aliases.some(item => item.toLowerCase() === alias)
+      || spec.table_names.some(item => item.toLowerCase() === tablename);
+  });
+}
+
+function addQueryParams(pathOrUrl: string, params: Record<string, string | number | undefined>): string {
+  const entries = Object.entries(params)
+    .filter((entry): entry is [string, string | number] => entry[1] !== undefined && entry[1] !== "");
+  if (!entries.length) return pathOrUrl;
+
+  const query = entries
+    .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`)
+    .join("&");
+  return `${pathOrUrl}${pathOrUrl.includes("?") ? "&" : "?"}${query}`;
+}
+
+function unwrapZilcodeRecordResult(envelope: ZilcodeApiEnvelope<unknown>): unknown {
+  if (envelope && typeof envelope === "object" && "success" in envelope) {
+    return assertZilcodeSuccess(envelope);
+  }
+
+  const result = asRecord(envelope)?.result;
+  return result ?? envelope;
+}
+
+async function fetchZilcodeRecordsFromTable(
+  env: Env,
+  session: ZilcodeSession,
+  table: Record<string, unknown>,
+  maxRecords: number
+): Promise<Record<string, unknown>[]> {
+  const urlview = String(table.urlview ?? "");
+  if (!urlview) return [];
+
+  const endpoint = addQueryParams(urlview, { limit: maxRecords });
+  const envelope = await callZilcodeJson<unknown>(
+    env,
+    endpoint,
+    {
+      token: session.token,
+      baseUrl: session.base_url,
+      headers: {
+        Range: `0-${Math.max(0, maxRecords - 1)}`,
+        Prefer: "count=exact"
+      }
+    }
+  );
+  return toArrayValues(unwrapZilcodeRecordResult(envelope))
+    .filter((record): record is Record<string, unknown> => Boolean(record) && typeof record === "object");
+}
+
+function summarizeAppBuilderRecord(record: Record<string, unknown>, keys: string[]): Record<string, unknown> {
+  const summary = compactGraphSummary(record, keys);
+  const domainJson = getCaseInsensitiveValue(record, "domainjson");
+  if (typeof domainJson === "string" && domainJson) {
+    try {
+      const parsed = JSON.parse(domainJson);
+      summary.domain_values_count = Array.isArray(parsed) ? parsed.length : undefined;
+      summary.domain_values_preview = Array.isArray(parsed) ? parsed.slice(0, 8) : undefined;
+    } catch {
+      summary.domainjson_chars = domainJson.length;
+    }
+    delete summary.domainjson;
+  }
+
+  return summary;
+}
+
+function groupCount(records: Record<string, unknown>[], key: string): Record<string, number> {
+  return records.reduce<Record<string, number>>((output, record) => {
+    const value = getCaseInsensitiveValue(record, key);
+    if (value === undefined || value === null || value === "") return output;
+    const groupKey = String(value);
+    output[groupKey] = (output[groupKey] ?? 0) + 1;
+    return output;
+  }, {});
+}
+
+function sameZilcodeId(left: unknown, right: unknown): boolean {
+  if (left === undefined || left === null || left === "") return false;
+  if (right === undefined || right === null || right === "") return false;
+  return String(left) === String(right);
+}
+
+function buildAppBuilderInventory(
+  recordLists: Record<string, Record<string, unknown>[]>
+): Record<string, unknown> {
+  const applications = recordLists.applications ?? [];
+  const tables = recordLists.tables ?? [];
+  const columns = recordLists.columns ?? [];
+  const windows = recordLists.windows ?? [];
+  const tabs = recordLists.tabs ?? [];
+  const fields = recordLists.fields ?? [];
+  const menus = recordLists.menus ?? [];
+
+  const apps = applications.map(app => {
+    const appid = getCaseInsensitiveValue(app, "appid");
+    const appTables = tables.filter(table => sameZilcodeId(getCaseInsensitiveValue(table, "appid"), appid));
+    const appWindows = windows.filter(window => sameZilcodeId(getCaseInsensitiveValue(window, "appid"), appid));
+    const appMenus = menus.filter(menu => sameZilcodeId(getCaseInsensitiveValue(menu, "appid"), appid));
+
+    return {
+      appid,
+      appname: getCaseInsensitiveValue(app, "appname"),
+      appcode: getCaseInsensitiveValue(app, "appcode"),
+      description: getCaseInsensitiveValue(app, "description"),
+      tables_count: appTables.length,
+      windows_count: appWindows.length,
+      menus_count: appMenus.length,
+      tables: appTables.map(table => {
+        const tableid = getCaseInsensitiveValue(table, "tableid");
+        const tablename = getCaseInsensitiveValue(table, "tablename");
+        const tableColumns = columns.filter(column =>
+          sameZilcodeId(getCaseInsensitiveValue(column, "tableid"), tableid)
+          || sameZilcodeId(getCaseInsensitiveValue(column, "tablename"), tablename)
+        );
+
+        return {
+          ...table,
+          columns_count: tableColumns.length,
+          columns: tableColumns
+        };
+      }),
+      windows: appWindows.map(window => {
+        const windowid = getCaseInsensitiveValue(window, "windowid");
+        const windowTabs = tabs.filter(tab => sameZilcodeId(getCaseInsensitiveValue(tab, "windowid"), windowid));
+
+        return {
+          ...window,
+          tabs_count: windowTabs.length,
+          tabs: windowTabs.map(tab => {
+            const tabid = getCaseInsensitiveValue(tab, "tabid");
+            const tableid = getCaseInsensitiveValue(tab, "tableid");
+            const tabFields = fields.filter(field =>
+              sameZilcodeId(getCaseInsensitiveValue(field, "tabid"), tabid)
+              || sameZilcodeId(getCaseInsensitiveValue(field, "tableid"), tableid)
+            );
+
+            return {
+              ...tab,
+              fields_count: tabFields.length,
+              fields: tabFields
+            };
+          })
+        };
+      }),
+      menus: appMenus
+    };
+  });
+
+  return {
+    description: "Cây dữ liệu cấu hình hiện có trong App Builder: app -> tables -> columns và app -> windows -> tabs -> fields.",
+    apps_count: apps.length,
+    apps
+  };
+}
+
+async function buildAppBuilderRecords(
+  env: Env,
+  session: ZilcodeSession,
+  appBuilderTables: Record<string, unknown>[],
+  maxRecords: number
+): Promise<Record<string, unknown>> {
+  const collections: Record<string, unknown> = {};
+  const errors: Record<string, unknown>[] = [];
+  const recordLists: Record<string, Record<string, unknown>[]> = {};
+
+  for (const spec of APP_BUILDER_RECORD_SPECS) {
+    const table = findAppBuilderTable(appBuilderTables, spec);
+    if (!table) {
+      errors.push({ key: spec.key, error: "Không tìm thấy bảng metadata tương ứng trong App Builder." });
+      continue;
+    }
+
+    try {
+      const records = await fetchZilcodeRecordsFromTable(env, session, table, maxRecords);
+      const summarized = records.map(record => summarizeAppBuilderRecord(record, spec.summary_keys));
+      recordLists[spec.key] = summarized;
+      collections[spec.key] = {
+        description: spec.description,
+        source_table: {
+          tableid: table.tableid,
+          tablename: table.tablename,
+          alias: table.alias,
+          urlview: table.urlview,
+          columnkey: table.columnkey,
+          columndisplay: table.columndisplay
+        },
+        records_count: summarized.length,
+        maybe_truncated: summarized.length >= maxRecords,
+        records: summarized
+      };
+    } catch (error) {
+      errors.push({
+        key: spec.key,
+        tableid: table.tableid,
+        tablename: table.tablename,
+        alias: table.alias,
+        error: truncateDebugText(error)
+      });
+    }
+  }
+
+  return {
+    max_records_per_table: maxRecords,
+    inventory: buildAppBuilderInventory(recordLists),
+    relationships: {
+      tables_by_appid: groupCount(recordLists.tables ?? [], "appid"),
+      columns_by_tableid: groupCount(recordLists.columns ?? [], "tableid"),
+      windows_by_appid: groupCount(recordLists.windows ?? [], "appid"),
+      tabs_by_windowid: groupCount(recordLists.tabs ?? [], "windowid"),
+      fields_by_tabid: groupCount(recordLists.fields ?? [], "tabid"),
+      menus_by_appid: groupCount(recordLists.menus ?? [], "appid")
+    },
+    collections,
+    errors: errors.length ? errors : undefined
+  };
+}
+
+function resolveAppBuilderApp(session: ZilcodeSession, appidFilter: string): Record<string, unknown> {
+  const apps = listSessionApplicationSummaries(session);
+  const explicit = appidFilter
+    ? apps.find(app => String(app.appid ?? "") === appidFilter)
+    : undefined;
+  const appBuilder = explicit
+    ?? apps.find(app => String(app.appid ?? "") === APP_BUILDER_DEFAULT_APPID)
+    ?? apps.find(app => String(app.app_name ?? "").toLowerCase().includes("app builder"))
+    ?? { appid: appidFilter || APP_BUILDER_DEFAULT_APPID, app_name: "App Builder" };
+
+  return appBuilder;
+}
+
+async function buildZilcodeAppBuilderBlueprint(
   env: Env,
   session: ZilcodeSession,
   args: Record<string, unknown>
@@ -3252,15 +3576,16 @@ async function buildZilcodeSystemBlueprint(
   const appidFilter = getStringArg(args, "appid");
   const includeFields = getOptionalBooleanArg(args, "include_fields", mode === "detail");
   const includeRaw = getOptionalBooleanArg(args, "include_raw", false);
-  const maxApps = getLimitArg(args, "max_apps", 5, 100);
-  const maxWindowsPerApp = getLimitArg(args, "max_windows_per_app", 20, 300);
+  const includeRecords = getOptionalBooleanArg(args, "include_records", true);
+  const maxRecordsPerTable = getLimitArg(args, "max_records_per_table", 500, 5000);
+  const maxWindowsPerApp = getLimitArg(args, "max_windows_per_app", 50, 300);
   const nodeIds = getNodeIdsArg(args);
   const depth = getLimitArg(args, "depth", 1, 4);
-  const apps = listSessionApplicationSummaries(session)
-    .filter(app => !appidFilter || String(app.appid ?? "") === appidFilter)
-    .slice(0, maxApps);
+  const appBuilderApp = resolveAppBuilderApp(session, appidFilter);
+  const apps = [appBuilderApp];
   const appBlueprints: Record<string, unknown>[] = [];
   const errors: Record<string, unknown>[] = [];
+  let appBuilderRecords: Record<string, unknown> | undefined;
 
   for (const app of apps) {
     const appid = String(app.appid ?? "");
@@ -3289,6 +3614,10 @@ async function buildZilcodeSystemBlueprint(
       const windowIds = extractWindowIdsFromAppMetadata(metadata).slice(0, maxWindowsPerApp);
       const windows: Record<string, unknown>[] = [];
       const windowErrors: Record<string, unknown>[] = [];
+
+      if (includeRecords) {
+        appBuilderRecords = await buildAppBuilderRecords(env, session, tables, maxRecordsPerTable);
+      }
 
       for (const windowid of windowIds) {
         try {
@@ -3345,26 +3674,37 @@ async function buildZilcodeSystemBlueprint(
 
   return {
     mode,
+    scope: "app_builder",
     session: sessionSummary,
     scan: {
+      app_builder_appid: appBuilderApp.appid,
       attempted_apps_count: apps.length,
       attempted_apps: apps.map(app => ({
         appid: app.appid,
         app_name: app.app_name,
         app_code: app.app_code
-      }))
+      })),
+      ignored_session_apps: listSessionApplicationSummaries(session)
+        .filter(app => String(app.appid ?? "") !== String(appBuilderApp.appid ?? ""))
+        .map(app => ({
+          appid: app.appid,
+          app_name: app.app_name,
+          app_code: app.app_code
+        }))
     },
     filters: {
-      appid: appidFilter || undefined,
+      appid: String(appBuilderApp.appid ?? APP_BUILDER_DEFAULT_APPID),
       node_ids: nodeIds.length ? nodeIds : undefined,
       depth: mode === "subgraph" ? depth : undefined,
       include_fields: includeFields,
       include_raw: includeRaw,
-      max_apps: maxApps,
+      include_records: includeRecords,
+      max_records_per_table: includeRecords ? maxRecordsPerTable : undefined,
       max_windows_per_app: maxWindowsPerApp
     },
     apps_count: appBlueprints.length,
     overview,
+    app_builder_records: appBuilderRecords,
     graph: focusedGraph,
     details_count: details.length || undefined,
     details: details.length ? details : undefined,
