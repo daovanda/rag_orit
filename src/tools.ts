@@ -1,3 +1,74 @@
+const writeTargets = [
+  ["app", "ứng dụng/NApplication"],
+  ["table", "bảng metadata/NTable"],
+  ["column", "cột metadata/NColumn"],
+  ["window", "màn hình/NWindow"],
+  ["tab", "tab/NTab"],
+  ["field", "field/NField"],
+  ["menu", "menu/NMenu"],
+  ["domain", "domain/NDomain"]
+] as const;
+
+function createTool(target: string, label: string): Record<string, unknown> {
+  return {
+    name: `app_builder_create_${target}`,
+    description:
+      `Ghi dữ liệu App Builder: tạo mới ${label}. Chỉ dùng sau khi đã đọc zilcode_get_app_builder_blueprint, đã validate bằng app_builder_validate_plan và người dùng đã xác nhận rõ ràng. Tool bị chặn nếu thiếu confirmed=true.`,
+    parameters: {
+      type: "object",
+      properties: {
+        record: {
+          type: "object",
+          description: `Record cần tạo trong ${label}. Chỉ truyền các field chắc chắn đúng theo blueprint/plan đã validate.`
+        },
+        confirmed: {
+          type: "boolean",
+          description: "Bắt buộc true khi người dùng đã xác nhận plan. Nếu chưa xác nhận, không gọi tool này."
+        },
+        confirmation_note: {
+          type: "string",
+          description: "Tóm tắt ngắn câu xác nhận của người dùng hoặc lý do được phép ghi."
+        }
+      },
+      required: ["record", "confirmed"]
+    }
+  };
+}
+
+function updateTool(target: string, label: string): Record<string, unknown> {
+  return {
+    name: `app_builder_update_${target}`,
+    description:
+      `Ghi dữ liệu App Builder: cập nhật ${label}. Phải resolve ID thật từ blueprint trước, validate plan và chỉ chạy khi người dùng đã xác nhận rõ ràng. Tool bị chặn nếu thiếu confirmed=true.`,
+    parameters: {
+      type: "object",
+      properties: {
+        key_value: {
+          type: "string",
+          description: "Giá trị khóa chính của record cần cập nhật, ví dụ appid/tableid/windowid/tabid/fieldid/menuid/domainid."
+        },
+        where: {
+          type: "string",
+          description: "Điều kiện where rõ ràng nếu không dùng key_value. Chỉ dùng khi đã chắc chắn không cập nhật nhầm nhiều record."
+        },
+        patch: {
+          type: "object",
+          description: `Các field cần cập nhật cho ${label}. Không truyền field không đổi hoặc field chưa chắc chắn.`
+        },
+        confirmed: {
+          type: "boolean",
+          description: "Bắt buộc true khi người dùng đã xác nhận plan. Nếu chưa xác nhận, không gọi tool này."
+        },
+        confirmation_note: {
+          type: "string",
+          description: "Tóm tắt ngắn câu xác nhận của người dùng hoặc lý do được phép ghi."
+        }
+      },
+      required: ["patch", "confirmed"]
+    }
+  };
+}
+
 export const TOOLS = [
   {
     name: "general_chat",
@@ -17,7 +88,7 @@ export const TOOLS = [
   {
     name: "rag_search",
     description:
-      "Tra cứu kho tài liệu Zilcode đã ingest, gồm tài liệu hướng dẫn sử dụng, quản trị và doc/logic về cách Zilcode hoạt động. Dùng khi cần giải thích tính năng, hướng dẫn thao tác, kiến trúc, API contract, domain model, window/tab/field config, hoặc cần kiến thức logic để gọi tool Zilcode đúng hơn.",
+      "Tra cứu kho tài liệu Zilcode đã ingest, gồm tài liệu hướng dẫn sử dụng, quản trị và doc/logic về cách Zilcode/App Builder hoạt động. Dùng khi cần giải thích tính năng, hướng dẫn thao tác, kiến trúc, API contract, domain model, window/tab/field config, hoặc cần playbook để lập plan tạo/sửa App Builder.",
     parameters: {
       type: "object",
       properties: {
@@ -42,11 +113,11 @@ export const TOOLS = [
         },
         width: {
           type: "string",
-          description: "Chieu rong anh, mac dinh 1024. Gia tri hop le tu 256 den 1920."
+          description: "Chiều rộng ảnh, mặc định 1024. Giá trị hợp lệ từ 256 đến 1920."
         },
         height: {
           type: "string",
-          description: "Chieu cao anh, mac dinh 768. Gia tri hop le tu 256 den 1920."
+          description: "Chiều cao ảnh, mặc định 768. Giá trị hợp lệ từ 256 đến 1920."
         }
       },
       required: ["prompt"]
@@ -101,5 +172,31 @@ export const TOOLS = [
         }
       }
     }
-  }
+  },
+  {
+    name: "app_builder_validate_plan",
+    description:
+      "Validate kế hoạch tạo/sửa App Builder trước khi ghi. Tool chỉ đọc blueprint, kiểm tra thiếu field bắt buộc, trùng app/table/window/menu/domain, thiếu quan hệ app/table/window/tab/column và trả blocking_errors/warnings. Luôn gọi trước các create/update tool.",
+    parameters: {
+      type: "object",
+      properties: {
+        intent: {
+          type: "string",
+          description: "Ý định tổng quát, ví dụ create_app, add_window, update_field."
+        },
+        plan: {
+          type: "object",
+          description: "Plan có cấu trúc, nên có steps/actions. Mỗi step có action, target, record hoặc patch."
+        },
+        actions: {
+          type: "array",
+          description: "Danh sách thao tác nếu không truyền plan.steps."
+        }
+      }
+    }
+  },
+  ...writeTargets.flatMap(([target, label]) => [
+    createTool(target, label),
+    updateTool(target, label)
+  ])
 ];

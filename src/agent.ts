@@ -15,6 +15,12 @@ import { generateChartImage, runChatModel, searchRag } from "./ai";
 import { TOOLS } from "./tools";
 import { asRecord, getStringArg, truncateDebugText } from "./utils";
 import {
+  getWriteToolRoute,
+  getWriteToolTarget,
+  validateAppBuilderPlan,
+  writeAppBuilderRecord
+} from "./app-builder-write";
+import {
   buildZilcodeAppBuilderBlueprint,
   getBlueprintMode,
   getLimitArg,
@@ -168,7 +174,59 @@ Trả lời ngắn gọn, tự nhiên, không nhắc đến function/tool nội 
       return { content: JSON.stringify(blueprint, null, 2) };
     }
 
+    case "app_builder_validate_plan": {
+      if (!zilcodeSession) return noZilcodeSessionResult();
+
+      addDebugStep(debugSteps, "tool.app_builder_validate_plan", "start", "Validate kế hoạch ghi App Builder.", {
+        has_plan: Boolean(tool.arguments.plan),
+        actions_count: Array.isArray(tool.arguments.actions) ? tool.arguments.actions.length : undefined
+      });
+
+      const validation = await validateAppBuilderPlan(env, zilcodeSession.session, tool.arguments);
+
+      addDebugStep(debugSteps, "tool.app_builder_validate_plan", "ok", "Đã validate kế hoạch ghi App Builder.", {
+        valid: validation.valid,
+        blocking_errors_count: Array.isArray(validation.blocking_errors) ? validation.blocking_errors.length : 0,
+        warnings_count: Array.isArray(validation.warnings) ? validation.warnings.length : 0
+      });
+
+      return { content: JSON.stringify(validation, null, 2) };
+    }
+
     default:
+      if (tool.name.startsWith("app_builder_create_") || tool.name.startsWith("app_builder_update_")) {
+        if (!zilcodeSession) return noZilcodeSessionResult();
+
+        const mode = getWriteToolRoute(tool.name);
+        const target = getWriteToolTarget(tool.name);
+        if (!mode || !target) {
+          return { content: `Không nhận diện được write tool App Builder: ${tool.name}` };
+        }
+
+        addDebugStep(debugSteps, "tool.app_builder_write", "start", "Gọi write tool App Builder.", {
+          tool: tool.name,
+          mode,
+          target,
+          confirmed: tool.arguments.confirmed === true || tool.arguments.confirmed === "true"
+        });
+
+        const result = await writeAppBuilderRecord(env, zilcodeSession.session, {
+          mode,
+          target,
+          args: tool.arguments
+        });
+
+        addDebugStep(debugSteps, "tool.app_builder_write", result.ok ? "ok" : "skip", "Write tool App Builder đã trả kết quả.", {
+          tool: tool.name,
+          mode,
+          target,
+          ok: result.ok,
+          blocked: result.blocked,
+          endpoint: result.endpoint
+        });
+
+        return { content: JSON.stringify(result, null, 2) };
+      }
       return { content: `Không nhận diện được công cụ: ${tool.name}` };
   }
 }
@@ -309,6 +367,10 @@ function cleanMarkdownArtifacts(answer: string): string {
     .replace(/\*\*([^*\n]+)\*\*/g, "$1")
     .replace(/`([^`\n]+)`/g, "$1")
     .trim();
+}
+
+function isAppBuilderWriteTool(name: string): boolean {
+  return name.startsWith("app_builder_create_") || name.startsWith("app_builder_update_");
 }
 
 export function sanitizeChatHistory(history: unknown): AIMessage[] {
@@ -462,6 +524,19 @@ Sau khi đã có đủ thông tin từ công cụ, hãy trả lời ngay thay v�
 Khi đã dùng rag_search và có kết quả, không gọi general_chat để hỏi lại kiến thức chung; hãy tổng hợp câu trả lời từ kết quả rag_search.
 Khi đã dùng rag_search nhưng không tìm thấy thông tin phù hợp, hãy nói rõ là chưa tìm thấy trong tài liệu hiện có thay vì bịa nội dung.
 Trả lời đúng mức chi tiết theo yêu cầu của người dùng, cụ thể và ưu tiên các bước thao tác rõ ràng.`
+    },
+    {
+      role: "system",
+      content: `Quy tắc ghi App Builder:
+- Bộ tool ghi hiện có: app_builder_validate_plan và các app_builder_create_*/app_builder_update_* cho app, table, column, window, tab, field, menu, domain.
+- Với yêu cầu tạo/sửa App Builder, luôn đọc zilcode_get_app_builder_blueprint trước. Nếu cần playbook, gọi rag_search với tài liệu app-builder-agent-create-guide.
+- Sau khi hiểu blueprint, hãy lập plan có steps rõ ràng rồi gọi app_builder_validate_plan.
+- Nếu validate có blocking_errors, không gọi write tool; hãy hỏi lại hoặc sửa plan.
+- Nếu validate hợp lệ, hãy trình bày plan cho người dùng xác nhận. Không gọi create/update tool trong cùng lượt nếu người dùng chưa xác nhận rõ ràng.
+- Chỉ truyền confirmed=true cho create/update tool khi người dùng đã xác nhận plan ở lượt trước hoặc trong câu hiện tại một cách rõ ràng.
+- Mỗi create/update tool chỉ ghi một record metadata. Với thao tác nhiều bước, gọi các write tool theo thứ tự phụ thuộc: app -> table -> column -> window -> tab -> field -> menu/domain.
+- Sau bất kỳ write tool thành công nào, phải gọi lại zilcode_get_app_builder_blueprint để xác minh record và quan hệ đã xuất hiện đúng trước khi báo hoàn tất.
+- Không tự bịa ID. ID phải lấy từ blueprint hoặc từ kết quả create trả về. Update phải dùng key_value/where rõ ràng.`
     },
     ...chatHistory,
     {
@@ -642,6 +717,10 @@ Trả lời đúng mức chi tiết theo yêu cầu của người dùng, cụ t
       if (toolCall.name === "zilcode_get_app_builder_blueprint") {
         const blueprintMode = getBlueprintMode(toolCall.arguments);
         shouldLetModelInspectToolResult = blueprintMode === "graph" || blueprintMode === "subgraph";
+      }
+
+      if (isAppBuilderWriteTool(toolCall.name)) {
+        shouldLetModelInspectToolResult = true;
       }
     }
 

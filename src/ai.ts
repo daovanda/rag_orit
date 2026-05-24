@@ -134,7 +134,7 @@ function toOpenRouterTools(tools?: typeof TOOLS) {
     type: "function",
     function: {
       name: tool.name,
-      description: getRuntimeToolDescription(tool.name, tool.description),
+      description: getRuntimeToolDescription(String(tool.name), String(tool.description ?? "")),
       parameters: tool.parameters
     }
   }));
@@ -157,7 +157,7 @@ function buildCloudflareChatRequest(
       ...request,
       tools: request.tools?.map(tool => ({
         ...tool,
-        description: getRuntimeToolDescription(tool.name, tool.description)
+        description: getRuntimeToolDescription(String(tool.name), String(tool.description ?? ""))
       }))
     } as unknown as Record<string, unknown>;
   }
