@@ -1,0 +1,754 @@
+import {
+  CHAT_MODEL,
+  CHART_IMAGE_MODEL,
+  GENERAL_CHAT_MAX_TOKENS,
+  GENERAL_CHAT_MODEL,
+  MAX_HISTORY_CONTENT_CHARS,
+  MAX_HISTORY_MESSAGES,
+  RAG_FINAL_MAX_TOKENS,
+  TOOL_RESULT_CONTEXT_MAX_CHARS,
+  TOOL_SELECTION_MAX_TOKENS,
+  type Env
+} from "./config";
+import { addDebugStep, type DebugStep } from "./debug";
+import { generateChartImage, runChatModel, searchRag } from "./ai";
+import { TOOLS } from "./tools";
+import { asRecord, getStringArg, truncateDebugText } from "./utils";
+import {
+  buildZilcodeAppBuilderBlueprint,
+  getBlueprintMode,
+  getLimitArg,
+  getNodeIdsArg,
+  getOptionalBooleanArg,
+  noZilcodeSessionResult,
+  type ZilcodeSessionState
+} from "./zilcode";
+
+interface ToolCall {
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
+interface ToolExecutionResult {
+  content: string;
+  sources?: RagSource[];
+  embedding_debug?: EmbeddingDebug;
+  rag_query_debug?: RagQueryDebug;
+}
+
+interface EmbeddingDebug {
+  provider: "cloudflare" | "openrouter";
+  model: string;
+  dimensions: number;
+  fallback: boolean;
+}
+
+interface RagQueryDebug {
+  original_query: string;
+  rewritten_query: string;
+  used: boolean;
+  reason: string;
+  model?: string;
+}
+
+async function executeTool(
+  tool: ToolCall,
+  env: Env,
+  chatHistory: AIMessage[] = [],
+  debugSteps?: DebugStep[],
+  zilcodeSession?: ZilcodeSessionState | null
+): Promise<ToolExecutionResult> {
+
+  switch (tool.name) {
+
+    case "general_chat": {
+      const message = getStringArg(tool.arguments, "message");
+      if (!message) return { content: "Lỗi: bắt buộc phải có tin nhắn để trả lời." };
+
+      addDebugStep(debugSteps, "tool.general_chat", "start", "Gọi model chat thường.", {
+        model: GENERAL_CHAT_MODEL,
+        history_messages: chatHistory.length
+      });
+
+      const response = await runChatModel(GENERAL_CHAT_MODEL, {
+        max_tokens: GENERAL_CHAT_MAX_TOKENS,
+        messages: [
+          {
+            role: "system",
+            content: `Bạn là trợ lý hội thoại.
+Hãy trả lời trực tiếp bằng cùng ngôn ngữ với người hỏi, trừ khi người hỏi yêu cầu ngôn ngữ khác.
+Bạn có thể dùng kiến thức sẵn có để trả lời câu hỏi chung.
+Nếu người dùng hỏi bạn là ai, hãy nói bạn là trợ lý AI có thể trò chuyện thông thường và hỗ trợ tra cứu thông tin Zilcode khi cần.
+Trả lời ngắn gọn, tự nhiên, không nhắc đến function/tool nội bộ.`
+          },
+          ...chatHistory,
+          { role: "user", content: message }
+        ]
+      }, env);
+
+      addDebugStep(debugSteps, "tool.general_chat", "ok", "general_chat trả kết quả.", {
+        response_chars: (response.response ?? "").length
+      });
+
+      return { content: response.response ?? "Không tạo được câu trả lời." };
+    }
+
+    case "rag_search": {
+      const query = getStringArg(tool.arguments, "query");
+      if (!query) return { content: "Lỗi: bắt buộc phải có câu truy vấn." };
+      return searchRag(query, env, chatHistory, debugSteps);
+    }
+
+    case "zilcode_get_app_builder_blueprint": {
+      if (!zilcodeSession) return noZilcodeSessionResult();
+      const mode = getBlueprintMode(tool.arguments);
+
+      addDebugStep(debugSteps, "tool.zilcode_get_app_builder_blueprint", "start", "Lấy App Builder blueprint.", {
+        mode,
+        appid: getStringArg(tool.arguments, "appid") || undefined,
+        node_id: getStringArg(tool.arguments, "node_id") || undefined,
+        node_ids: getNodeIdsArg(tool.arguments),
+        depth: getLimitArg(tool.arguments, "depth", 1, 4),
+        include_fields: getOptionalBooleanArg(tool.arguments, "include_fields", mode === "detail"),
+        include_raw: getOptionalBooleanArg(tool.arguments, "include_raw", false),
+        include_records: getOptionalBooleanArg(tool.arguments, "include_records", true),
+        max_records_per_table: getLimitArg(tool.arguments, "max_records_per_table", 500, 5000)
+      });
+
+      const blueprint = await buildZilcodeAppBuilderBlueprint(env, zilcodeSession.session, tool.arguments);
+      const graph = asRecord(blueprint.graph);
+      const graphNodes = Array.isArray(graph?.nodes) ? graph.nodes.length : undefined;
+      const graphEdges = Array.isArray(graph?.edges) ? graph.edges.length : undefined;
+      const appErrors = Array.isArray(blueprint.errors)
+        ? blueprint.errors
+          .filter((error): error is Record<string, unknown> => Boolean(error) && typeof error === "object")
+          .map(error => ({
+            appid: error.appid,
+            app_name: error.app_name,
+            error: truncateDebugText(error.error)
+          }))
+        : [];
+      const windowErrors = Array.isArray(graph?.nodes)
+        ? graph.nodes
+          .filter((node): node is Record<string, unknown> => Boolean(node) && typeof node === "object")
+          .map(node => ({
+            id: node.id,
+            type: node.type,
+            label: node.label,
+            appid: node.appid,
+            summary: asRecord(node.summary)
+          }))
+          .filter(node => node.type === "window" && node.summary?.error)
+          .map(node => ({
+            node_id: node.id,
+            appid: node.appid,
+            windowid: node.summary?.windowid,
+            label: node.label,
+            error: truncateDebugText(node.summary?.error)
+          }))
+        : [];
+      const recordErrors = Array.isArray(asRecord(blueprint.app_builder_records)?.errors)
+        ? asRecord(blueprint.app_builder_records)?.errors
+        : [];
+
+      addDebugStep(debugSteps, "tool.zilcode_get_app_builder_blueprint", "ok", "Đã lấy App Builder blueprint.", {
+        mode: blueprint.mode,
+        scan: blueprint.scan,
+        apps_count: blueprint.apps_count,
+        graph_nodes: graphNodes,
+        graph_edges: graphEdges,
+        app_errors_count: appErrors.length,
+        app_errors: appErrors,
+        window_errors_count: windowErrors.length,
+        window_errors: windowErrors,
+        record_errors_count: Array.isArray(recordErrors) ? recordErrors.length : 0,
+        record_errors: recordErrors
+      });
+
+      return { content: JSON.stringify(blueprint, null, 2) };
+    }
+
+    default:
+      return { content: `Không nhận diện được công cụ: ${tool.name}` };
+  }
+}
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+
+interface ChatHistoryMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+interface GeneratedImage {
+  mime_type: "image/png";
+  data_url: string;
+  prompt: string;
+  width: number;
+  height: number;
+}
+
+interface RagSource {
+  id: string;
+  title?: string;
+  filename?: string;
+  source_path?: string;
+  module: string;
+  doc_group?: string;
+  logic_area?: string;
+  audience?: string;
+  section_path?: string;
+  heading: string;
+  vector_score?: number;
+  rerank_rank?: number;
+}
+
+interface AgenticLoopResult {
+  answer: string;
+  toolsCalled: string[];
+  images?: GeneratedImage[];
+  sources?: RagSource[];
+  embedding_debug?: EmbeddingDebug;
+  rag_query_debug?: RagQueryDebug;
+}
+
+interface AIMessage {
+  role: "system" | "user" | "assistant" | "tool";
+  content: string;
+  tool_call_id?: string;
+}
+
+interface ToolResultRecord {
+  name: string;
+  content: string;
+}
+
+// ─── Agentic loop ─────────────────────────────────────────────────────────────
+
+const MAX_ITERATIONS = 6;
+const AVAILABLE_TOOL_NAMES = new Set(TOOLS.map(tool => tool.name));
+
+function formatToolResultsForFinalAnswer(toolResults: ToolResultRecord[]): string {
+  return toolResults
+    .map((result, index) => [
+      `[KET_QUA_CONG_CU ${index + 1}: ${result.name}]`,
+      compactToolContentForFinalAnswer(result),
+      `[HET_KET_QUA_CONG_CU ${index + 1}]`
+    ].join("\n"))
+    .join("\n\n");
+}
+
+function compactToolContentForFinalAnswer(result: ToolResultRecord): string {
+  if (result.name !== "zilcode_get_app_builder_blueprint") return result.content;
+
+  try {
+    const data = JSON.parse(result.content) as Record<string, unknown>;
+    const graph = asRecord(data.graph);
+    const nodes = Array.isArray(graph?.nodes)
+      ? graph.nodes
+        .filter((node): node is Record<string, unknown> => Boolean(node) && typeof node === "object")
+        .map(node => ({
+          id: node.id,
+          type: node.type,
+          label: node.label,
+          appid: node.appid,
+          counts: node.counts,
+          summary: node.summary
+        }))
+      : [];
+    const edges = Array.isArray(graph?.edges)
+      ? graph.edges
+        .filter((edge): edge is Record<string, unknown> => Boolean(edge) && typeof edge === "object")
+        .map(edge => ({
+          from: edge.from,
+          to: edge.to,
+          type: edge.type,
+          metadata: edge.metadata
+        }))
+      : [];
+
+    return JSON.stringify({
+      mode: data.mode,
+      session: asRecord(data.overview)?.session ?? data.session,
+      scan: data.scan,
+      filters: data.filters,
+      apps_count: data.apps_count,
+      overview: data.overview,
+      app_builder_records: data.app_builder_records,
+      graph: graph ? {
+        node_counts: graph.node_counts,
+        edge_count: graph.edge_count,
+        nodes,
+        edges
+      } : undefined,
+      details_count: data.details_count,
+      details: data.details,
+      errors: data.errors,
+      note: data.note
+    }, null, 2);
+  } catch {
+    return result.content;
+  }
+}
+
+function truncateToolContext(context: string): string {
+  if (context.length <= TOOL_RESULT_CONTEXT_MAX_CHARS) return context;
+
+  return [
+    context.slice(0, TOOL_RESULT_CONTEXT_MAX_CHARS).trim(),
+    "",
+    `[GHI_CHU_HE_THONG: Ket qua tool da duoc cat bot vi qua dai. Do dai goc: ${context.length} ky tu.]`
+  ].join("\n");
+}
+
+function cleanMarkdownArtifacts(answer: string): string {
+  return answer
+    .replace(/^\s*#{1,6}\s+/gm, "")
+    .replace(/^\s*[-*+]\s+/gm, "")
+    .replace(/\*\*([^*\n]+)\*\*/g, "$1")
+    .replace(/`([^`\n]+)`/g, "$1")
+    .trim();
+}
+
+export function sanitizeChatHistory(history: unknown): AIMessage[] {
+  if (!Array.isArray(history)) return [];
+
+  return history
+    .filter((message): message is ChatHistoryMessage =>
+      message
+      && typeof message === "object"
+      && (message as ChatHistoryMessage).role !== undefined
+      && ((message as ChatHistoryMessage).role === "user" || (message as ChatHistoryMessage).role === "assistant")
+      && typeof (message as ChatHistoryMessage).content === "string"
+    )
+    .slice(-MAX_HISTORY_MESSAGES)
+    .map(message => ({
+      role: message.role,
+      content: message.content.trim().slice(0, MAX_HISTORY_CONTENT_CHARS)
+    }))
+    .filter(message => message.content.length > 0);
+}
+
+async function createFinalAnswerFromRag(
+  userMessage: string,
+  toolResults: ToolResultRecord[],
+  env: Env,
+  chatHistory: AIMessage[] = [],
+  debugSteps?: DebugStep[]
+): Promise<string> {
+  addDebugStep(debugSteps, "rag.final_answer", "start", "Tạo câu trả lời cuối từ context RAG.", {
+    model: CHAT_MODEL,
+    tool_results: toolResults.length,
+    history_messages: chatHistory.length
+  });
+
+  const response = await runChatModel(CHAT_MODEL, {
+    max_tokens: RAG_FINAL_MAX_TOKENS,
+    temperature: 0.2,
+    messages: [
+      {
+        role: "system",
+        content: `Bạn là trợ lý hỗ trợ Zilcode.
+Hãy trả lời bằng cùng ngôn ngữ với người hỏi.
+Dựa chủ yếu vào kết quả rag_search trong ngữ cảnh được cung cấp.
+Nếu có kết quả general_chat trong ngữ cảnh, chỉ xem là thông tin phụ; không dùng nó để phủ định hoặc thay thế tài liệu Zilcode.
+Nếu tài liệu không đủ thông tin, hãy nói rõ phần nào chưa tìm thấy trong tài liệu hiện có.
+Không nhắc đến tool/function nội bộ.
+Tài liệu nguồn có thể chứa cú pháp Markdown như ###, -, +, ** hoặc dấu backtick. Không sao chép các ký tự định dạng đó vào câu trả lời cuối; hãy chuyển thành văn bản sạch, tự nhiên.
+Trả lời đúng mức chi tiết theo yêu cầu của người dùng. Nếu người dùng yêu cầu chi tiết, hãy chia thành các phần/bước rõ ràng; nếu không yêu cầu chi tiết, hãy trả lời gọn.`
+      },
+      ...chatHistory,
+      { role: "user", content: userMessage },
+      {
+        role: "assistant",
+        content: `Ngữ cảnh từ các công cụ:\n${formatToolResultsForFinalAnswer(toolResults)}`
+      }
+    ]
+  }, env);
+
+  const answer = cleanMarkdownArtifacts(response.response ?? "Không tạo được câu trả lời.");
+  addDebugStep(debugSteps, "rag.final_answer", "ok", "Đã tạo câu trả lời cuối từ RAG.", {
+    answer_chars: answer.length
+  });
+
+  return answer;
+}
+
+async function createFinalAnswerFromToolResults(
+  userMessage: string,
+  toolResults: ToolResultRecord[],
+  env: Env,
+  chatHistory: AIMessage[] = [],
+  debugSteps?: DebugStep[]
+): Promise<string> {
+  const toolContext = truncateToolContext(formatToolResultsForFinalAnswer(toolResults));
+
+  addDebugStep(debugSteps, "tools.final_answer", "start", "Tạo câu trả lời cuối từ kết quả tool.", {
+    model: CHAT_MODEL,
+    tool_results: toolResults.map(result => result.name),
+    context_chars: toolContext.length
+  });
+
+  const response = await runChatModel(CHAT_MODEL, {
+    max_tokens: RAG_FINAL_MAX_TOKENS,
+    temperature: 0.2,
+    messages: [
+      {
+        role: "system",
+        content: `Bạn là trợ lý hỗ trợ Zilcode.
+Hãy trả lời bằng cùng ngôn ngữ với người hỏi.
+Dựa vào kết quả công cụ read-only đã cung cấp để trả lời câu hỏi.
+Không nhắc đến tool/function nội bộ.
+Nếu kết quả có lỗi hoặc phần chưa lấy được, hãy nói rõ phần nào chưa đọc được thay vì bỏ qua.
+Nếu kết quả có trường overview, hãy ưu tiên dùng overview để trả lời phần tổng quan; chỉ dùng graph/details để bổ sung khi cần.
+Viết cho người dùng cuối đọc, không viết như log kỹ thuật. Không mở đầu bằng tên tool. Không dùng bảng Markdown dài.
+Với câu hỏi tổng quan như "hệ thống của tôi hiện tại", hãy trình bày ngắn gọn theo thứ tự:
+1. Người dùng đang đăng nhập với role/org nào.
+2. Hệ thống đang có bao nhiêu app.
+3. Mỗi app chính dùng để làm gì hoặc đang có bao nhiêu bảng/menu/window/domain/relation.
+4. Nêu vài ví dụ tiêu biểu, không liệt kê toàn bộ bảng nếu có nhiều.
+5. Nói rõ phần nào chưa đọc được hoặc có lỗi.
+Kết thúc bằng một gợi ý hỏi sâu tự nhiên, ví dụ xem chi tiết app, window, bảng hoặc quan hệ.`
+      },
+      ...chatHistory,
+      { role: "user", content: userMessage },
+      {
+        role: "assistant",
+        content: `Ngữ cảnh từ các công cụ:\n${toolContext}`
+      }
+    ]
+  }, env);
+
+  const answer = cleanMarkdownArtifacts(response.response ?? "Không tạo được câu trả lời.");
+  addDebugStep(debugSteps, "tools.final_answer", "ok", "Đã tạo câu trả lời cuối từ kết quả tool.", {
+    answer_chars: answer.length
+  });
+
+  return answer;
+}
+
+export async function runAgenticLoop(
+  userMessage: string,
+  env: Env,
+  chatHistory: AIMessage[] = [],
+  debugSteps?: DebugStep[],
+  zilcodeSession?: ZilcodeSessionState | null
+): Promise<AgenticLoopResult> {
+
+  addDebugStep(debugSteps, "agent.start", "start", "Bắt đầu agentic loop.", {
+    message_chars: userMessage.length,
+    history_messages: chatHistory.length,
+    tools: TOOLS.map(tool => tool.name)
+  });
+
+  const messages: AIMessage[] = [
+    {
+      role: "system",
+      content: `Bạn là trợ lý AI hội thoại và trợ lý hỗ trợ nền tảng Zilcode.
+Hãy trả lời bằng cùng ngôn ngữ với người hỏi. Nếu người hỏi yêu cầu một ngôn ngữ hoặc phong cách cụ thể, hãy làm theo yêu cầu đó.
+Bạn có các công cụ để xử lý từng loại yêu cầu. Hãy chọn công cụ phù hợp nhất thay vì nói rằng yêu cầu nằm ngoài phạm vi công cụ.
+Dùng general_chat cho chào hỏi, cảm ơn, trò chuyện thông thường, hỏi bạn là ai/có thể làm gì, hỏi bạn có trả lời ngoài Zilcode không, câu hỏi kiến thức chung, hoặc câu hỏi không liên quan đến Zilcode.
+Chỉ dùng rag_search khi câu hỏi cần thông tin cụ thể từ tài liệu Zilcode, ví dụ tính năng, khái niệm, hướng dẫn thao tác, hoặc cách sử dụng Zilcode.
+Nếu Zilcode là chủ đề chính cần giải thích, hoặc người dùng hỏi Zilcode là gì, tính năng/cách dùng/hướng dẫn thao tác trong Zilcode, hãy ưu tiên rag_search thay vì general_chat.
+Dùng draw_chart khi người dùng yêu cầu vẽ/tạo ảnh biểu đồ, sơ đồ, flowchart, timeline, mindmap, dashboard mockup hoặc infographic. Với biểu đồ cần số liệu chính xác tuyệt đối, hãy nói ngắn gọn rằng ảnh AI chỉ mang tính minh họa và vẫn có thể tạo ảnh nếu người dùng muốn.
+Bộ công cụ hiện tại gồm: general_chat, rag_search, draw_chart, zilcode_get_app_builder_blueprint.
+Khi cần đọc cấu hình thật cho Role System dùng App Builder, dùng zilcode_get_app_builder_blueprint theo flow graph-first: gọi mode=graph trước để lấy bản đồ compact của App Builder gồm applications, tables, columns, windows, tabs, fields, menus, domains, relations và các cạnh quan hệ. Nếu graph đã đủ để trả lời thì trả lời ngay. Nếu cần đào sâu một app/window/tab/table/field cụ thể, gọi lại mode=subgraph hoặc mode=detail với node_id/node_ids lấy từ graph.
+Khi trả lời từ App Builder blueprint, hãy viết dễ hiểu cho người dùng cấu hình hệ thống: ưu tiên trường overview và app_builder_records.inventory nếu có, không nhắc tên tool, không dùng bảng dài khi không cần. Danh sách app thật cần phân tích nằm trong app_builder_records.inventory.apps, không phải danh sách app trong session. Hãy tập trung vào App Builder, app hiện có, bảng, cột, window, tab, field, menu và các ràng buộc cấu hình.
+Khi dùng rag_search, thường chỉ gọi một lần với query tổng hợp tốt. Chỉ gọi lại nếu kết quả chưa đủ và query mới khác rõ ràng về ý định hoặc phạm vi; không gọi lại cùng query hoặc query tương đương.
+Dùng zilcode_get_app_builder_blueprint khi người dùng hỏi dữ liệu/cấu trúc App Builder thật của tài khoản đang đăng nhập: hiện có app nào, app có bảng nào, bảng có cột nào, window/tab/field/menu hiện có ra sao, hoặc cần chuẩn bị tạo app/window/tab/table/field. Nếu chưa đăng nhập Zilcode, hãy yêu cầu người dùng đăng nhập ở giao diện chat trước.
+Với câu hỏi ngoài phạm vi Zilcode, hãy dùng general_chat.
+Sau khi đã có đủ thông tin từ công cụ, hãy trả lời ngay thay vì tiếp tục gọi thêm công cụ. Nếu general_chat đã trả lời và chưa dùng rag_search, hãy dùng nội dung đó làm cơ sở cho câu trả lời cuối cùng.
+Khi đã dùng rag_search và có kết quả, không gọi general_chat để hỏi lại kiến thức chung; hãy tổng hợp câu trả lời từ kết quả rag_search.
+Khi đã dùng rag_search nhưng không tìm thấy thông tin phù hợp, hãy nói rõ là chưa tìm thấy trong tài liệu hiện có thay vì bịa nội dung.
+Trả lời đúng mức chi tiết theo yêu cầu của người dùng, cụ thể và ưu tiên các bước thao tác rõ ràng.`
+    },
+    ...chatHistory,
+    {
+      role: "user",
+      content: userMessage
+    }
+  ];
+
+  const toolsCalled: string[] = [];
+  const toolResults: ToolResultRecord[] = [];
+  const ragSources: RagSource[] = [];
+  let embeddingDebug: EmbeddingDebug | undefined;
+  let ragQueryDebug: RagQueryDebug | undefined;
+  let hasRagSearchResult = false;
+
+  for (let i = 0; i < MAX_ITERATIONS; i++) {
+    console.log(`[VÒNG LẶP] Lần ${i + 1}`);
+    addDebugStep(debugSteps, "agent.tool_selection", "start", "Model chọn tool hoặc trả lời trực tiếp.", {
+      iteration: i + 1,
+      model: CHAT_MODEL,
+      messages: messages.length,
+      max_tokens: TOOL_SELECTION_MAX_TOKENS
+    });
+
+    const response = await runChatModel(CHAT_MODEL, {
+      max_tokens: TOOL_SELECTION_MAX_TOKENS,
+      messages,
+      tools: TOOLS
+    }, env);
+
+    if (!response.tool_calls || response.tool_calls.length === 0) {
+      console.log(`[VÒNG LẶP] Không có tool call, trả về câu trả lời cuối cùng`);
+      addDebugStep(debugSteps, "agent.tool_selection", "ok", "Model không gọi tool, trả lời trực tiếp.", {
+        iteration: i + 1,
+        response_chars: (response.response ?? "").length
+      });
+
+      const directAnswer = response.response?.trim();
+      if (directAnswer) {
+        return {
+          answer: directAnswer,
+          toolsCalled
+        };
+      }
+
+      if (toolResults.length > 0) {
+        const finalAnswer = await createFinalAnswerFromToolResults(
+          userMessage,
+          toolResults,
+          env,
+          chatHistory,
+          debugSteps
+        );
+
+        return {
+          answer: finalAnswer,
+          toolsCalled,
+          sources: ragSources,
+          embedding_debug: embeddingDebug,
+          rag_query_debug: ragQueryDebug
+        };
+      }
+
+      return {
+        answer: "Không tạo được câu trả lời.",
+        toolsCalled
+      };
+    }
+
+    const supportedToolCalls = response.tool_calls.filter(toolCall => AVAILABLE_TOOL_NAMES.has(toolCall.name));
+    const skippedUnsupportedToolCalls = response.tool_calls
+      .filter(toolCall => !AVAILABLE_TOOL_NAMES.has(toolCall.name))
+      .map(toolCall => toolCall.name);
+
+    if (!supportedToolCalls.length) {
+      addDebugStep(debugSteps, "agent.tool_selection", "skip", "Model chọn tool không còn được hỗ trợ, bỏ qua tool call.", {
+        iteration: i + 1,
+        tool_calls: response.tool_calls.map(toolCall => toolCall.name),
+        skipped_tool_calls: skippedUnsupportedToolCalls
+      });
+
+      return {
+        answer: response.response ?? "Model đã chọn tool không còn được hỗ trợ. Hãy thử hỏi lại theo cách khác.",
+        toolsCalled
+      };
+    }
+
+    const hasRagSearchCall = supportedToolCalls.some(toolCall => toolCall.name === "rag_search");
+    const toolCallsToExecute = hasRagSearchCall
+      ? supportedToolCalls.filter(toolCall => toolCall.name !== "general_chat")
+      : supportedToolCalls;
+
+    addDebugStep(debugSteps, "agent.tool_selection", "ok", "Model đã chọn tool.", {
+      iteration: i + 1,
+      tool_calls: response.tool_calls.map(toolCall => toolCall.name),
+      executed_tool_calls: toolCallsToExecute.map(toolCall => toolCall.name),
+      skipped_tool_calls: skippedUnsupportedToolCalls,
+      skipped_general_chat_because_rag: hasRagSearchCall && toolCallsToExecute.length !== supportedToolCalls.length
+    });
+
+    let generalChatResult: string | null = null;
+    let shouldLetModelInspectToolResult = false;
+
+    for (const toolCall of toolCallsToExecute) {
+      console.log(`[CÔNG CỤ] Gọi: ${toolCall.name}`, toolCall.arguments);
+      toolsCalled.push(toolCall.name);
+      addDebugStep(debugSteps, "tool.call", "start", `Gọi tool ${toolCall.name}.`, {
+        name: toolCall.name,
+        arguments: toolCall.arguments
+      });
+
+      if (toolCall.name === "draw_chart") {
+        const image = await generateChartImage(toolCall.arguments, env);
+        addDebugStep(debugSteps, "tool.draw_chart", "ok", "Đã tạo ảnh biểu đồ.", {
+          width: image.width,
+          height: image.height,
+          model: CHART_IMAGE_MODEL
+        });
+
+        return {
+          answer: "Mình đã tạo biểu đồ theo yêu cầu. Lưu ý: ảnh do mô hình tạo sinh phù hợp để minh họa, không nên dùng làm biểu đồ số liệu cần độ chính xác tuyệt đối.",
+          toolsCalled,
+          images: [image]
+        };
+      }
+
+      const toolExecution = await executeTool(
+        { name: toolCall.name, arguments: toolCall.arguments },
+        env,
+        chatHistory,
+        debugSteps,
+        zilcodeSession
+      );
+      const toolResult = toolExecution.content;
+
+      console.log(`[CÔNG CỤ] Độ dài kết quả: ${toolResult.length} ký tự`);
+      addDebugStep(debugSteps, "tool.call", "ok", `Tool ${toolCall.name} đã trả kết quả.`, {
+        name: toolCall.name,
+        result_chars: toolResult.length
+      });
+
+      toolResults.push({ name: toolCall.name, content: toolResult });
+
+      if (toolCall.name === "rag_search" && toolExecution.sources?.length) {
+        ragSources.push(...toolExecution.sources);
+      }
+
+      if (toolCall.name === "rag_search" && toolExecution.embedding_debug) {
+        embeddingDebug = toolExecution.embedding_debug;
+      }
+
+      if (toolCall.name === "rag_search" && toolExecution.rag_query_debug) {
+        ragQueryDebug = toolExecution.rag_query_debug;
+      }
+
+      messages.push({
+        role: "assistant",
+        content: JSON.stringify({
+          tool_call: toolCall.name,
+          arguments: toolCall.arguments
+        })
+      });
+
+      messages.push({
+        role: "tool",
+        tool_call_id: toolCall.id ?? toolCall.name,
+        content: toolResult
+      });
+
+      if (toolCall.name === "general_chat") {
+        generalChatResult = toolResult;
+      }
+
+      if (toolCall.name === "rag_search") {
+        hasRagSearchResult = true;
+      }
+
+      if (toolCall.name === "zilcode_get_app_builder_blueprint") {
+        const blueprintMode = getBlueprintMode(toolCall.arguments);
+        shouldLetModelInspectToolResult = blueprintMode === "graph" || blueprintMode === "subgraph";
+      }
+    }
+
+    if (hasRagSearchResult) {
+      const finalAnswer = await createFinalAnswerFromRag(
+        userMessage,
+        toolResults,
+        env,
+        chatHistory,
+        debugSteps
+      );
+
+      return {
+        answer: finalAnswer,
+        toolsCalled,
+        sources: ragSources,
+        embedding_debug: embeddingDebug,
+        rag_query_debug: ragQueryDebug
+      };
+    }
+
+    if (generalChatResult) {
+      addDebugStep(debugSteps, "general.final_answer", "start", "Tạo câu trả lời cuối từ general_chat.", {
+        model: CHAT_MODEL,
+        history_messages: chatHistory.length
+      });
+
+      const finalResponse = await runChatModel(CHAT_MODEL, {
+        max_tokens: GENERAL_CHAT_MAX_TOKENS,
+        messages: [
+          {
+            role: "system",
+            content: `Bạn là trợ lý AI hội thoại.
+Hãy trả lời cuối cùng bằng cùng ngôn ngữ với người hỏi.
+Dựa trên nội dung từ general_chat, trả lời tự nhiên và không nhắc đến tool/function nội bộ.`
+          },
+          ...chatHistory,
+          { role: "user", content: userMessage },
+          {
+            role: "assistant",
+            content: `Nội dung từ general_chat:\n${generalChatResult}`
+          }
+        ]
+      }, env);
+
+      addDebugStep(debugSteps, "general.final_answer", "ok", "Đã tạo câu trả lời cuối từ general_chat.", {
+        answer_chars: (finalResponse.response ?? "").length
+      });
+
+      return {
+        answer: finalResponse.response ?? "Không tạo được câu trả lời.",
+        toolsCalled
+      };
+    }
+
+    if (toolResults.length > 0) {
+      if (shouldLetModelInspectToolResult && i < MAX_ITERATIONS - 1) {
+        addDebugStep(debugSteps, "agent.graph_continue", "ok", "Đưa graph/subgraph về model để model quyết định trả lời hoặc gọi detail.", {
+          next_iteration: i + 2
+        });
+        continue;
+      }
+
+      const finalAnswer = await createFinalAnswerFromToolResults(
+        userMessage,
+        toolResults,
+        env,
+        chatHistory,
+        debugSteps
+      );
+
+      return {
+        answer: finalAnswer,
+        toolsCalled,
+        sources: ragSources,
+        embedding_debug: embeddingDebug,
+        rag_query_debug: ragQueryDebug
+      };
+    }
+  }
+
+  addDebugStep(debugSteps, "agent.stop", "error", "Đạt số vòng gọi tool tối đa.", {
+    max_iterations: MAX_ITERATIONS
+  });
+
+  if (toolResults.length > 0) {
+    const finalAnswer = await createFinalAnswerFromRag(
+      userMessage,
+      toolResults,
+      env,
+      chatHistory,
+      debugSteps
+    );
+
+    return {
+      answer: finalAnswer,
+      toolsCalled,
+      sources: ragSources,
+      embedding_debug: embeddingDebug,
+      rag_query_debug: ragQueryDebug
+    };
+  }
+
+  return {
+    answer: "Đã đạt số vòng gọi công cụ tối đa nhưng chưa tạo được câu trả lời cuối cùng.",
+    toolsCalled
+  };
+}
+
+// ─── Worker handler ───────────────────────────────────────────────────────────
