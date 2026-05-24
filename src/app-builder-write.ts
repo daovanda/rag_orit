@@ -973,6 +973,8 @@ function linkPreparedOperationReferences(
       payload.appid ??= resolvePreparedParentRef(operations, index, "application", payload, ["appname", "app_name"]);
       payload.windowid ??= payload.linkwindowid ?? resolvePreparedParentRef(operations, index, "window", payload, ["windowname", "window_name"]);
       payload.linkwindowid ??= payload.windowid;
+      payload.parentid ??= payload.parentmenuid ?? payload.parent_menu_id ?? payload.parent_menuid;
+      payload.parentid ??= resolvePreparedParentRef(operations, index, "menu", payload, ["parentmenuname", "parent_menu_name", "parent_menu"]);
     }
   }
 
@@ -1270,7 +1272,9 @@ function mapRecordForTarget(
       appid,
       menuname: record.menuname ?? record.name,
       translate: record.translate ?? record.label ?? record.menuname ?? record.name,
-      windowid: record.windowid ?? record.linkwindowid
+      parentid: record.parentid ?? record.parentmenuid ?? record.parent_menu_id ?? record.parent_menuid,
+      windowid: record.windowid ?? record.linkwindowid,
+      linkwindowid: record.linkwindowid ?? record.windowid
     });
   }
 
@@ -1388,10 +1392,13 @@ function sameDuplicateScope(
   left: Record<string, unknown>,
   right: Record<string, unknown>
 ): boolean {
+  if (!spec.duplicateScopeKeys.length) return true;
+
   return spec.duplicateScopeKeys.every(scopeKey => {
     const leftValue = getCaseInsensitiveValue(left, scopeKey);
     const rightValue = getCaseInsensitiveValue(right, scopeKey);
-    if (isBlank(leftValue) || isBlank(rightValue)) return true;
+    if (isBlank(leftValue) && isBlank(rightValue)) return true;
+    if (isBlank(leftValue) || isBlank(rightValue)) return false;
     return String(leftValue) === String(rightValue);
   });
 }

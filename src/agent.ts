@@ -419,6 +419,38 @@ function isAppBuilderWriteTool(name: string): boolean {
   return name.startsWith("app_builder_create_") || name.startsWith("app_builder_update_");
 }
 
+function normalizeIntentText(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
+
+function isAppBuilderWriteIntent(userMessage: string, chatHistory: AIMessage[]): boolean {
+  const current = normalizeIntentText(userMessage);
+  const recentContext = normalizeIntentText(chatHistory.slice(-6).map(message => message.content).join("\n"));
+  const text = `${recentContext}\n${current}`;
+
+  const hasWriteVerb = /\b(tao|them|sua|cap nhat|chinh sua|ghi|thuc hien|tien hanh|hay tao|tao di)\b/.test(current);
+  const hasAppBuilderObject = /\b(app|ung dung|table|bang|column|cot|window|man hinh|tab|field|truong|menu|domain)\b/.test(text);
+  const hasManagementAppContext = /\b(quan ly|don hang|khach hang|san pham|order|customer|product)\b/.test(text);
+
+  return hasWriteVerb && (hasAppBuilderObject || hasManagementAppContext);
+}
+
+function isAppBuilderConfirmation(userMessage: string, chatHistory: AIMessage[]): boolean {
+  const current = normalizeIntentText(userMessage);
+  const recentContext = normalizeIntentText(chatHistory.slice(-6).map(message => message.content).join("\n"));
+  const hasConfirmation = /\b(co|dong y|ok|okay|duoc|chot|xac nhan|hay tao|tao di|tien hanh|thuc hien|apply)\b/.test(current);
+  const hasPlanContext = /\b(plan id|ke hoach|xac nhan|prepare_plan|pending plan|tiep tuc|thuc thi|tao app|app builder)\b/.test(recentContext);
+
+  return hasConfirmation && hasPlanContext;
+}
+
+function hasToolResult(toolResults: ToolResultRecord[], name: string): boolean {
+  return toolResults.some(result => result.name === name);
+}
+
 export function sanitizeChatHistory(history: unknown): AIMessage[] {
   if (!Array.isArray(history)) return [];
 
@@ -643,6 +675,46 @@ Trả lời đúng mức chi tiết theo yêu cầu của người dùng, cụ t
   let embeddingDebug: EmbeddingDebug | undefined;
   let ragQueryDebug: RagQueryDebug | undefined;
   let hasRagSearchResult = false;
+  const appBuilderWriteIntent = isAppBuilderWriteIntent(userMessage, chatHistory);
+  let appBuilderWorkflowNudges = 0;
+
+  if (zilcodeSession && isAppBuilderConfirmation(userMessage, chatHistory)) {
+    addDebugStep(debugSteps, "agent.confirmation_auto_apply", "start", "User xác nhận pending plan App Builder, tự gọi apply_plan.", {
+      confirmed_message_chars: userMessage.length
+    });
+
+    toolsCalled.push("app_builder_apply_plan");
+    const applied = await applyAppBuilderPlan(env, zilcodeSession.session, zilcodeSession.id, {
+      confirmed: true,
+      confirmation_note: userMessage
+    });
+    const applyResult = {
+      name: "app_builder_apply_plan",
+      content: JSON.stringify(applied, null, 2)
+    };
+
+    addDebugStep(debugSteps, "agent.confirmation_auto_apply", applied.ok ? "ok" : "skip", "Đã xử lý xác nhận pending plan App Builder.", {
+      ok: applied.ok,
+      status: applied.status,
+      plan_id: applied.plan_id,
+      applied_count: applied.applied_count,
+      failed_count: applied.failed_count,
+      blocked: applied.blocked
+    });
+
+    const finalAnswer = await createFinalAnswerFromToolResults(
+      userMessage,
+      [applyResult],
+      env,
+      chatHistory,
+      debugSteps
+    );
+
+    return {
+      answer: finalAnswer,
+      toolsCalled
+    };
+  }
 
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     console.log(`[VÒNG LẶP] Lần ${i + 1}`);
@@ -668,6 +740,32 @@ Trả lời đúng mức chi tiết theo yêu cầu của người dùng, cụ t
 
       const directAnswer = response.response?.trim();
       if (directAnswer) {
+        if (
+          appBuilderWriteIntent
+          && appBuilderWorkflowNudges < 2
+          && i < MAX_ITERATIONS - 1
+          && !hasToolResult(toolResults, "app_builder_prepare_plan")
+          && !hasToolResult(toolResults, "app_builder_apply_plan")
+        ) {
+          appBuilderWorkflowNudges++;
+          addDebugStep(debugSteps, "agent.app_builder_workflow_nudge", "start", "Model trả lời trực tiếp cho yêu cầu ghi App Builder; yêu cầu model quay lại prepare_plan.", {
+            nudge_count: appBuilderWorkflowNudges,
+            has_blueprint: hasToolResult(toolResults, "zilcode_get_app_builder_blueprint")
+          });
+
+          messages.push({
+            role: "assistant",
+            content: directAnswer
+          });
+          messages.push({
+            role: "system",
+            content: hasToolResult(toolResults, "zilcode_get_app_builder_blueprint")
+              ? "Yeu cau hien tai la workflow ghi App Builder. Khong tra loi truc tiep nua. Hay goi app_builder_prepare_plan voi plan cu the de tao/sua metadata theo yeu cau user."
+              : "Yeu cau hien tai la workflow ghi App Builder. Khong tra loi truc tiep nua. Hay goi zilcode_get_app_builder_blueprint truoc, sau do goi app_builder_prepare_plan."
+          });
+          continue;
+        }
+
         return {
           answer: directAnswer,
           toolsCalled
@@ -717,9 +815,23 @@ Trả lời đúng mức chi tiết theo yêu cầu của người dùng, cụ t
     }
 
     const hasRagSearchCall = supportedToolCalls.some(toolCall => toolCall.name === "rag_search");
-    const toolCallsToExecute = hasRagSearchCall
+    let toolCallsToExecute = hasRagSearchCall
       ? supportedToolCalls.filter(toolCall => toolCall.name !== "general_chat")
       : supportedToolCalls;
+
+    if (
+      appBuilderWriteIntent
+      && toolCallsToExecute.length > 0
+      && toolCallsToExecute.every(toolCall => toolCall.name === "general_chat")
+    ) {
+      addDebugStep(debugSteps, "agent.app_builder_tool_override", "ok", "Model chọn general_chat cho yêu cầu ghi App Builder; chuyển sang đọc blueprint.", {
+        original_tool_calls: toolCallsToExecute.map(toolCall => toolCall.name)
+      });
+      toolCallsToExecute = [{
+        name: "zilcode_get_app_builder_blueprint",
+        arguments: { mode: "graph" }
+      }];
+    }
 
     addDebugStep(debugSteps, "agent.tool_selection", "ok", "Model đã chọn tool.", {
       iteration: i + 1,
