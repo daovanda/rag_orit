@@ -1415,7 +1415,7 @@ const APP_BUILDER_RECORD_SPECS: AppBuilderRecordSpec[] = [
     description: "Các app hiện có được tạo/cấu hình trong App Builder.",
     table_aliases: ["NApplication"],
     table_names: ["n_app"],
-    summary_keys: ["appid", "appname", "appcode", "description", "siteid", "seqno", "active"]
+    summary_keys: ["appid", "appname", "appcode", "description", "siteid", "seqno", "active", "apptype"]
   },
   {
     key: "tables",

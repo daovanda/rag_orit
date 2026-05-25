@@ -142,7 +142,7 @@ const TARGET_SPECS: Record<AppBuilderTarget, TargetSpec> = {
 
 const WRITE_FIELD_KEYS: Record<AppBuilderTarget, string[]> = {
   application: [
-    "appid", "appname", "description", "siteid", "seqno", "icon", "background"
+    "appid", "appname", "description", "siteid", "seqno", "icon", "background", "apptype"
   ],
   table: [
     "tableid", "appid", "tablename", "tabletype", "alias", "description", "columnkey", "columncode",
@@ -638,6 +638,7 @@ function applyCreateDefaults(
 ): Record<string, unknown> {
   const output = { ...record };
   if (target === "application") {
+    output.apptype = normalizeAppType(output.apptype);
     if (output.siteid === undefined) {
       const siteid = getCaseInsensitiveValue(session.user, "siteid");
       if (siteid !== undefined) output.siteid = siteid;
@@ -1020,8 +1021,7 @@ function buildOperationsFromStructuredPlan(
   const operations: PreparedOperation[] = [];
   const explicitApp = getObjectArg(plan, "app") ?? getObjectArg(getObjectArg(plan, "target") ?? {}, "app");
   const rootLooksLikeApp = !explicitApp
-    && Boolean(plan.name ?? plan.appname ?? plan.app_name)
-    && (getArrayArg(plan, "tables").length > 0 || getArrayArg(plan, "windows").length > 0 || getArrayArg(plan, "menus").length > 0);
+    && Boolean(plan.name ?? plan.appname ?? plan.app_name);
   const app = explicitApp ?? (rootLooksLikeApp ? plan : null);
   const existingAppId = app ? resolveAppId(blueprint, app) : undefined;
   const appName = app ? stringValue(app.appname ?? app.name ?? app.app_name) : "";
@@ -1030,7 +1030,8 @@ function buildOperationsFromStructuredPlan(
   if (app && !existingAppId) {
     const op = makePreparedOperation("create_application", "application", {
       appname: appName,
-      description: app.description
+      description: app.description,
+      apptype: normalizeAppType(app.apptype ?? app.app_type ?? app.type)
     }, operations.length);
     operations.push(op);
     appRef = ref(op.id, TARGET_SPECS.application.idKey);
@@ -1197,7 +1198,8 @@ function mapRecordForTarget(
     return removeBlankValues({
       ...record,
       appname,
-      description: record.description
+      description: record.description,
+      apptype: normalizeAppType(record.apptype ?? record.app_type ?? record.type)
     });
   }
 
@@ -1640,4 +1642,10 @@ function normalizeDatatype(value: unknown): string {
   if (["decimal", "money", "currency"].includes(text)) return "decimal";
   if (["date", "datetime", "time", "boolean", "bit"].includes(text)) return text;
   return text;
+}
+
+function normalizeAppType(value: unknown): string {
+  const text = stringValue(value).toLowerCase();
+  if (text === "engine" || text === "gis") return text;
+  return "app";
 }
