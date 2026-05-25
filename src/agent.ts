@@ -442,6 +442,7 @@ function isAppBuilderConfirmation(userMessage: string, chatHistory: AIMessage[])
   const current = normalizeIntentText(userMessage);
   const recentContext = normalizeIntentText(chatHistory.slice(-6).map(message => message.content).join("\n"));
   const compact = current.replace(/\s+/g, " ").trim();
+  if (/\b(hay tao giup toi|tao giup toi|toi muon tao|muon tao|hay tu tao|tu tao|thu tao)\b/.test(compact)) return false;
   const asksForNewOrChangedPlan = /\b(tu tao|thu tao|don gian hon|don giản hon|voi cac truong|cac truong|theo y|ten ung dung|ung dung do|app don gian|ke hoach moi|chinh lai|sua lai)\b/.test(compact);
   if (asksForNewOrChangedPlan) return false;
 
@@ -455,6 +456,166 @@ function isAppBuilderConfirmation(userMessage: string, chatHistory: AIMessage[])
 
 function hasToolResult(toolResults: ToolResultRecord[], name: string): boolean {
   return toolResults.some(result => result.name === name);
+}
+
+function findLastToolResult(toolResults: ToolResultRecord[], name: string): ToolResultRecord | undefined {
+  return [...toolResults].reverse().find(result => result.name === name);
+}
+
+function parseToolJson(content: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(content) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function getToolArray(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+    : [];
+}
+
+function getNestedRecord(record: Record<string, unknown>, key: string): Record<string, unknown> | null {
+  const value = record[key];
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function buildOperationCounts(operations: Record<string, unknown>[]): string {
+  const counts = operations.reduce<Record<string, number>>((output, operation) => {
+    const mode = String(operation.mode ?? "write");
+    const target = String(operation.target ?? "record");
+    const key = `${mode} ${target}`;
+    output[key] = (output[key] ?? 0) + 1;
+    return output;
+  }, {});
+
+  return Object.entries(counts)
+    .map(([key, count]) => `- ${key}: ${count}`)
+    .join("\n");
+}
+
+function buildOperationPreview(operations: Record<string, unknown>[], limit = 12): string {
+  return operations
+    .slice(0, limit)
+    .map((operation, index) => {
+      const label = String(operation.label ?? `${operation.mode ?? "write"} ${operation.target ?? "record"}`);
+      return `${index + 1}. ${label}`;
+    })
+    .join("\n");
+}
+
+function summarizeToolError(value: unknown): string {
+  if (!value) return "Không có chi tiết lỗi.";
+  if (typeof value === "string") return value;
+  if (typeof value !== "object") return String(value);
+
+  const record = value as Record<string, unknown>;
+  const result = getNestedRecord(record, "result");
+  const blockingErrors = getToolArray(record.blocking_errors ?? result?.blocking_errors);
+  if (blockingErrors.length) {
+    return blockingErrors
+      .map(error => String(error.message ?? JSON.stringify(error)))
+      .join("\n");
+  }
+
+  const reason = record.reason ?? result?.reason ?? record.error ?? result?.error;
+  if (reason) return String(reason);
+
+  return JSON.stringify(value, null, 2).slice(0, 1000);
+}
+
+function createDeterministicAppBuilderAnswer(toolResults: ToolResultRecord[]): string | null {
+  const applyResult = findLastToolResult(toolResults, "app_builder_apply_plan");
+  if (applyResult) {
+    const data = parseToolJson(applyResult.content);
+    if (!data) return null;
+
+    const ok = data.ok === true;
+    const appliedCount = Number(data.applied_count ?? 0);
+    const failedCount = Number(data.failed_count ?? 0);
+
+    if (ok) {
+      return [
+        "Đã thực hiện kế hoạch App Builder thành công.",
+        "",
+        `Số bước đã ghi: ${appliedCount}.`,
+        "Tôi đã đọc lại AppBuilderBlueprint sau khi ghi để kiểm tra trạng thái mới.",
+        "",
+        "Bạn có thể yêu cầu tôi kiểm tra chi tiết app vừa tạo, hoặc tiếp tục thêm bảng, cột, window, tab, field và menu."
+      ].join("\n");
+    }
+
+    const failed = getToolArray(data.failed);
+    const firstFailure = failed[0];
+    const label = firstFailure ? String(firstFailure.label ?? firstFailure.operation ?? "bước đầu tiên") : "bước thực thi";
+    const error = firstFailure ? summarizeToolError(firstFailure) : summarizeToolError(data);
+
+    return [
+      "Kế hoạch chưa được thực hiện thành công.",
+      "",
+      `Đã ghi được: ${appliedCount} bước.`,
+      `Số bước lỗi: ${failedCount}.`,
+      `Dừng tại: ${label}.`,
+      "",
+      "Lỗi chính:",
+      error,
+      "",
+      "Tôi chưa coi app là đã tạo xong. Cần sửa lại plan hoặc payload theo lỗi trên rồi chuẩn bị kế hoạch mới trước khi chạy tiếp."
+    ].join("\n");
+  }
+
+  const prepareResult = findLastToolResult(toolResults, "app_builder_prepare_plan");
+  if (!prepareResult) return null;
+
+  const data = parseToolJson(prepareResult.content);
+  if (!data) return null;
+
+  const planId = String(data.plan_id ?? "");
+  const valid = data.valid === true || data.status === "valid";
+  const normalizedPlan = getNestedRecord(data, "normalized_plan");
+  const operations = getToolArray(normalizedPlan?.operations);
+
+  if (!valid) {
+    const blockingErrors = getToolArray(data.blocking_errors);
+    const errors = blockingErrors.length
+      ? blockingErrors.map(error => `- ${String(error.message ?? JSON.stringify(error))}`).join("\n")
+      : "- Kế hoạch chưa hợp lệ nhưng tool không trả chi tiết lỗi.";
+
+    return [
+      "Kế hoạch hiện chưa thể thực hiện.",
+      "",
+      "Các lỗi cần xử lý:",
+      errors,
+      "",
+      "Tôi chưa ghi dữ liệu nào vào App Builder. Hãy bổ sung hoặc điều chỉnh thông tin, sau đó tôi sẽ chuẩn bị lại kế hoạch."
+    ].join("\n");
+  }
+
+  const counts = buildOperationCounts(operations);
+  const preview = buildOperationPreview(operations);
+  const operationCount = operations.length;
+
+  return [
+    "Tôi đã chuẩn bị xong kế hoạch App Builder và chưa ghi dữ liệu vào hệ thống.",
+    "",
+    `Plan ID: ${planId || "(không có)"}`,
+    `Tổng số bước sẽ thực hiện: ${operationCount}.`,
+    "",
+    "Tóm tắt thao tác:",
+    counts || "- Chưa có operation trong plan.",
+    "",
+    "Các bước đầu:",
+    preview || "- Chưa có chi tiết bước.",
+    operationCount > 12 ? `\n...còn ${operationCount - 12} bước nữa.` : "",
+    "",
+    "Nếu bạn đồng ý, hãy trả lời: \"có, thực hiện kế hoạch\" để tôi chạy apply_plan."
+  ].filter(Boolean).join("\n");
 }
 
 export function sanitizeChatHistory(history: unknown): AIMessage[] {
@@ -528,6 +689,15 @@ async function createFinalAnswerFromToolResults(
   chatHistory: AIMessage[] = [],
   debugSteps?: DebugStep[]
 ): Promise<string> {
+  const deterministicAnswer = createDeterministicAppBuilderAnswer(toolResults);
+  if (deterministicAnswer) {
+    addDebugStep(debugSteps, "tools.final_answer", "ok", "Đã tạo câu trả lời cuối deterministic cho App Builder plan.", {
+      tool_results: toolResults.map(result => result.name),
+      answer_chars: deterministicAnswer.length
+    });
+    return deterministicAnswer;
+  }
+
   const toolContext = truncateToolContext([
     formatToolResultsForFinalAnswer(toolResults),
     `[HUONG_DAN_TRA_LOI_APP_BUILDER_WRITE]
