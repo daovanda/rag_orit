@@ -159,5 +159,51 @@ export const TOOLS = [
         }
       }
     }
+  },
+  {
+    name: "app_builder_prepare_change",
+    description:
+      "Chuan bi ke hoach tao/sua/xoa App Builder de user xac nhan. Tool nay validate, loc field khong ton tai theo metadata that, resolve structured plan thanh operations va luu pending plan. Chua ghi du lieu.",
+    parameters: {
+      type: "object",
+      properties: {
+        intent: {
+          type: "string",
+          description: "create_app, add_table, add_window, add_field, update_node, delete_node..."
+        },
+        summary: {
+          type: "string",
+          description: "Tom tat yeu cau nguoi dung."
+        },
+        operations: {
+          type: "array",
+          description: "Danh sach operation. Moi operation co op/action va record/id_value/where. Co the dung reference nhu $create_app_1.appid de noi output buoc truoc.",
+          items: {
+            type: "object",
+            additionalProperties: true
+          }
+        },
+        max_records_per_table: {
+          type: "string",
+          description: "So record toi da doc tu moi bang App Builder metadata, mac dinh 1000."
+        }
+      },
+      required: ["operations"]
+    }
+  },
+  {
+    name: "app_builder_apply_change",
+    description:
+      "Sau khi user xac nhan ro rang, thuc thi pending plan da tao boi app_builder_prepare_change. Ghi vao Zilcode qua REST API va dung o buoc loi dau tien.",
+    parameters: {
+      type: "object",
+      properties: {
+        plan_id: {
+          type: "string",
+          description: "Plan ID tu app_builder_prepare_change."
+        }
+      },
+      required: ["plan_id"]
+    }
   }
 ] as const;

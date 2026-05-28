@@ -1660,6 +1660,7 @@ async function buildAppBuilderRecords(
           tablename: table.tablename,
           alias: table.alias,
           urlview: table.urlview,
+          urledit: table.urledit,
           columnkey: table.columnkey,
           columndisplay: table.columndisplay
         },

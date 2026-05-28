@@ -18,6 +18,10 @@ import {
   runAppBuilderGraphTool
 } from "./app-builder-graph";
 import {
+  isAppBuilderWriteTool,
+  runAppBuilderWriteTool
+} from "./app-builder-write";
+import {
   noZilcodeSessionResult,
   type ZilcodeSessionState
 } from "./zilcode";
@@ -118,6 +122,32 @@ Khong nhac den tool/function noi bo.`
       return { content: JSON.stringify(result, null, 2) };
     }
 
+    case "app_builder_prepare_change":
+    case "app_builder_apply_change": {
+      if (!zilcodeSession) return noZilcodeSessionResult();
+
+      addDebugStep(debugSteps, `tool.${tool.name}`, "start", `Goi ${tool.name}.`, {
+        arguments: tool.arguments
+      });
+
+      const result = await runAppBuilderWriteTool(
+        env,
+        zilcodeSession.session,
+        tool.name,
+        tool.arguments
+      );
+
+      addDebugStep(debugSteps, `tool.${tool.name}`, "ok", `${tool.name} tra ket qua.`, {
+        mode: result.mode,
+        status: result.status,
+        ok: result.ok,
+        plan_id: result.plan_id,
+        has_error: Boolean(result.error)
+      });
+
+      return { content: JSON.stringify(result, null, 2) };
+    }
+
     default:
       return { content: `Khong nhan dien duoc cong cu: ${tool.name}` };
   }
@@ -162,6 +192,51 @@ function compactToolContentForFinalAnswer(result: ToolResultRecord): string {
         }))
       : undefined;
 
+    const mode = String(data.mode ?? "");
+    if (mode === "overview") {
+      return JSON.stringify({
+        mode,
+        description: data.description,
+        session: compactSessionForAnswer(asRecord(data.session)),
+        scan: data.scan,
+        graph_counts: graph ? {
+          node_counts: graph.node_counts,
+          edge_counts: graph.edge_counts,
+          nodes_count: graph.nodes_count,
+          edges_count: graph.edges_count
+        } : undefined,
+        apps: nodes?.filter(node => node.type === "app"),
+        root: nodes?.find(node => node.type === "root"),
+        errors: data.errors,
+        truncated: data.truncated,
+        answer_policy: "Tom tat theo y dinh user. Khong liet ke tat ca node/edge tu overview; neu can chi tiet hay dung search/subgraph/detail."
+      }, null, 2);
+    }
+
+    if (mode === "search") {
+      return JSON.stringify({
+        mode,
+        query: data.query,
+        types: data.types,
+        matches_count: data.matches_count,
+        matches: data.matches,
+        hint: data.hint
+      }, null, 2);
+    }
+
+    if (mode === "creation_schema") {
+      return JSON.stringify({
+        mode,
+        intent: data.intent,
+        status: data.status,
+        note: data.note,
+        graph_first_rule: data.graph_first_rule,
+        create_app_branch: data.create_app_branch,
+        edit_existing_branch: data.edit_existing_branch,
+        proposed_plan_format: data.proposed_plan_format
+      }, null, 2);
+    }
+
     return JSON.stringify({
       ...data,
       graph: graph ? {
@@ -176,6 +251,92 @@ function compactToolContentForFinalAnswer(result: ToolResultRecord): string {
   } catch {
     return result.content;
   }
+}
+
+function compactSessionForAnswer(session: Record<string, unknown> | null): Record<string, unknown> | undefined {
+  if (!session) return undefined;
+  return {
+    base_url: session.base_url,
+    user: session.user,
+    roleid: session.roleid,
+    role_name: session.role_name,
+    orgid: session.orgid,
+    org_name: session.org_name
+  };
+}
+
+function createDeterministicChangeAnswer(toolResults: ToolResultRecord[]): string | null {
+  const last = [...toolResults].reverse().find(result => isAppBuilderWriteTool(result.name));
+  if (!last) return null;
+
+  try {
+    const data = JSON.parse(last.content) as Record<string, unknown>;
+    if (last.name === "app_builder_prepare_change") {
+      if (data.valid === false || data.status === "invalid") {
+        const errors = Array.isArray(data.blocking_errors) ? data.blocking_errors : [];
+        return [
+          "Ke hoach chua hop le nen toi chua ghi du lieu vao Zilcode.",
+          "",
+          "Loi can xu ly:",
+          ...errors.map((error, index) => `${index + 1}. ${String(error)}`),
+          "",
+          "Hay bo sung thong tin hoac cho phep toi lap lai plan voi cau truc ro hon."
+        ].join("\n").trim();
+      }
+
+      const operations = Array.isArray(data.operations)
+        ? data.operations.filter((operation): operation is Record<string, unknown> => Boolean(operation) && typeof operation === "object")
+        : [];
+      const warnings = Array.isArray(data.warnings) ? data.warnings : [];
+
+      return [
+        "Toi da chuan bi ke hoach App Builder va chua ghi du lieu vao he thong.",
+        `Plan ID: ${String(data.plan_id ?? "")}`,
+        `Tong so buoc: ${operations.length}.`,
+        "",
+        "Cac buoc se thuc hien:",
+        ...operations.slice(0, 12).map((operation, index) => `${index + 1}. ${String(operation.label ?? operation.id ?? "operation")}`),
+        operations.length > 12 ? `... va ${operations.length - 12} buoc nua.` : "",
+        warnings.length ? "" : "",
+        warnings.length ? "Luu y:" : "",
+        ...warnings.slice(0, 6).map(warning => `- ${String(warning)}`),
+        "",
+        "Neu ban dong y, hay tra loi: \"co, thuc hien ke hoach\"."
+      ].filter(Boolean).join("\n");
+    }
+
+    if (last.name === "app_builder_apply_change") {
+      if (data.ok === true) {
+        return [
+          "Da thuc hien xong ke hoach App Builder.",
+          `Plan ID: ${String(data.plan_id ?? "")}`,
+          `So buoc da ghi: ${String(data.applied_count ?? 0)}.`,
+          "",
+          "Buoc tiep theo nen lam la doc lai App Builder graph de kiem tra app/table/window/tab/field da duoc tao dung."
+        ].join("\n");
+      }
+
+      const results = Array.isArray(data.results)
+        ? data.results.filter((result): result is Record<string, unknown> => Boolean(result) && typeof result === "object")
+        : [];
+      const failed = results.find(result => result.ok === false);
+
+      return [
+        "Ke hoach chua duoc thuc hien thanh cong.",
+        `Da ghi duoc: ${String(data.applied_count ?? 0)} buoc.`,
+        `So buoc loi: ${String(data.failed_count ?? 0)}.`,
+        failed ? `Dung tai: ${String(failed.operation_id ?? "")}.` : "",
+        "",
+        failed ? `Loi chinh: ${String(failed.error ?? data.error ?? "Khong ro loi.")}` : `Loi chinh: ${String(data.error ?? "Khong ro loi.")}`,
+        "",
+        "Toi chua coi thay doi nay la hoan tat. Can sua lai plan theo loi tren roi chuan bi ke hoach moi."
+      ].filter(Boolean).join("\n");
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
 }
 
 function truncateToolContext(context: string): string {
@@ -193,6 +354,25 @@ function cleanMarkdownArtifacts(answer: string): string {
     .replace(/^\s*#{1,6}\s+/gm, "")
     .replace(/\*\*([^*\n]+)\*\*/g, "$1")
     .trim();
+}
+
+function isPlanConfirmation(message: string): boolean {
+  const text = message
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+  return /^(co|yes|ok|dong y|thuc hien|hay thuc hien)/.test(text)
+    && /(thuc hien|ke hoach|apply|chay|tao|sua|xoa|cap nhat)/.test(text);
+}
+
+function findLatestPlanId(chatHistory: AIMessage[]): string | null {
+  for (let i = chatHistory.length - 1; i >= 0; i--) {
+    const content = chatHistory[i].content ?? "";
+    const match = content.match(/Plan ID:\s*([0-9a-fA-F-]{16,})/);
+    if (match) return match[1];
+  }
+  return null;
 }
 
 export function sanitizeChatHistory(history: unknown): AIMessage[] {
@@ -263,6 +443,14 @@ async function createFinalAnswerFromToolResults(
   chatHistory: AIMessage[] = [],
   debugSteps?: DebugStep[]
 ): Promise<string> {
+  const deterministicAnswer = createDeterministicChangeAnswer(toolResults);
+  if (deterministicAnswer) {
+    addDebugStep(debugSteps, "tools.final_answer", "ok", "Da tao cau tra loi deterministic cho App Builder change.", {
+      answer_chars: deterministicAnswer.length
+    });
+    return deterministicAnswer;
+  }
+
   const toolContext = truncateToolContext(formatToolResultsForFinalAnswer(toolResults));
 
   addDebugStep(debugSteps, "tools.final_answer", "start", "Tao cau tra loi cuoi tu ket qua tool.", {
@@ -279,9 +467,13 @@ async function createFinalAnswerFromToolResults(
         role: "system",
         content: `Ban la tro ly Zilcode/App Builder.
 Tra loi bang cung ngon ngu voi nguoi hoi.
-Doc ket qua graph theo cach de hieu cho nguoi dung cuoi, khong viet nhu log ky thuat.
-Neu nguoi dung hoi ve he thong, tom tat: session, apps, tables/windows/menus chinh, quan he can chu y, va phan chua doc duoc neu co.
-Neu nguoi dung yeu cau tao/sua app/table/window/tab/field/menu, chi de xuat plan dua tren graph va creation_schema. Khong noi rang da ghi du lieu vi hien tai khong co write tool active.
+Hay tra loi theo dung y dinh cua user, khong ke lai toan bo JSON.
+Chi neu nhung thong tin lien quan truc tiep toi cau hoi. Neu cau hoi rong, tom tat ngan gon theo nhom.
+Neu nguoi dung hoi ve he thong, tra loi theo cau truc: dang nhap/role, cac app chinh, moi app co gi dang chu y, va goi y dao sau. Khong liet ke tat ca node/edge.
+Neu nguoi dung hoi ve mot app/table/window/tab/field cu the, tap trung vao node do va quan he truc tiep. Khong liet ke cac phan khong lien quan.
+Neu nguoi dung yeu cau tao/sua/xoa, tra loi theo kieu IDE agent: hieu yeu cau, nhung gi se thay doi, cac buoc plan, rui ro/thieu thong tin, va yeu cau xac nhan truoc khi ghi.
+Neu da co ket qua app_builder_prepare_change, chi tom tat plan id va cac buoc; khong mo rong thanh huong dan dai.
+Neu da co ket qua app_builder_apply_change, bao ro thanh cong/that bai va buoc verify tiep theo.
 Khong nhac den tool/function noi bo.`
       },
       ...chatHistory,
@@ -314,6 +506,28 @@ export async function runAgenticLoop(
     tools: TOOLS.map(tool => tool.name)
   });
 
+  const confirmedPlanId = isPlanConfirmation(userMessage) ? findLatestPlanId(chatHistory) : null;
+  if (confirmedPlanId && zilcodeSession) {
+    addDebugStep(debugSteps, "agent.confirmation_auto_apply", "start", "User xac nhan pending App Builder plan, tu goi apply_change.", {
+      plan_id: confirmedPlanId
+    });
+
+    const toolExecution = await executeTool(
+      { name: "app_builder_apply_change", arguments: { plan_id: confirmedPlanId } },
+      env,
+      chatHistory,
+      debugSteps,
+      zilcodeSession
+    );
+    const toolResults = [{ name: "app_builder_apply_change", content: toolExecution.content }];
+    const answer = await createFinalAnswerFromToolResults(userMessage, toolResults, env, chatHistory, debugSteps);
+
+    return {
+      answer,
+      toolsCalled: ["app_builder_apply_change"]
+    };
+  }
+
   const messages: AIMessage[] = [
     {
       role: "system",
@@ -328,16 +542,20 @@ Tools:
 - app_builder_graph_subgraph: mo vung graph lien quan quanh node.
 - app_builder_node_detail: lay chi tiet node cu the.
 - app_builder_creation_schema: lay quy tac tao/sua va proposed plan format.
+- app_builder_prepare_change: chuan bi plan tao/sua/xoa, validate, loc payload theo metadata that, luu pending plan. Chua ghi.
+- app_builder_apply_change: chi goi sau khi user xac nhan ro rang va co plan_id tu prepare_change.
 
 Graph-first workflow:
 1. Neu cau hoi lien quan App Builder/Zilcode hien tai, goi app_builder_graph_overview truoc.
 2. Neu can tim mot doi tuong, goi app_builder_graph_search.
 3. Neu can hieu quan he quanh doi tuong, goi app_builder_graph_subgraph.
 4. Neu can lap plan chinh xac hoac tra loi chi tiet, goi app_builder_node_detail.
-5. Neu user muon tao/sua, goi app_builder_creation_schema va tao Proposed plan. Hien tai khong co write tool active, nen khong noi la da ghi du lieu.
+5. Neu user muon tao/sua/xoa, goi app_builder_creation_schema va app_builder_prepare_change de tao pending plan.
+6. Chi goi app_builder_apply_change khi user vua xac nhan ro rang va co plan_id hop le trong lich su hoi thoai.
 
 Dung rag_search khi can tai lieu huong dan/API contract, nhat la khi khong chac quy tac tao/sua.
-Sau khi co du thong tin, tra loi ngay. Khong goi tool lap lai neu khong co cau hoi moi ro rang.`
+Sau khi co du thong tin, tra loi ngay. Khong goi tool lap lai neu khong co cau hoi moi ro rang.
+Khi tra loi tu graph, khong doc lai JSON. Hay tom tat dung phan user quan tam.`
     },
     ...chatHistory,
     { role: "user", content: userMessage }
@@ -371,7 +589,7 @@ Sau khi co du thong tin, tra loi ngay. Khong goi tool lap lai neu khong co cau h
       });
 
       const directAnswer = response.response?.trim();
-      if (directAnswer) {
+      if (directAnswer && toolResults.length === 0) {
         return {
           answer: directAnswer,
           toolsCalled

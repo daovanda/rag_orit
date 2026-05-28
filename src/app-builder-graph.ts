@@ -511,14 +511,15 @@ function buildCreationSchema(args: Record<string, unknown>): Record<string, unkn
   return {
     mode: "creation_schema",
     intent,
-    status: "planning_only",
-    note: "Hien tai bo tool nay chi doc graph va tao proposed plan. Chua co write tool active de ghi truc tiep vao Zilcode.",
+    status: "prepare_then_apply",
+    note: "Dung app_builder_prepare_change de tao pending plan. Chi dung app_builder_apply_change sau khi user xac nhan ro rang.",
     graph_first_rule: [
       "1. Goi app_builder_graph_overview de nam skeleton he thong.",
       "2. Goi app_builder_graph_search neu can tim app/table/window/tab/field hien co.",
       "3. Goi app_builder_graph_subgraph de mo vung lien quan.",
       "4. Goi app_builder_node_detail cho node can sua/them nhanh.",
-      "5. De xuat plan tao/sua, neu can hoi lai user cac thong tin thieu."
+      "5. Goi app_builder_prepare_change de validate va luu pending plan neu da du thong tin.",
+      "6. Chi apply sau khi user xac nhan."
     ],
     create_app_branch: {
       order: ["app", "table", "column", "window", "tab", "field", "menu"],
@@ -557,17 +558,27 @@ function buildCreationSchema(args: Record<string, unknown>): Record<string, unkn
       target_node_ids: ["node id neu sua node hien co"],
       operations: [
         {
+          id: "create_app_1",
           op: "create_app",
-          record: { appname: "..." },
+          record: { appname: "...", description: "..." },
           creates_node: "app:<new>"
         },
         {
+          id: "create_table_1",
           op: "create_table",
-          after: "create_app",
-          record: { tablename: "...", alias: "...", tabletype: "table" }
+          after: "create_app_1",
+          record: { appid: "$create_app_1.appid", tablename: "...", alias: "...", tabletype: "table" }
+        },
+        {
+          id: "create_column_1",
+          op: "create_column",
+          after: "create_table_1",
+          record: { tableid: "$create_table_1.tableid", columnname: "...", datatype: "text" }
         }
       ],
-      validation: ["duplicate check", "required ids", "edge completeness"]
+      reference_rule: "Co the dung $operation_id.field de noi output cua buoc truoc vao buoc sau, vi du $create_app_1.appid.",
+      delete_rule: "Xoa node chi khi user noi ro. Dung delete_table/delete_column/delete_window/delete_tab/delete_field/delete_menu/delete_domain voi id_value hoac where.",
+      validation: ["duplicate check", "required ids", "edge completeness", "payload fields filtered by actual App Builder metadata"]
     }
   };
 }

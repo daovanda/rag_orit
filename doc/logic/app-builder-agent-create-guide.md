@@ -1,16 +1,15 @@
 # App Builder Agent Create Guide
 
-Tai lieu nay danh cho agent khi ho tro Role System phan tich, tao ke hoach tao app moi, hoac sua cau hinh trong App Builder.
+Tai lieu nay danh cho agent khi ho tro Role System phan tich, tao, sua hoac xoa cau hinh trong App Builder.
 
-Trang thai hien tai cua he thong tool:
+Trang thai tool hien tai:
 
-- Agent chi co read/planning tools.
-- Chua co write tool active.
-- Khi user yeu cau tao/sua, agent chi duoc lap Proposed plan va noi ro chua ghi du lieu vao Zilcode.
+- Read tools: doc/RAG va App Builder graph.
+- Planning tool: `app_builder_prepare_change` de validate va luu pending plan.
+- Apply tool: `app_builder_apply_change` de ghi vao Zilcode sau khi user xac nhan ro rang.
+- Agent khong duoc noi "da tao/da sua/da xoa" tru khi `app_builder_apply_change` tra thanh cong.
 
 ## 1. Tool flow bat buoc
-
-Agent phai di theo luong graph-first:
 
 ```text
 User
@@ -36,27 +35,32 @@ Agent
   |     -> lay detail node
   |
   |-- app_builder_creation_schema
-  |     -> quy tac tao/sua
+  |     -> quy tac tao/sua/xoa
+  |
+  |-- app_builder_prepare_change
+  |     -> validate + pending plan
+  |
+  |-- app_builder_apply_change
+        -> chi apply sau user xac nhan
   |
   v
-Final answer / Proposed plan
+Final answer / Proposed plan / Apply result
 ```
 
 ## 2. Nguyen tac chung
 
-- Luon goi `app_builder_graph_overview` truoc khi phan tich App Builder hien tai.
+- Luon dung `app_builder_graph_overview` truoc khi phan tich App Builder hien tai.
 - Dung `app_builder_graph_search` de resolve ten tu nhien thanh node id.
 - Dung `app_builder_graph_subgraph` de hieu quan he quanh node.
-- Dung `app_builder_node_detail` khi can du lieu chi tiet cua app/table/window/tab/field/menu/domain.
-- Dung `app_builder_creation_schema` khi user yeu cau tao/sua app/table/window/tab/field/menu.
+- Dung `app_builder_node_detail` khi can chi tiet app/table/window/tab/field/menu/domain.
+- Dung `app_builder_creation_schema` khi user yeu cau tao/sua/xoa.
+- Dung `app_builder_prepare_change` de tao pending plan co plan id.
+- Chi dung `app_builder_apply_change` khi user vua xac nhan ro rang, vi du: "co, thuc hien ke hoach".
 - Khong lap plan dua tren tri nho neu chua doc graph.
-- Khong noi "da tao", "da ghi", "da cap nhat" neu chua co write tool va ket qua apply thanh cong.
 - Khong tao trung app/table/window/menu/field neu graph cho thay node da ton tai.
-- Neu user noi mo ho, tim node truoc; neu co nhieu ket qua, hoi lai.
+- Neu user noi mo ho, search truoc; neu co nhieu ket qua, hoi lai.
 
 ## 3. Mo hinh graph App Builder
-
-Doc App Builder nhu mot graph:
 
 ```text
 root:app_builder
@@ -88,7 +92,7 @@ tab tab_parent_child tab
 tab tab_uses_relation_table table
 ```
 
-Khi tao nhanh moi, agent can tao du cac node va edge can thiet. Vi du app moi co window chinh phai co:
+Khi tao nhanh moi, agent can tao du cac node va edge can thiet:
 
 ```text
 app -> table -> column
@@ -98,45 +102,34 @@ field -> column
 app -> menu -> window
 ```
 
-## 4. Cac thao tac doc dung cach
+## 4. Khi nao dung API/RAG
 
-### Hoi tong quan he thong
+Dung `rag_search` khi:
 
-1. Goi `app_builder_graph_overview`.
-2. Tra loi dua tren node counts, app nodes, table/window/menu/domain counts.
-3. Neu user hoi sau ve app nao, dung `app_builder_graph_search` va `app_builder_graph_subgraph`.
+- Can API contract.
+- Can giai thich runtime Zilcode.
+- Can quy tac window/tab/field.
+- Can huong dan physical table/column.
 
-### Hoi app/table/window cu the
+Khong dung RAG thay cho graph khi can du lieu that hien tai. Graph la source of truth cho app/table/window/tab/field hien co.
 
-1. Goi `app_builder_graph_search` voi query la ten user noi.
-2. Neu match ro rang, goi `app_builder_node_detail`.
-3. Neu can quan he, goi `app_builder_graph_subgraph` quanh node do.
-
-### Hoi "bang X co lien ket voi dau khong"
-
-1. Search bang X.
-2. Subgraph depth 1 hoac 2 quanh table node.
-3. Doc edges:
-   - `tab_uses_table`: tab/window nao dang dung table.
-   - `field_maps_column`: field nao dung column cua table.
-   - `tab_uses_relation_table`: table quan he.
-   - inbound/outbound neighbors trong node detail.
-
-## 5. Tao app moi: chi lap Proposed plan
+## 5. Tao app moi
 
 Khi user yeu cau tao app moi:
 
 1. `app_builder_graph_overview`
 2. `app_builder_creation_schema` voi intent `create_app`
-3. Neu ten app co the trung, `app_builder_graph_search` theo app name/app code.
-4. Lap Proposed plan.
-5. Noi ro: "Hien tai chua co write tool active, nen day la ke hoach de apply sau khi bo sung write tool."
+3. Search ten app/app code de tranh trung.
+4. Neu du thong tin, goi `app_builder_prepare_change`.
+5. Tra plan id va tom tat buoc se ghi.
+6. Sau khi user xac nhan, goi `app_builder_apply_change`.
+7. Sau apply, goi graph/search/detail de verify neu user yeu cau hoac neu can bao cao day du.
 
-Thu tu tao branch moi:
+Thu tu branch tao app:
 
 ```text
 1. Create app
-2. Create physical tables if needed
+2. Create physical tables if write tool ho tro
 3. Create App Builder table metadata
 4. Create columns
 5. Create domains if needed
@@ -147,57 +140,68 @@ Thu tu tao branch moi:
 10. Re-read graph to verify
 ```
 
-Plan nen co dang:
+Plan operation mau:
 
 ```json
 {
-  "intent": "create_app",
-  "app": {
+  "id": "create_app_1",
+  "op": "create_app",
+  "record": {
     "appname": "Order Management",
     "description": "Manage customers, products, orders and order items"
-  },
-  "operations": [
-    {
-      "op": "create_app",
-      "record": {
-        "appname": "Order Management"
-      },
-      "creates": "app:<new>"
-    },
-    {
-      "op": "create_table",
-      "after": "create_app",
-      "record": {
-        "tablename": "orders",
-        "alias": "Orders",
-        "tabletype": "table"
-      }
-    }
-  ],
-  "required_edges": [
-    "app -> table",
-    "table -> column",
-    "app -> window",
-    "window -> tab",
-    "tab -> table",
-    "tab -> field",
-    "field -> column",
-    "app -> menu",
-    "menu -> window"
-  ],
-  "requires_confirmation": true
+  }
 }
 ```
 
+```json
+{
+  "id": "create_table_1",
+  "op": "create_table",
+  "record": {
+    "appid": "$create_app_1.appid",
+    "tablename": "orders",
+    "alias": "Orders",
+    "tabletype": "table"
+  }
+}
+```
+
+Neu operation sau can ID sinh ra tu operation truoc, dung reference:
+
+```text
+$operation_id.field
+```
+
+Vi du:
+
+```json
+{
+  "id": "create_column_1",
+  "op": "create_column",
+  "record": {
+    "tableid": "$create_table_1.tableid",
+    "columnname": "order_id",
+    "datatype": "int"
+  }
+}
+```
+
+`app_builder_prepare_change` co the nhan plan co `operations`, hoac structured plan co `app`, `tables`, `windows`, `menus`.
+Khi nhan structured plan, tool se chuyen thanh operations va tu noi app/table/window id neu du thong tin.
+
 ## 6. Sua app/table/window hien co
 
-Khi user muon sua mot doi tuong da co:
+Quy trinh:
 
 1. Overview neu chua co graph moi.
 2. Search target.
 3. Subgraph quanh target.
 4. Node detail target.
-5. Lap Proposed patch plan.
+5. Lap operation update/delete/create lien quan.
+6. `app_builder_prepare_change`
+7. Doi user xac nhan.
+8. `app_builder_apply_change`
+9. Verify bang graph.
 
 Vi du them field vao window:
 
@@ -207,47 +211,56 @@ Vi du them field vao window:
 3. Search window
 4. Detail table de xem column da co chua
 5. Detail window/tab de biet tabid
-6. Neu column chua co, plan tao column truoc
-7. Plan tao field map toi column
-8. Plan verify bang node detail/subgraph sau khi write tool duoc them
+6. Neu column chua co, prepare plan tao column truoc
+7. Prepare plan tao field map toi column
+8. Apply sau xac nhan
+9. Verify bang node detail/subgraph
 ```
 
-## 7. Khi nao can rag_search
+## 7. Xoa
 
-Dung `rag_search` khi:
+Xoa la thao tac rui ro cao. Mac dinh agent phai:
 
-- Can API contract.
-- Can giai thich App Builder runtime.
-- Can quy tac window/tab/field.
-- Can huong dan tao physical table/column.
-- Graph co du lieu nhung khong du quy tac de quyet dinh.
+- Mo subgraph cua node can xoa.
+- Liet ke dependency truc tiep.
+- De xuat disable/hide neu phu hop thay vi delete.
+- Chi prepare delete khi user yeu cau ro.
+- Chi apply delete sau xac nhan ro rang.
 
-Khong dung RAG thay cho graph khi can du lieu that hien tai. Graph moi la source of truth cho app/table/window/tab/field hien co.
+Khong xoa:
+
+- App con table/window/menu.
+- Table con tab/field hoac record du lieu that.
+- Column con field dang dung.
+- Window con menu tro toi.
+- Tab con field/tab con.
+- Domain con field dang dung.
 
 ## 8. Cach tra loi nguoi dung
 
 Neu user hoi thong tin:
 
-- Tra loi bang ngon ngu nghiep vu, khong viet nhu log.
-- Neu co node id thi co the neu ngan gon trong ngoac khi huu ich.
-- Ket thuc bang goi y dao sau tu nhien.
+- Tra loi dung cau hoi, khong ke lai JSON.
+- Neu hoi tong quan, chi tom tat app/table/window/menu chinh.
+- Neu hoi mot node cu the, chi noi ve node do va quan he truc tiep.
 
-Neu user yeu cau tao/sua:
+Neu user yeu cau tao/sua/xoa:
 
-- Tom tat app/table/window/tab/field se tao/sua.
-- Neu thieu thong tin, hoi lai.
-- Neu du thong tin, dua Proposed plan.
-- Nhac ro he thong hien chi co read/planning tools neu user muon agent apply that.
+- Noi ro ban hieu yeu cau nao.
+- Neu thieu thong tin, hoi lai ngan gon.
+- Neu du thong tin, prepare plan va tra plan id.
+- Sau apply, bao thanh cong/that bai va buoc verify.
 
 Mau cau:
 
 ```text
-Mình có thể lập kế hoạch cấu hình app này. Hiện bộ tool đang ở chế độ đọc/lập kế hoạch, chưa có write tool active nên mình chưa ghi dữ liệu vào Zilcode.
+Minh da chuan bi ke hoach va chua ghi du lieu vao Zilcode.
+Plan ID: ...
+Neu ban dong y, hay tra loi: "co, thuc hien ke hoach".
 ```
 
 ## 9. Quy tac an toan
 
-- Khong xoa node neu chua co dependency graph.
 - Khong doi ID chinh nhu appid/tableid/windowid/tabid/fieldid/columnid.
 - Khong tao field neu chua biet tab va column.
 - Khong tao menu neu chua biet window.
