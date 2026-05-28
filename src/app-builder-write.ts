@@ -98,8 +98,8 @@ async function prepareChange(
   const context = await loadWriteContext(env, session, args);
   const intent = getStringArg(args, "intent") || "change_app_builder";
   const userSummary = getStringArg(args, "summary") || getStringArg(args, "user_request");
-  const rawOperations = getRawOperations(args);
   const warnings: string[] = [];
+  const rawOperations = expandRawOperations(context, getRawOperations(args), warnings);
 
   if (!rawOperations.length) {
     return {
@@ -457,7 +457,7 @@ async function applyOperation(
 
 function getRawOperations(args: Record<string, unknown>): Record<string, unknown>[] {
   const plan = asRecord(args.plan);
-  const operations = args.operations ?? plan?.operations;
+  const operations = args.operations ?? plan?.operations ?? args.changes ?? plan?.changes;
   if (Array.isArray(operations)) {
     return operations.filter((operation): operation is Record<string, unknown> =>
       Boolean(operation) && typeof operation === "object" && !Array.isArray(operation)
@@ -471,6 +471,105 @@ function getRawOperations(args: Record<string, unknown>): Record<string, unknown
 
   const single = asRecord(args.operation) ?? plan;
   return single ? [single] : [];
+}
+
+function expandRawOperations(
+  context: WriteContext,
+  rawOperations: Record<string, unknown>[],
+  warnings: string[]
+): Record<string, unknown>[] {
+  const expanded: Record<string, unknown>[] = [];
+
+  for (const rawOperation of rawOperations) {
+    const op = getOperationName(rawOperation);
+    const action = getAction(op);
+    const target = getTarget(op, rawOperation);
+    const cascade = getBooleanLike(rawOperation.cascade)
+      || getBooleanLike(rawOperation.include_children)
+      || getBooleanLike(rawOperation.delete_children);
+
+    if (action === "delete" && target === "window" && cascade) {
+      expanded.push(...buildDeleteWindowCascadeOperations(context, rawOperation, warnings));
+      continue;
+    }
+
+    expanded.push(rawOperation);
+  }
+
+  return dedupeRawOperations(expanded);
+}
+
+function buildDeleteWindowCascadeOperations(
+  context: WriteContext,
+  rawOperation: Record<string, unknown>,
+  warnings: string[]
+): Record<string, unknown>[] {
+  const windowId = getDeleteIdValue(rawOperation, "windowid");
+  if (windowId === undefined || windowId === null || windowId === "") {
+    throw new Error("delete_window cascade thieu windowid/id_value.");
+  }
+
+  const windowIdText = String(windowId);
+  const tabs = (context.recordsByCollection.tabs ?? [])
+    .filter(tab => sameId(ci(tab, "windowid"), windowIdText));
+  const tabIds = new Set(tabs.map(tab => String(ci(tab, "tabid") ?? "")).filter(Boolean));
+  const fields = (context.recordsByCollection.fields ?? [])
+    .filter(field => tabIds.has(String(ci(field, "tabid") ?? "")));
+  const menus = (context.recordsByCollection.menus ?? [])
+    .filter(menu => sameId(ci(menu, "linkwindowid") ?? ci(menu, "windowid"), windowIdText));
+
+  warnings.push(
+    `delete_window cascade windowid=${windowIdText}: se xoa ${fields.length} field, ${tabs.length} tab, ${menus.length} menu lien ket va window. Khong xoa table/column/du lieu that.`
+  );
+
+  const operations: Record<string, unknown>[] = [];
+  for (const field of fields) {
+    const fieldId = ci(field, "fieldid");
+    if (fieldId === undefined || fieldId === null || fieldId === "") continue;
+    operations.push({
+      id: `delete_field_${fieldId}`,
+      op: "delete_field",
+      id_value: fieldId
+    });
+  }
+
+  for (const tab of tabs) {
+    const tabId = ci(tab, "tabid");
+    if (tabId === undefined || tabId === null || tabId === "") continue;
+    operations.push({
+      id: `delete_tab_${tabId}`,
+      op: "delete_tab",
+      id_value: tabId
+    });
+  }
+
+  for (const menu of menus) {
+    const menuId = ci(menu, "menuid");
+    if (menuId === undefined || menuId === null || menuId === "") continue;
+    operations.push({
+      id: `delete_menu_${menuId}`,
+      op: "delete_menu",
+      id_value: menuId
+    });
+  }
+
+  operations.push({
+    id: `delete_window_${windowIdText}`,
+    op: "delete_window",
+    id_value: windowId
+  });
+
+  const includeRelated = rawOperation.include_related;
+  if (Array.isArray(includeRelated)) {
+    const unsupported = includeRelated
+      .map(item => String(item))
+      .filter(item => !["tab", "tabs", "field", "fields", "menu", "menus"].includes(item.toLowerCase()));
+    if (unsupported.length) {
+      warnings.push(`Chua ho tro tu dong xoa related metadata ngoai window/tab/field/menu: ${unsupported.join(", ")}.`);
+    }
+  }
+
+  return operations;
 }
 
 function buildOperationsFromStructuredPlan(plan: Record<string, unknown>): Record<string, unknown>[] {
