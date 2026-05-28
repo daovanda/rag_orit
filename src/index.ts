@@ -86,7 +86,7 @@ export default {
           max_history_messages: MAX_HISTORY_MESSAGES
         });
 
-        const { answer, toolsCalled, images, sources, embedding_debug, rag_query_debug } = await runAgenticLoop(
+        const { answer, toolsCalled, sources, embedding_debug, rag_query_debug } = await runAgenticLoop(
           body.message,
           env,
           chatHistory,
@@ -97,15 +97,13 @@ export default {
         addDebugStep(debugSteps, "response.ready", "ok", "Chuẩn bị trả response về client.", {
           tools_called: toolsCalled,
           answer_chars: answer.length,
-          sources: sources?.length ?? 0,
-          images: images?.length ?? 0
+          sources: sources?.length ?? 0
         });
 
         return Response.json({
           success: true,
           response: answer,
           tools_called: toolsCalled,
-          images,
           sources,
           embedding_debug,
           rag_query_debug,

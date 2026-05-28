@@ -96,14 +96,6 @@ export interface ChatRequest {
   history?: unknown;
 }
 
-export interface GeneratedImage {
-  mime_type: "image/png";
-  data_url: string;
-  prompt: string;
-  width: number;
-  height: number;
-}
-
 export interface RagSource {
   id: string;
   title?: string;
@@ -122,7 +114,6 @@ export interface RagSource {
 export interface AgenticLoopResult {
   answer: string;
   toolsCalled: string[];
-  images?: GeneratedImage[];
   sources?: RagSource[];
   embedding_debug?: EmbeddingDebug;
   rag_query_debug?: RagQueryDebug;

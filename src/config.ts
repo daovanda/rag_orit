@@ -17,15 +17,12 @@ export const GENERAL_CHAT_MODEL = CHAT_MODEL;
 export const QUERY_REWRITE_MODEL = CHAT_MODEL;
 export const INTERNAL_CHAT_FALLBACK_MODEL = LLAMA_CHAT_MODEL;
 export const EMBEDDING_MODEL = "@cf/baai/bge-m3";
-export const CHART_IMAGE_MODEL = "@cf/black-forest-labs/flux-2-dev";
 
 export const TOOL_SELECTION_MAX_TOKENS = 2048;
 export const GENERAL_CHAT_MAX_TOKENS = 1024;
 export const RAG_FINAL_MAX_TOKENS = 2048;
 export const RAG_RERANK_MAX_TOKENS = 512;
 export const RAG_QUERY_REWRITE_MAX_TOKENS = 160;
-export const DEFAULT_CHART_WIDTH = 1024;
-export const DEFAULT_CHART_HEIGHT = 768;
 export const RAG_VECTOR_TOP_K = 16;
 export const RAG_MAX_CONTEXT_CHUNKS = 6;
 export const RAG_MIN_SCORE = 0.35;
