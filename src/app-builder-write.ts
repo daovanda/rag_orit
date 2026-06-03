@@ -321,6 +321,7 @@ function prepareOperation(
   const idValue = rawOperation.id_value
     ?? rawOperation.entity_id
     ?? rawOperation[`${TARGET_ID_FIELD[collection]}`]
+    ?? resolveTargetIdValue(context, collection, rawOperation)
     ?? rawOperation.id;
   const where = getStringFromUnknown(rawOperation.where);
 
@@ -996,6 +997,82 @@ function findApplicationId(context: WriteContext, value: string): unknown {
       return ci(app, "appid");
     }
   }
+
+  return undefined;
+}
+
+function resolveTargetIdValue(
+  context: WriteContext,
+  collection: string,
+  rawOperation: Record<string, unknown>
+): unknown {
+  const directNodeId = getStringFromUnknown(rawOperation.node_id);
+  const parsedNodeId = parseNodeIdForCollection(collection, directNodeId);
+  if (parsedNodeId !== undefined) return parsedNodeId;
+
+  const targetRef = rawOperation.target_ref
+    ?? rawOperation.entity_ref
+    ?? rawOperation.window_ref
+    ?? rawOperation.window_name
+    ?? rawOperation.old_name
+    ?? rawOperation.name;
+
+  if (targetRef === undefined || targetRef === null || targetRef === "") return undefined;
+
+  const records = context.recordsByCollection[collection] ?? [];
+  const idField = TARGET_ID_FIELD[collection];
+  const normalizedRef = normalizeLookupKey(String(targetRef));
+  const appFilter = rawOperation.appid
+    ?? (rawOperation.app_name !== undefined && rawOperation.app_name !== null && rawOperation.app_name !== ""
+      ? findApplicationId(context, String(rawOperation.app_name))
+      : undefined);
+
+  for (const record of records) {
+    if (appFilter !== undefined && appFilter !== null && appFilter !== "") {
+      const recordAppId = ci(record, "appid");
+      if (recordAppId !== undefined && recordAppId !== null && recordAppId !== "" && !sameId(recordAppId, appFilter)) {
+        continue;
+      }
+    }
+
+    const candidates = [
+      ci(record, idField),
+      ci(record, "name"),
+      ci(record, "appname"),
+      ci(record, "tablename"),
+      ci(record, "alias"),
+      ci(record, "columnname"),
+      ci(record, "windowname"),
+      ci(record, "tabname"),
+      ci(record, "fieldname"),
+      ci(record, "menuname"),
+      ci(record, "domainname")
+    ]
+      .map(value => normalizeLookupKey(String(value ?? "")))
+      .filter(Boolean);
+
+    if (candidates.includes(normalizedRef)) {
+      return ci(record, idField);
+    }
+  }
+
+  return undefined;
+}
+
+function parseNodeIdForCollection(collection: string, nodeId: string): string | undefined {
+  if (!nodeId) return undefined;
+  const parts = nodeId.split(":").filter(Boolean);
+  if (!parts.length) return undefined;
+  const type = parts[0];
+
+  if (collection === "applications" && type === "app") return parts[1];
+  if (collection === "windows" && type === "window") return parts[1];
+  if (collection === "domains" && type === "domain") return parts[1];
+  if (collection === "tables" && type === "table") return parts[2] ?? parts[1];
+  if (collection === "columns" && type === "column") return parts[3] ?? parts[2] ?? parts[1];
+  if (collection === "tabs" && type === "tab") return parts[2] ?? parts[1];
+  if (collection === "fields" && type === "field") return parts[3] ?? parts[2] ?? parts[1];
+  if (collection === "menus" && type === "menu") return parts[2] ?? parts[1];
 
   return undefined;
 }

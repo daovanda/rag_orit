@@ -274,14 +274,14 @@ function createDeterministicChangeAnswer(toolResults: ToolResultRecord[]): strin
     if (last.name === "app_builder_prepare_change") {
       if (data.valid === false || data.status === "invalid") {
         const errors = Array.isArray(data.blocking_errors) ? data.blocking_errors : [];
-        return [
-          "Ke hoach chua hop le nen toi chua ghi du lieu vao Zilcode.",
-          "",
-          "Loi can xu ly:",
-          ...errors.map((error, index) => `${index + 1}. ${String(error)}`),
-          "",
-          "Hay bo sung thong tin hoac cho phep toi lap lai plan voi cau truc ro hon."
-        ].join("\n").trim();
+      return [
+        "Kế hoạch chưa hợp lệ nên tôi chưa ghi dữ liệu vào Zilcode.",
+        "",
+        "Lỗi cần xử lý:",
+        ...errors.map((error, index) => `${index + 1}. ${String(error)}`),
+        "",
+        "Hãy bổ sung thông tin hoặc cho phép tôi lập lại plan với cấu trúc rõ hơn."
+      ].join("\n").trim();
       }
 
       const operations = Array.isArray(data.operations)
@@ -290,29 +290,29 @@ function createDeterministicChangeAnswer(toolResults: ToolResultRecord[]): strin
       const warnings = Array.isArray(data.warnings) ? data.warnings : [];
 
       return [
-        "Toi da chuan bi ke hoach App Builder va chua ghi du lieu vao he thong.",
+        "Tôi đã chuẩn bị kế hoạch App Builder và chưa ghi dữ liệu vào hệ thống.",
         `Plan ID: ${String(data.plan_id ?? "")}`,
-        `Tong so buoc: ${operations.length}.`,
+        `Tổng số bước: ${operations.length}.`,
         "",
-        "Cac buoc se thuc hien:",
+        "Các bước sẽ thực hiện:",
         ...operations.slice(0, 12).map((operation, index) => `${index + 1}. ${String(operation.label ?? operation.id ?? "operation")}`),
-        operations.length > 12 ? `... va ${operations.length - 12} buoc nua.` : "",
+        operations.length > 12 ? `... và ${operations.length - 12} bước nữa.` : "",
         warnings.length ? "" : "",
-        warnings.length ? "Luu y:" : "",
+        warnings.length ? "Lưu ý:" : "",
         ...warnings.slice(0, 6).map(warning => `- ${String(warning)}`),
         "",
-        "Neu ban dong y, hay tra loi: \"co, thuc hien ke hoach\"."
+        "Nếu bạn đồng ý, hãy trả lời: \"có, thực hiện kế hoạch\"."
       ].filter(Boolean).join("\n");
     }
 
     if (last.name === "app_builder_apply_change") {
       if (data.ok === true) {
         return [
-          "Da thuc hien xong ke hoach App Builder.",
+          "Đã thực hiện xong kế hoạch App Builder.",
           `Plan ID: ${String(data.plan_id ?? "")}`,
-          `So buoc da ghi: ${String(data.applied_count ?? 0)}.`,
+          `Số bước đã ghi: ${String(data.applied_count ?? 0)}.`,
           "",
-          "Buoc tiep theo nen lam la doc lai App Builder graph de kiem tra app/table/window/tab/field da duoc tao dung."
+          "Bước tiếp theo nên làm là đọc lại App Builder graph để kiểm tra thay đổi đã đúng."
         ].join("\n");
       }
 
@@ -322,14 +322,14 @@ function createDeterministicChangeAnswer(toolResults: ToolResultRecord[]): strin
       const failed = results.find(result => result.ok === false);
 
       return [
-        "Ke hoach chua duoc thuc hien thanh cong.",
-        `Da ghi duoc: ${String(data.applied_count ?? 0)} buoc.`,
-        `So buoc loi: ${String(data.failed_count ?? 0)}.`,
-        failed ? `Dung tai: ${String(failed.operation_id ?? "")}.` : "",
+        "Kế hoạch chưa được thực hiện thành công.",
+        `Đã ghi được: ${String(data.applied_count ?? 0)} bước.`,
+        `Số bước lỗi: ${String(data.failed_count ?? 0)}.`,
+        failed ? `Dừng tại: ${String(failed.operation_id ?? "")}.` : "",
         "",
-        failed ? `Loi chinh: ${String(failed.error ?? data.error ?? "Khong ro loi.")}` : `Loi chinh: ${String(data.error ?? "Khong ro loi.")}`,
+        failed ? `Lỗi chính: ${String(failed.error ?? data.error ?? "Không rõ lỗi.")}` : `Lỗi chính: ${String(data.error ?? "Không rõ lỗi.")}`,
         "",
-        "Toi chua coi thay doi nay la hoan tat. Can sua lai plan theo loi tren roi chuan bi ke hoach moi."
+        "Tôi chưa coi thay đổi này là hoàn tất. Cần sửa lại plan theo lỗi trên rồi chuẩn bị kế hoạch mới."
       ].filter(Boolean).join("\n");
     }
   } catch {
@@ -401,14 +401,6 @@ function extractWindowDeleteIdFromText(value: string): string | null {
   return null;
 }
 
-function findLatestDeleteWindowId(chatHistory: AIMessage[]): string | null {
-  for (let i = chatHistory.length - 1; i >= 0; i--) {
-    const id = extractWindowDeleteIdFromText(chatHistory[i].content ?? "");
-    if (id) return id;
-  }
-  return null;
-}
-
 function isDeleteWindowIntent(message: string): boolean {
   const text = normalizeVietnameseText(message);
   return /(xoa|delete|remove)/.test(text)
@@ -442,6 +434,54 @@ function extractCreateWindowRequest(message: string): { appName: string; windowN
     || (/m[aã]u/i.test(message) || normalized.includes("mau") ? "Cua so mau" : "Window moi");
 
   return { appName, windowName };
+}
+
+function extractRenameWindowRequest(message: string): { currentName: string; newName: string } | null {
+  const normalized = normalizeVietnameseText(message);
+  const wantsRename = /(doi ten|sua ten|rename|cap nhat ten|sua)/.test(normalized);
+  const mentionsWindow = /(window|cua so)/.test(normalized);
+  if (!wantsRename || !mentionsWindow) return null;
+
+  const patterns = [
+    /(?:cửa sổ|cua so|window)\s+["“]?([^"”]+?)["”]?\s+(?:thành|thanh|sang|to)\s+["“]?([^\s"”.,;]+)["”]?/i,
+    /(?:đổi tên|doi ten|rename)\s+(?:cửa sổ|cua so|window)\s+["“]?([^"”]+?)["”]?\s+(?:thành|thanh|sang|to)\s+["“]?([^\s"”.,;]+)["”]?/i
+  ];
+
+  for (const pattern of patterns) {
+    const match = message.match(pattern);
+    if (match?.[1] && match?.[2]) {
+      return {
+        currentName: match[1].trim(),
+        newName: match[2].trim()
+      };
+    }
+  }
+
+  return null;
+}
+
+function findLatestRenameWindowRequest(chatHistory: AIMessage[]): { currentName: string; newName: string } | null {
+  for (let i = chatHistory.length - 1; i >= 0; i--) {
+    if (chatHistory[i].role !== "user") continue;
+    const request = extractRenameWindowRequest(chatHistory[i].content ?? "");
+    if (request) return request;
+  }
+  return null;
+}
+
+function extractAppNameFromText(message: string): string | null {
+  const match = message.match(/\bapp\s+([^\-,.;\n]+)/i)
+    ?? message.match(/ung dung\s+([^\-,.;\n]+)/i)
+    ?? message.match(/ứng dụng\s+([^(\n,.;-]+)/i);
+  return match?.[1]?.trim() || null;
+}
+
+function findLatestAppName(chatHistory: AIMessage[]): string | null {
+  for (let i = chatHistory.length - 1; i >= 0; i--) {
+    const appName = extractAppNameFromText(chatHistory[i].content ?? "");
+    if (appName) return appName;
+  }
+  return null;
 }
 
 export function sanitizeChatHistory(history: unknown): AIMessage[] {
@@ -600,11 +640,53 @@ export async function runAgenticLoop(
     };
   }
 
+  const renameWindowRequest = extractRenameWindowRequest(userMessage)
+    ?? (normalizeVietnameseText(userMessage).includes("doi ten") ? findLatestRenameWindowRequest(chatHistory) : null);
+  if (renameWindowRequest && zilcodeSession) {
+    const appName = extractAppNameFromText(userMessage) ?? findLatestAppName(chatHistory);
+    addDebugStep(debugSteps, "agent.rename_window_prepare", "start", "Phat hien intent doi ten window, tu tao pending update_window plan.", {
+      current_name: renameWindowRequest.currentName,
+      new_name: renameWindowRequest.newName,
+      app_name: appName
+    });
+
+    const toolExecution = await executeTool(
+      {
+        name: "app_builder_prepare_change",
+        arguments: {
+          intent: "rename_window",
+          summary: `Đổi tên cửa sổ "${renameWindowRequest.currentName}" thành "${renameWindowRequest.newName}".`,
+          operations: [
+            {
+              id: `rename_window_${renameWindowRequest.currentName}`,
+              op: "update_window",
+              target_ref: renameWindowRequest.currentName,
+              app_name: appName,
+              record: {
+                windowname: renameWindowRequest.newName
+              }
+            }
+          ],
+          max_records_per_table: "5000"
+        }
+      },
+      env,
+      chatHistory,
+      debugSteps,
+      zilcodeSession
+    );
+    const toolResults = [{ name: "app_builder_prepare_change", content: toolExecution.content }];
+    const answer = await createFinalAnswerFromToolResults(userMessage, toolResults, env, chatHistory, debugSteps);
+
+    return {
+      answer,
+      toolsCalled: ["app_builder_prepare_change"]
+    };
+  }
+
   const deleteWindowId = isDeleteWindowIntent(userMessage)
     ? extractWindowDeleteIdFromText(userMessage)
-    : (isPrepareChangeRequest(userMessage) || isPlanConfirmation(userMessage))
-      ? findLatestDeleteWindowId(chatHistory)
-      : null;
+    : null;
 
   if (deleteWindowId && zilcodeSession) {
     addDebugStep(debugSteps, "agent.delete_window_prepare", "start", "Phat hien intent xoa window, tu tao pending delete plan.", {
