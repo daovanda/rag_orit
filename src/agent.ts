@@ -362,8 +362,9 @@ function isPlanConfirmation(message: string): boolean {
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase()
     .trim();
+  if (/^(co|yes|ok|dong y)$/i.test(text)) return true;
   return /^(co|yes|ok|dong y|thuc hien|hay thuc hien)/.test(text)
-    && /(thuc hien|ke hoach|apply|chay|tao|sua|xoa|cap nhat)/.test(text);
+    && /(thuc hien|tien hanh|ke hoach|apply|chay|tao|sua|xoa|cap nhat)/.test(text);
 }
 
 function findLatestPlanId(chatHistory: AIMessage[]): string | null {
@@ -373,6 +374,56 @@ function findLatestPlanId(chatHistory: AIMessage[]): string | null {
     if (match) return match[1];
   }
   return null;
+}
+
+function normalizeVietnameseText(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
+function extractWindowDeleteIdFromText(value: string): string | null {
+  const normalized = normalizeVietnameseText(value);
+  const patterns = [
+    /\bwindow\s*[:#=]?\s*(\d+)\b/,
+    /\bwindow\s*id\s*[:#=]?\s*(\d+)\b/,
+    /\bwindowid\s*[:#=]?\s*(\d+)\b/,
+    /\bcua so\s*[:#=]?\s*(\d+)\b/,
+    /\bcua so\s*id\s*[:#=]?\s*(\d+)\b/
+  ];
+
+  for (const pattern of patterns) {
+    const match = normalized.match(pattern);
+    if (match) return match[1];
+  }
+  return null;
+}
+
+function findLatestDeleteWindowId(chatHistory: AIMessage[]): string | null {
+  for (let i = chatHistory.length - 1; i >= 0; i--) {
+    const id = extractWindowDeleteIdFromText(chatHistory[i].content ?? "");
+    if (id) return id;
+  }
+  return null;
+}
+
+function isDeleteWindowIntent(message: string): boolean {
+  const text = normalizeVietnameseText(message);
+  return /(xoa|delete|remove)/.test(text)
+    && /(window|windowid|cua so)/.test(text)
+    && Boolean(extractWindowDeleteIdFromText(message));
+}
+
+function isPrepareChangeRequest(message: string): boolean {
+  const text = normalizeVietnameseText(message);
+  return text.includes("app_builder_prepare_change")
+    || text.includes("prepare change")
+    || text.includes("prepare_change")
+    || text.includes("tao plan")
+    || text.includes("chuan bi plan")
+    || text.includes("lap plan");
 }
 
 export function sanitizeChatHistory(history: unknown): AIMessage[] {
@@ -472,6 +523,7 @@ Chi neu nhung thong tin lien quan truc tiep toi cau hoi. Neu cau hoi rong, tom t
 Neu nguoi dung hoi ve he thong, tra loi theo cau truc: dang nhap/role, cac app chinh, moi app co gi dang chu y, va goi y dao sau. Khong liet ke tat ca node/edge.
 Neu nguoi dung hoi ve mot app/table/window/tab/field cu the, tap trung vao node do va quan he truc tiep. Khong liet ke cac phan khong lien quan.
 Neu nguoi dung yeu cau tao/sua/xoa, tra loi theo kieu IDE agent: hieu yeu cau, nhung gi se thay doi, cac buoc plan, rui ro/thieu thong tin, va yeu cau xac nhan truoc khi ghi.
+Dung dung ten metadata Zilcode hien tai: n_window, n_tab, n_field, n_menu hoac window/tab/field/menu. Khong tu doi sang AD_Window/AD_Tab/AD_Field neu tool khong tra ve cac ten do.
 Neu da co ket qua app_builder_prepare_change, chi tom tat plan id va cac buoc; khong mo rong thanh huong dan dai.
 Neu da co ket qua app_builder_apply_change, bao ro thanh cong/that bai va buoc verify tiep theo.
 Khong nhac den tool/function noi bo.`
@@ -528,6 +580,49 @@ export async function runAgenticLoop(
     };
   }
 
+  const deleteWindowId = isDeleteWindowIntent(userMessage)
+    ? extractWindowDeleteIdFromText(userMessage)
+    : (isPrepareChangeRequest(userMessage) || isPlanConfirmation(userMessage))
+      ? findLatestDeleteWindowId(chatHistory)
+      : null;
+
+  if (deleteWindowId && zilcodeSession) {
+    addDebugStep(debugSteps, "agent.delete_window_prepare", "start", "Phat hien intent xoa window, tu tao pending delete plan.", {
+      windowid: deleteWindowId
+    });
+
+    const toolExecution = await executeTool(
+      {
+        name: "app_builder_prepare_change",
+        arguments: {
+          intent: "delete_window",
+          summary: `Xoa vinh vien window ${deleteWindowId} cung cac tab, field va menu lien ket. Khong xoa table/column/du lieu that.`,
+          operations: [
+            {
+              id: `delete_window_${deleteWindowId}_cascade`,
+              op: "delete_window",
+              id_value: deleteWindowId,
+              cascade: true,
+              include_related: ["tabs", "fields", "menus"]
+            }
+          ],
+          max_records_per_table: "5000"
+        }
+      },
+      env,
+      chatHistory,
+      debugSteps,
+      zilcodeSession
+    );
+    const toolResults = [{ name: "app_builder_prepare_change", content: toolExecution.content }];
+    const answer = await createFinalAnswerFromToolResults(userMessage, toolResults, env, chatHistory, debugSteps);
+
+    return {
+      answer,
+      toolsCalled: ["app_builder_prepare_change"]
+    };
+  }
+
   const messages: AIMessage[] = [
     {
       role: "system",
@@ -552,6 +647,7 @@ Graph-first workflow:
 4. Neu can lap plan chinh xac hoac tra loi chi tiet, goi app_builder_node_detail.
 5. Neu user muon tao/sua/xoa, goi app_builder_creation_schema va app_builder_prepare_change de tao pending plan.
 6. Chi goi app_builder_apply_change khi user vua xac nhan ro rang va co plan_id hop le trong lich su hoi thoai.
+Neu user yeu cau xoa window theo id, khong hoi lap lai qua nhieu vong. Hay tao pending plan delete_window cascade bang app_builder_prepare_change; apply chi sau khi user xac nhan plan id.
 
 Dung rag_search khi can tai lieu huong dan/API contract, nhat la khi khong chac quy tac tao/sua.
 Sau khi co du thong tin, tra loi ngay. Khong goi tool lap lai neu khong co cau hoi moi ro rang.

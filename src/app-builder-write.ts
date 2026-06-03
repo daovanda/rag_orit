@@ -318,7 +318,10 @@ function prepareOperation(
     throw new Error("Create operation khong co record hop le.");
   }
 
-  const idValue = rawOperation.id_value ?? rawOperation.id ?? rawOperation[`${TARGET_ID_FIELD[collection]}`];
+  const idValue = rawOperation.id_value
+    ?? rawOperation.entity_id
+    ?? rawOperation[`${TARGET_ID_FIELD[collection]}`]
+    ?? rawOperation.id;
   const where = getStringFromUnknown(rawOperation.where);
 
   if ((action === "update" || action === "delete") && (idValue === undefined || idValue === null || idValue === "") && !where) {
@@ -572,6 +575,67 @@ function buildDeleteWindowCascadeOperations(
   return operations;
 }
 
+function dedupeRawOperations(operations: Record<string, unknown>[]): Record<string, unknown>[] {
+  const seen = new Set<string>();
+  const output: Record<string, unknown>[] = [];
+
+  for (const operation of operations) {
+    const op = getStringFromUnknown(operation.op ?? operation.action ?? operation.type);
+    if (!op.startsWith("delete_") && !op.startsWith("remove_")) {
+      output.push(operation);
+      continue;
+    }
+
+    const idValue = getDeleteIdValue(operation, "");
+    const where = getStringFromUnknown(operation.where);
+    const key = [
+      op,
+      getStringFromUnknown(operation.target),
+      idValue === undefined || idValue === null ? "" : String(idValue),
+      where
+    ].join(":");
+
+    if (seen.has(key)) continue;
+    seen.add(key);
+    output.push(operation);
+  }
+
+  return output;
+}
+
+function getDeleteIdValue(record: Record<string, unknown>, fallbackIdField: string): unknown {
+  return record.id_value
+    ?? record.entity_id
+    ?? record.id
+    ?? record[fallbackIdField]
+    ?? record.windowid
+    ?? record.tabid
+    ?? record.fieldid
+    ?? record.menuid
+    ?? record.tableid
+    ?? record.columnid
+    ?? record.domainid;
+}
+
+function sameId(left: unknown, right: unknown): boolean {
+  if (left === undefined || left === null || left === "") return false;
+  if (right === undefined || right === null || right === "") return false;
+  return String(left) === String(right);
+}
+
+function getBooleanLike(value: unknown): boolean {
+  if (value === true) return true;
+  if (typeof value === "number") return value !== 0;
+  if (typeof value !== "string") return false;
+  return ["true", "1", "yes", "y", "co", "ok"].includes(
+    value
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase()
+      .trim()
+  );
+}
+
 function buildOperationsFromStructuredPlan(plan: Record<string, unknown>): Record<string, unknown>[] {
   const operations: Record<string, unknown>[] = [];
   const appRecord = asRecord(plan.app) ?? getImplicitAppRecord(plan);
@@ -772,7 +836,12 @@ function getOperationName(rawOperation: Record<string, unknown>): string {
   if (typeof value !== "string" || !value.trim()) {
     throw new Error("Operation thieu op/action, vi du create_app, update_field, delete_menu.");
   }
-  return value.trim().toLowerCase();
+  const op = value.trim().toLowerCase();
+  if (["create", "add", "update", "edit", "rename", "delete", "remove"].includes(op)) {
+    const target = getStringFromUnknown(rawOperation.target ?? rawOperation.entity_type ?? rawOperation.target_type);
+    if (target) return `${op}_${normalizeTarget(target)}`;
+  }
+  return op;
 }
 
 function getAction(op: string): "create" | "update" | "delete" {
@@ -783,7 +852,7 @@ function getAction(op: string): "create" | "update" | "delete" {
 }
 
 function getTarget(op: string, rawOperation: Record<string, unknown>): string {
-  const explicit = getStringFromUnknown(rawOperation.target);
+  const explicit = getStringFromUnknown(rawOperation.target ?? rawOperation.entity_type ?? rawOperation.target_type);
   if (explicit) return normalizeTarget(explicit);
   return normalizeTarget(op.replace(/^(create|add|update|edit|rename|delete|remove)_/, ""));
 }
