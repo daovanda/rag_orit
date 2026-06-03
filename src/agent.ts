@@ -426,6 +426,24 @@ function isPrepareChangeRequest(message: string): boolean {
     || text.includes("lap plan");
 }
 
+function extractCreateWindowRequest(message: string): { appName: string; windowName: string } | null {
+  const normalized = normalizeVietnameseText(message);
+  const wantsCreate = /(tao|them|add|create)/.test(normalized);
+  const mentionsWindow = /(window|cua so)/.test(normalized);
+  if (!wantsCreate || !mentionsWindow) return null;
+
+  const appMatch = message.match(/\bapp\s+([^\-,.;\n]+)/i)
+    ?? message.match(/ung dung\s+([^\-,.;\n]+)/i);
+  const appName = appMatch?.[1]?.trim();
+  if (!appName) return null;
+
+  const explicitWindowMatch = message.match(/(?:tên|ten|name)\s+["“]?([^"”\n.,;]+)["”]?/i);
+  const windowName = explicitWindowMatch?.[1]?.trim()
+    || (/m[aã]u/i.test(message) || normalized.includes("mau") ? "Cua so mau" : "Window moi");
+
+  return { appName, windowName };
+}
+
 export function sanitizeChatHistory(history: unknown): AIMessage[] {
   if (!Array.isArray(history)) return [];
 
@@ -466,6 +484,7 @@ async function createFinalAnswerFromRag(
         role: "system",
         content: `Ban la tro ly Zilcode.
 Tra loi bang cung ngon ngu voi nguoi hoi.
+Neu nguoi hoi dung tieng Viet, toan bo cau tra loi phai la tieng Viet. Khong dung heading/cum tu tieng Anh.
 Du lieu co the gom RAG docs va App Builder graph tool results.
 Neu tai lieu khong du, noi ro phan nao chua chac.
 Khong nhac den tool/function noi bo.`
@@ -518,6 +537,7 @@ async function createFinalAnswerFromToolResults(
         role: "system",
         content: `Ban la tro ly Zilcode/App Builder.
 Tra loi bang cung ngon ngu voi nguoi hoi.
+Neu nguoi hoi dung tieng Viet, toan bo cau tra loi phai la tieng Viet. Khong dung heading/cum tu tieng Anh nhu "Proposed Change Plan", "Next steps", "Please confirm".
 Hay tra loi theo dung y dinh cua user, khong ke lai toan bo JSON.
 Chi neu nhung thong tin lien quan truc tiep toi cau hoi. Neu cau hoi rong, tom tat ngan gon theo nhom.
 Neu nguoi dung hoi ve he thong, tra loi theo cau truc: dang nhap/role, cac app chinh, moi app co gi dang chu y, va goi y dao sau. Khong liet ke tat ca node/edge.
@@ -623,11 +643,53 @@ export async function runAgenticLoop(
     };
   }
 
+  const createWindowRequest = extractCreateWindowRequest(userMessage);
+  if (createWindowRequest && zilcodeSession) {
+    addDebugStep(debugSteps, "agent.create_window_prepare", "start", "Phat hien intent tao window, tu tao pending create_window plan.", {
+      app_name: createWindowRequest.appName,
+      window_name: createWindowRequest.windowName
+    });
+
+    const toolExecution = await executeTool(
+      {
+        name: "app_builder_prepare_change",
+        arguments: {
+          intent: "add_window",
+          summary: `Tao them window "${createWindowRequest.windowName}" cho app "${createWindowRequest.appName}".`,
+          operations: [
+            {
+              id: "create_window_1",
+              op: "create_window",
+              record: {
+                app_name: createWindowRequest.appName,
+                windowname: createWindowRequest.windowName,
+                windowtype: "window"
+              }
+            }
+          ],
+          max_records_per_table: "5000"
+        }
+      },
+      env,
+      chatHistory,
+      debugSteps,
+      zilcodeSession
+    );
+    const toolResults = [{ name: "app_builder_prepare_change", content: toolExecution.content }];
+    const answer = await createFinalAnswerFromToolResults(userMessage, toolResults, env, chatHistory, debugSteps);
+
+    return {
+      answer,
+      toolsCalled: ["app_builder_prepare_change"]
+    };
+  }
+
   const messages: AIMessage[] = [
     {
       role: "system",
       content: `Ban la tro ly AI cho Zilcode va App Builder.
 Tra loi bang cung ngon ngu voi nguoi dung.
+Neu nguoi dung viet tieng Viet, bat buoc tra loi tieng Viet. Khong chuyen sang tieng Anh ke ca tieu de, bang bieu, hoac loi nhac xac nhan.
 
 Tools:
 - general_chat: dung cho hoi thoai thong thuong, khong can RAG/Zilcode.

@@ -891,6 +891,7 @@ function materializeCreateRecord(
   }
 
   if (collection === "tables") {
+    resolveAppReference(context, collection, record, warnings);
     if (!record.tablename && record.name) record.tablename = record.name;
     if (!record.alias) record.alias = record.tablename;
     if (!record.tabletype) record.tabletype = "table";
@@ -908,6 +909,7 @@ function materializeCreateRecord(
   }
 
   if (collection === "windows") {
+    resolveAppReference(context, collection, record, warnings);
     if (!record.windowname && record.name) record.windowname = record.name;
     if (!record.windowtype) record.windowtype = "window";
     if (!record.seqno) record.seqno = nextSeq(context.recordsByCollection.windows ?? []);
@@ -929,6 +931,7 @@ function materializeCreateRecord(
   }
 
   if (collection === "menus") {
+    resolveAppReference(context, collection, record, warnings);
     if (!record.menuname && record.name) record.menuname = record.name;
     if (!record.translate) record.translate = record.menuname;
     if (!record.seqno) record.seqno = nextSeq(context.recordsByCollection.menus ?? []);
@@ -942,6 +945,59 @@ function materializeCreateRecord(
   }
 
   return filterRecordByAllowedColumns(context, collection, record, warnings);
+}
+
+function resolveAppReference(
+  context: WriteContext,
+  collection: string,
+  record: Record<string, unknown>,
+  warnings: string[]
+): void {
+  if (record.appid !== undefined && record.appid !== null && record.appid !== "") return;
+
+  const appRef = record.app_ref
+    ?? record.app_name
+    ?? record.application
+    ?? record.application_name
+    ?? record.app;
+
+  if (appRef !== undefined && appRef !== null && appRef !== "") {
+    const appid = findApplicationId(context, String(appRef));
+    if (!appid) {
+      throw new Error(`Khong tim thay app theo ten/id: ${String(appRef)}.`);
+    }
+    record.appid = appid;
+  }
+
+  for (const key of ["app_ref", "app_name", "application", "application_name", "app"]) {
+    delete record[key];
+  }
+
+  if (record.appid === undefined || record.appid === null || record.appid === "") {
+    warnings.push(`${collection}: chua co appid. Neu day la node thuoc app moi, tool se tu noi appid sau prepare neu plan co create_app.`);
+  }
+}
+
+function findApplicationId(context: WriteContext, value: string): unknown {
+  const normalized = normalizeLookupKey(value);
+  if (!normalized) return undefined;
+
+  for (const app of context.recordsByCollection.applications ?? []) {
+    const candidates = [
+      ci(app, "appid"),
+      ci(app, "appname"),
+      ci(app, "appcode"),
+      ci(app, "name")
+    ]
+      .map(candidate => normalizeLookupKey(String(candidate ?? "")))
+      .filter(Boolean);
+
+    if (candidates.includes(normalized)) {
+      return ci(app, "appid");
+    }
+  }
+
+  return undefined;
 }
 
 function filterRecordByAllowedColumns(
