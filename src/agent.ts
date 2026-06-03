@@ -418,22 +418,224 @@ function isPrepareChangeRequest(message: string): boolean {
     || text.includes("lap plan");
 }
 
-function extractCreateWindowRequest(message: string): { appName: string; windowName: string } | null {
+function extractCreateAppRequest(message: string): { appName: string; template: "order_management" | "basic" } | null {
+  const normalized = normalizeVietnameseText(message);
+  const wantsCreate = /(tao|them|create|add)/.test(normalized);
+  const mentionsApp = /\bapp\b/.test(normalized) || normalized.includes("ung dung");
+  if (!wantsCreate || !mentionsApp) return null;
+  if (/(window|cua so|table|bang|field|truong|cot|column)/.test(normalized) && !/quan ly don hang|order/.test(normalized)) {
+    return null;
+  }
+
+  const quoted = message.match(/["“]([^"”\n]+)["”]/);
+  const explicitName = quoted?.[1]?.trim()
+    || message.match(/\bapp\s+(?:mới\s+|moi\s+)?([^,.;\n]+?)(?:\s+(?:với|voi|gồm|gom|các|cac|bảng|bang|window|cửa|cua)\b|[,.;]|$)/i)?.[1]?.trim()
+    || message.match(/(?:ứng dụng|ung dung)\s+([^,.;\n]+?)(?:\s+(?:với|voi|gồm|gom|các|cac|bảng|bang|window|cửa|cua)\b|[,.;]|$)/i)?.[1]?.trim();
+
+  const template = /quan ly don hang|order/.test(normalized) ? "order_management" : "basic";
+  const appName = template === "order_management"
+    ? "Quản lý đơn hàng"
+    : (explicitName || "Ứng dụng mới");
+  return { appName, template };
+}
+
+function buildCreateAppOperations(request: { appName: string; template: "order_management" | "basic" }): Record<string, unknown>[] {
+  if (request.template !== "order_management") {
+    return [
+      {
+        id: "create_app_1",
+        op: "create_app",
+        record: {
+          appname: request.appName
+        }
+      }
+    ];
+  }
+
+  const operations: Record<string, unknown>[] = [
+    {
+      id: "create_app_1",
+      op: "create_app",
+      record: {
+        appname: request.appName,
+        description: "Ứng dụng quản lý khách hàng, sản phẩm, đơn hàng và chi tiết đơn hàng."
+      }
+    }
+  ];
+
+  const tables = [
+    {
+      id: "customers",
+      tablename: "customers",
+      alias: "Khách hàng",
+      columns: [
+        ["customerid", "Mã khách hàng", "key"],
+        ["customername", "Tên khách hàng", "text"],
+        ["phone", "Số điện thoại", "text"],
+        ["email", "Email", "text"],
+        ["address", "Địa chỉ", "text"]
+      ]
+    },
+    {
+      id: "products",
+      tablename: "products",
+      alias: "Sản phẩm",
+      columns: [
+        ["productid", "Mã sản phẩm", "key"],
+        ["productname", "Tên sản phẩm", "text"],
+        ["unitprice", "Đơn giá", "number"],
+        ["stockqty", "Tồn kho", "number"],
+        ["category", "Danh mục", "text"]
+      ]
+    },
+    {
+      id: "orders",
+      tablename: "orders",
+      alias: "Đơn hàng",
+      columns: [
+        ["orderid", "Mã đơn hàng", "key"],
+        ["orderno", "Số đơn hàng", "text"],
+        ["customerid", "Khách hàng", "number"],
+        ["orderdate", "Ngày đặt", "date"],
+        ["status", "Trạng thái", "text"],
+        ["totalamount", "Tổng tiền", "number"]
+      ]
+    },
+    {
+      id: "order_items",
+      tablename: "order_items",
+      alias: "Chi tiết đơn hàng",
+      columns: [
+        ["orderitemid", "Mã dòng", "key"],
+        ["orderid", "Đơn hàng", "number"],
+        ["productid", "Sản phẩm", "number"],
+        ["quantity", "Số lượng", "number"],
+        ["unitprice", "Đơn giá", "number"],
+        ["linetotal", "Thành tiền", "number"]
+      ]
+    }
+  ] as const;
+
+  for (const table of tables) {
+    const tableOperationId = `create_table_${table.id}`;
+    operations.push({
+      id: tableOperationId,
+      op: "create_table",
+      record: {
+        tablename: table.tablename,
+        alias: table.alias,
+        tabletype: "table"
+      }
+    });
+
+    table.columns.forEach(([columnname, caption, columntype], index) => {
+      operations.push({
+        id: `create_column_${table.id}_${columnname}`,
+        op: "create_column",
+        record: {
+          tableid: `$${tableOperationId}.tableid`,
+          columnname,
+          caption,
+          columntype,
+          datatype: columntype,
+          seqno: index + 1
+        }
+      });
+    });
+  }
+
+  const windows = [
+    { id: "orders", windowname: "Quản lý đơn hàng", table: "orders", menu: "Đơn hàng" },
+    { id: "customers", windowname: "Quản lý khách hàng", table: "customers", menu: "Khách hàng" },
+    { id: "products", windowname: "Quản lý sản phẩm", table: "products", menu: "Sản phẩm" }
+  ] as const;
+
+  for (const window of windows) {
+    const windowOperationId = `create_window_${window.id}`;
+    const tabOperationId = `create_tab_${window.id}`;
+    const table = tables.find(item => item.id === window.table);
+    if (!table) continue;
+
+    operations.push({
+      id: windowOperationId,
+      op: "create_window",
+      record: {
+        appid: "$create_app_1.appid",
+        windowname: window.windowname,
+        windowtype: "window"
+      }
+    });
+
+    operations.push({
+      id: tabOperationId,
+      op: "create_tab",
+      record: {
+        windowid: `$${windowOperationId}.windowid`,
+        tableid: `$create_table_${window.table}.tableid`,
+        tabname: table.alias,
+        seqno: 1
+      }
+    });
+
+    table.columns.forEach(([columnname, caption, columntype], index) => {
+      operations.push({
+        id: `create_field_${window.id}_${columnname}`,
+        op: "create_field",
+        record: {
+          tabid: `$${tabOperationId}.tabid`,
+          columnid: `$create_column_${window.table}_${columnname}.columnid`,
+          fieldname: caption,
+          fieldtype: columntype === "key" ? "text" : columntype,
+          seqno: index + 1
+        }
+      });
+    });
+
+    operations.push({
+      id: `create_menu_${window.id}`,
+      op: "create_menu",
+      record: {
+        appid: "$create_app_1.appid",
+        menuname: window.menu,
+        translate: window.menu,
+        windowid: `$${windowOperationId}.windowid`
+      }
+    });
+  }
+
+  return operations;
+}
+
+function extractCreateWindowRequest(message: string): {
+  appName: string;
+  windowName: string;
+  tableName?: string;
+  tabName?: string;
+  menuName?: string;
+  createFields: boolean;
+} | null {
   const normalized = normalizeVietnameseText(message);
   const wantsCreate = /(tao|them|add|create)/.test(normalized);
   const mentionsWindow = /(window|cua so)/.test(normalized);
   if (!wantsCreate || !mentionsWindow) return null;
 
-  const appMatch = message.match(/\bapp\s+([^\-,.;\n]+)/i)
-    ?? message.match(/ung dung\s+([^\-,.;\n]+)/i);
+  const appMatch = message.match(/\bapp\s+["“]?([^"”\n,.;]+?)(?:\s+(?:từ|tu|với|voi|bảng|bang|table|window|cửa|cua)\b|["”]|\s*$|[,.;])/i)
+    ?? message.match(/(?:ứng dụng|ung dung)\s+["“]?([^"”\n,.;]+?)(?:\s+(?:từ|tu|với|voi|bảng|bang|table|window|cửa|cua)\b|["”]|\s*$|[,.;])/i);
   const appName = appMatch?.[1]?.trim();
   if (!appName) return null;
 
-  const explicitWindowMatch = message.match(/(?:tên|ten|name)\s+["“]?([^"”\n.,;]+)["”]?/i);
+  const tableMatch = message.match(/(?:bảng|bang|table)\s+["“]?([^"”\n,.;]+?)(?:["”]|\s+(?:và|va|cùng|cung|kèm|kem|menu|tab|field|trường|truong)\b|[,.;]|$)/i);
+  const tableName = tableMatch?.[1]?.trim();
+  const explicitWindowMatch = message.match(/(?:window|cửa sổ|cua so)\s+["“]?([^"”\n,.;]+?)(?:["”]|\s+(?:cho|của|cua|từ|tu|với|voi|bảng|bang|table)\b|[,.;]|$)/i)
+    ?? message.match(/(?:tên|ten|name)\s+["“]?([^"”\n.,;]+)["”]?/i);
   const windowName = explicitWindowMatch?.[1]?.trim()
-    || (/m[aã]u/i.test(message) || normalized.includes("mau") ? "Cua so mau" : "Window moi");
+    || (tableName ? `${tableName} Management` : (/m[aã]u/i.test(message) || normalized.includes("mau") ? "Cua so mau" : "Window moi"));
+  const tabName = tableName ? tableName : undefined;
+  const menuName = windowName;
+  const createFields = Boolean(tableName)
+    && /(field|fields|truong|trường|cot|cột|tat ca|tất cả|day du|đầy đủ)/.test(normalized);
 
-  return { appName, windowName };
+  return { appName, windowName, tableName, tabName, menuName, createFields };
 }
 
 function extractRenameWindowRequest(message: string): { currentName: string; newName: string } | null {
@@ -640,6 +842,41 @@ export async function runAgenticLoop(
     };
   }
 
+  const createAppRequest = extractCreateAppRequest(userMessage);
+  if (createAppRequest && zilcodeSession) {
+    const operations = buildCreateAppOperations(createAppRequest);
+    addDebugStep(debugSteps, "agent.create_app_prepare", "start", "Phat hien intent tao app, tu tao pending create_app plan.", {
+      app_name: createAppRequest.appName,
+      template: createAppRequest.template,
+      operations_count: operations.length
+    });
+
+    const toolExecution = await executeTool(
+      {
+        name: "app_builder_prepare_change",
+        arguments: {
+          intent: "create_app",
+          summary: createAppRequest.template === "order_management"
+            ? `Tạo app "${createAppRequest.appName}" với bảng, cột, window, tab, field và menu cơ bản.`
+            : `Tạo app "${createAppRequest.appName}".`,
+          operations,
+          max_records_per_table: "5000"
+        }
+      },
+      env,
+      chatHistory,
+      debugSteps,
+      zilcodeSession
+    );
+    const toolResults = [{ name: "app_builder_prepare_change", content: toolExecution.content }];
+    const answer = await createFinalAnswerFromToolResults(userMessage, toolResults, env, chatHistory, debugSteps);
+
+    return {
+      answer,
+      toolsCalled: ["app_builder_prepare_change"]
+    };
+  }
+
   const renameWindowRequest = extractRenameWindowRequest(userMessage)
     ?? (normalizeVietnameseText(userMessage).includes("doi ten") ? findLatestRenameWindowRequest(chatHistory) : null);
   if (renameWindowRequest && zilcodeSession) {
@@ -729,26 +966,55 @@ export async function runAgenticLoop(
   if (createWindowRequest && zilcodeSession) {
     addDebugStep(debugSteps, "agent.create_window_prepare", "start", "Phat hien intent tao window, tu tao pending create_window plan.", {
       app_name: createWindowRequest.appName,
-      window_name: createWindowRequest.windowName
+      window_name: createWindowRequest.windowName,
+      table_name: createWindowRequest.tableName,
+      create_fields: createWindowRequest.createFields
     });
+
+    const operations: Record<string, unknown>[] = [
+      {
+        id: "create_window_1",
+        op: "create_window",
+        record: {
+          app_name: createWindowRequest.appName,
+          windowname: createWindowRequest.windowName,
+          windowtype: "window"
+        }
+      }
+    ];
+
+    if (createWindowRequest.tableName) {
+      operations.push({
+        id: "create_tab_1",
+        op: "create_tab",
+        record: {
+          windowid: "$create_window_1.windowid",
+          app_name: createWindowRequest.appName,
+          table_name: createWindowRequest.tableName,
+          tabname: createWindowRequest.tabName ?? createWindowRequest.tableName,
+          create_fields: createWindowRequest.createFields
+        }
+      });
+      operations.push({
+        id: "create_menu_1",
+        op: "create_menu",
+        record: {
+          app_name: createWindowRequest.appName,
+          menuname: createWindowRequest.menuName ?? createWindowRequest.windowName,
+          linkwindowid: "$create_window_1.windowid"
+        }
+      });
+    }
 
     const toolExecution = await executeTool(
       {
         name: "app_builder_prepare_change",
         arguments: {
           intent: "add_window",
-          summary: `Tao them window "${createWindowRequest.windowName}" cho app "${createWindowRequest.appName}".`,
-          operations: [
-            {
-              id: "create_window_1",
-              op: "create_window",
-              record: {
-                app_name: createWindowRequest.appName,
-                windowname: createWindowRequest.windowName,
-                windowtype: "window"
-              }
-            }
-          ],
+          summary: createWindowRequest.tableName
+            ? `Tạo window "${createWindowRequest.windowName}", tab gắn bảng "${createWindowRequest.tableName}" và menu cho app "${createWindowRequest.appName}".`
+            : `Tạo thêm window "${createWindowRequest.windowName}" cho app "${createWindowRequest.appName}".`,
+          operations,
           max_records_per_table: "5000"
         }
       },

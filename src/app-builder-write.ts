@@ -33,6 +33,28 @@ const TARGET_ID_FIELD: Record<string, string> = {
   domains: "domainid"
 };
 
+const CREATE_REQUIRED_FIELDS: Record<string, string[]> = {
+  applications: ["appname", "seqno", "apptype"],
+  tables: ["tablename", "tabletype", "siteid", "serviceid"],
+  columns: ["tableid", "columnname", "seqno", "siteid"],
+  windows: ["appid", "windowname", "windowtype", "siteid"],
+  tabs: ["windowid", "tableid", "tabname", "seqno", "siteid"],
+  fields: ["tabid", "columnid", "fieldname", "seqno", "siteid"],
+  menus: ["appid", "menuname", "seqno", "siteid", "menutype"],
+  domains: ["domainname"]
+};
+
+const LEVEL3_COLLECTIONS = new Set(["windows", "tabs", "fields", "menus"]);
+
+const IMPLICIT_ALLOWED_FIELDS: Record<string, string[]> = {
+  tables: ["siteid", "serviceid"],
+  columns: ["siteid"],
+  windows: ["siteid"],
+  tabs: ["siteid"],
+  fields: ["siteid"],
+  menus: ["siteid", "menutype"]
+};
+
 interface PreparedOperation {
   id: string;
   action: "create" | "update" | "delete";
@@ -135,7 +157,7 @@ async function prepareChange(
     };
   }
 
-  autoWirePreparedOperations(operations, warnings);
+  autoWirePreparedOperations(context, operations, warnings);
 
   const plan: PendingChange = {
     plan_id: crypto.randomUUID(),
@@ -203,16 +225,19 @@ async function applyChange(
       continue;
     }
 
+    let request: Record<string, unknown> | undefined;
     try {
+      request = buildOperationRequestAudit(context, operation, state);
       const result = await applyOperation(env, context, operation, state);
       const reference = extractOperationReference(operation, result);
       state.refs[operation.id] = reference;
-      results.push({ operation_id: operation.id, ok: true, result, reference });
+      results.push({ operation_id: operation.id, ok: true, request, result, reference });
     } catch (error) {
       failed = true;
       results.push({
         operation_id: operation.id,
         ok: false,
+        request,
         error: truncateDebugText(error)
       });
     }
@@ -281,6 +306,18 @@ async function loadWriteContext(
       }
     }
 
+    if (allowed.size === 0) {
+      for (const record of recordsByCollection[key] ?? []) {
+        for (const recordKey of Object.keys(record)) {
+          allowed.add(recordKey.toLowerCase());
+        }
+      }
+    }
+
+    for (const implicitField of IMPLICIT_ALLOWED_FIELDS[key] ?? []) {
+      allowed.add(implicitField.toLowerCase());
+    }
+
     allowedColumnsByCollection[key] = allowed;
   }
 
@@ -315,11 +352,14 @@ function prepareOperation(
   const preparedRecord = action === "create"
     ? materializeCreateRecord(context, collection, record, warnings)
     : action === "update"
-      ? filterRecordByAllowedColumns(context, collection, record, warnings)
+      ? materializeUpdateRecord(context, collection, record, warnings)
       : undefined;
 
   if (action === "create" && (!preparedRecord || !Object.keys(preparedRecord).length)) {
     throw new Error("Create operation khong co record hop le.");
+  }
+  if (action === "update" && (!preparedRecord || !Object.keys(preparedRecord).length)) {
+    throw new Error("Update operation khong con field hop le sau khi loc metadata.");
   }
 
   const idValue = rawOperation.id_value
@@ -347,13 +387,26 @@ function prepareOperation(
   return { operation, warnings };
 }
 
-function autoWirePreparedOperations(operations: PreparedOperation[], warnings: string[]): void {
+function materializeUpdateRecord(
+  context: WriteContext,
+  collection: string,
+  rawRecord: Record<string, unknown>,
+  warnings: string[]
+): Record<string, unknown> {
+  const record = { ...rawRecord };
+  stripReferenceOnlyFields(record);
+  const filtered = filterRecordByAllowedColumns(context, collection, record, warnings);
+  return filtered;
+}
+
+function autoWirePreparedOperations(context: WriteContext, operations: PreparedOperation[], warnings: string[]): void {
   const firstCreatedApp = operations.find(operation => operation.action === "create" && operation.collection === "applications");
   if (!firstCreatedApp) return;
 
   for (const operation of operations) {
     if (operation.action !== "create" || !operation.record) continue;
     if (!["tables", "windows", "menus"].includes(operation.collection)) continue;
+    if (!isColumnAllowed(context, operation.collection, "appid")) continue;
     if (operation.record.appid !== undefined) continue;
     operation.record.appid = `$${firstCreatedApp.id}.appid`;
     warnings.push(`${operation.id}: tu dong lien ket appid voi ${firstCreatedApp.id}.appid.`);
@@ -368,12 +421,16 @@ function extractOperationReference(operation: PreparedOperation, result: unknown
     Object.assign(record, result as Record<string, unknown>);
   } else if (Array.isArray(result) && result[0] && typeof result[0] === "object") {
     Object.assign(record, result[0] as Record<string, unknown>);
+  } else if (Array.isArray(result) && result.length === 1) {
+    record[idField] = result[0];
   } else if (result !== undefined && result !== null && result !== "") {
     record[idField] = result;
   }
 
   const maybeId = record[idField] ?? record.id ?? record.ID ?? record.Id;
-  if (maybeId !== undefined && maybeId !== null && maybeId !== "") record[idField] = maybeId;
+  if (maybeId !== undefined && maybeId !== null && maybeId !== "") {
+    record[idField] = Array.isArray(maybeId) && maybeId.length === 1 ? maybeId[0] : maybeId;
+  }
   return record;
 }
 
@@ -410,6 +467,62 @@ function getReferenceValue(state: ApplyState, operationId: string, field: string
     throw new Error(`Khong resolve duoc reference $${operationId}.${field}; ket qua khong co field nay.`);
   }
   return value;
+}
+
+function buildOperationRequestAudit(
+  context: WriteContext,
+  operation: PreparedOperation,
+  state: ApplyState
+): Record<string, unknown> {
+  const collection = context.collections[operation.collection];
+  const sourceTable = asRecord(collection.source_table) ?? {};
+  const endpoint = String(sourceTable.urledit ?? sourceTable.urlview ?? "");
+  const idField = TARGET_ID_FIELD[operation.collection];
+
+  if (operation.action === "create") {
+    const record = resolveRecordReferences(operation.record ?? {}, state);
+    return {
+      method: "POST",
+      collection: operation.collection,
+      target: operation.target,
+      endpoint: addQuery(endpoint, { returnid: "true" }),
+      source_table: compactRecord(sourceTable, ["tableid", "tablename", "alias", "urledit", "urlview"]),
+      record_keys: Object.keys(record),
+      record_preview: compactRecord(record, Object.keys(record))
+    };
+  }
+
+  if (operation.action === "update") {
+    const body = resolveRecordReferences(operation.record ?? {}, state);
+    const idValue = resolveValueReference(operation.id_value, state);
+    if (idValue !== undefined) body[idField] = idValue;
+    const where = resolveStringReferences(operation.where, state);
+    return {
+      method: "PUT",
+      collection: operation.collection,
+      target: operation.target,
+      endpoint: where ? addQuery(endpoint, { where }) : addQuery(endpoint, { key: idField }),
+      source_table: compactRecord(sourceTable, ["tableid", "tablename", "alias", "urledit", "urlview"]),
+      id_field: idField,
+      id_value: idValue,
+      where,
+      record_keys: Object.keys(body),
+      record_preview: compactRecord(body, Object.keys(body))
+    };
+  }
+
+  const where = resolveStringReferences(operation.where, state)
+    || buildIdWhere(idField, resolveValueReference(operation.id_value, state));
+  return {
+    method: "DELETE",
+    collection: operation.collection,
+    target: operation.target,
+    endpoint: addQuery(endpoint, { where }),
+    source_table: compactRecord(sourceTable, ["tableid", "tablename", "alias", "urledit", "urlview"]),
+    id_field: idField,
+    id_value: operation.id_value,
+    where
+  };
 }
 
 async function applyOperation(
@@ -662,10 +775,92 @@ function expandRawOperations(
       continue;
     }
 
+    if (action === "create" && target === "tab" && wantsAutoCreateFields(rawOperation)) {
+      expanded.push(...buildCreateTabWithFieldsOperations(context, rawOperation, warnings));
+      continue;
+    }
+
     expanded.push(rawOperation);
   }
 
   return dedupeRawOperations(expanded);
+}
+
+function wantsAutoCreateFields(rawOperation: Record<string, unknown>): boolean {
+  const record = asRecord(rawOperation.record) ?? rawOperation;
+  return getBooleanLike(record.create_fields)
+    || getBooleanLike(record.include_fields)
+    || getBooleanLike(record.fields_from_table)
+    || getBooleanLike(rawOperation.create_fields)
+    || getBooleanLike(rawOperation.include_fields);
+}
+
+function buildCreateTabWithFieldsOperations(
+  context: WriteContext,
+  rawOperation: Record<string, unknown>,
+  warnings: string[]
+): Record<string, unknown>[] {
+  const record = { ...(asRecord(rawOperation.record) ?? stripOperationFields(rawOperation)) };
+  delete record.create_fields;
+  delete record.include_fields;
+  delete record.fields_from_table;
+
+  const tableRef = record.tableid ?? record.table_ref ?? record.table_name ?? record.table ?? record.tablename;
+  if (!hasUsableValue(tableRef)) {
+    throw new Error("create_tab create_fields=true can tableid/table_name de lay danh sach column.");
+  }
+
+  const appid = record.appid ?? resolveInlineAppReference(context, record);
+  const tableid = isReferenceValue(tableRef)
+    ? tableRef
+    : findUniqueRecordId(context, "tables", String(tableRef), { appid });
+  if (!hasUsableValue(tableid)) {
+    throw new Error(`Khong tim thay table de tao fields tu table: ${String(tableRef)}.`);
+  }
+
+  record.tableid = tableid;
+  const tabOperationId = getStringFromUnknown(rawOperation.id) || "create_tab_1";
+  const operations: Record<string, unknown>[] = [
+    {
+      ...rawOperation,
+      id: tabOperationId,
+      op: "create_tab",
+      record
+    }
+  ];
+
+  if (isReferenceValue(tableid)) {
+    warnings.push(`${tabOperationId}: tableid la reference nen chua the tu bung field theo column hien co.`);
+    return operations;
+  }
+
+  const columns = (context.recordsByCollection.columns ?? [])
+    .filter(column => sameId(ci(column, "tableid"), tableid))
+    .sort((left, right) => Number(ci(left, "seqno") ?? 0) - Number(ci(right, "seqno") ?? 0));
+
+  if (!columns.length) {
+    warnings.push(`${tabOperationId}: table ${String(tableid)} chua co column nao de tu tao field.`);
+    return operations;
+  }
+
+  columns.forEach((column, index) => {
+    const columnid = ci(column, "columnid");
+    const columnname = ci(column, "columnname");
+    if (!hasUsableValue(columnid) || !hasUsableValue(columnname)) return;
+    operations.push({
+      id: `${tabOperationId}_field_${String(columnid)}`,
+      op: "create_field",
+      record: {
+        tabid: `$${tabOperationId}.tabid`,
+        columnid,
+        fieldname: columnname,
+        seqno: index + 1
+      }
+    });
+  });
+
+  warnings.push(`${tabOperationId}: tu tao ${operations.length - 1} field tu cac column cua table ${String(tableid)}.`);
+  return operations;
 }
 
 function buildDeleteWindowCascadeOperations(
@@ -787,6 +982,11 @@ function sameId(left: unknown, right: unknown): boolean {
   if (left === undefined || left === null || left === "") return false;
   if (right === undefined || right === null || right === "") return false;
   return String(left) === String(right);
+}
+
+function sameLookupValue(left: unknown, right: unknown): boolean {
+  if (!hasUsableValue(left) || !hasUsableValue(right)) return false;
+  return normalizeLookupKey(String(left)) === normalizeLookupKey(String(right));
 }
 
 function getBooleanLike(value: unknown): boolean {
@@ -1065,25 +1265,48 @@ function materializeCreateRecord(
     if (!record.appname) throw new Error("create_app thieu appname.");
     const apps = context.recordsByCollection.applications ?? [];
     applyDefaultIfAllowed(context, collection, record, "seqno", nextSeq(apps));
-    applyDefaultIfAllowed(context, collection, record, "apptype", inferExistingValue(apps, "apptype") ?? 0);
+    normalizeApplicationType(context, record, warnings);
     applyDefaultIfAllowed(context, collection, record, "siteid", inferSessionSiteId(context.session) ?? inferExistingValue(apps, "siteid"));
   }
 
   if (collection === "tables") {
-    resolveAppReference(context, collection, record, warnings);
+    if (isColumnAllowed(context, collection, "appid")) {
+      resolveAppReference(context, collection, record, warnings);
+    } else {
+      delete record.appid;
+    }
     if (!record.tablename && record.name) record.tablename = record.name;
     if (!record.alias) record.alias = record.tablename;
     if (!record.tabletype) record.tabletype = "table";
-    if (!record.seqno) record.seqno = nextSeq(context.recordsByCollection.tables ?? []);
+    applyDefaultIfAllowed(
+      context,
+      collection,
+      record,
+      "siteid",
+      inferSessionSiteId(context.session)
+        ?? inferExistingValue(context.recordsByCollection.tables ?? [], "siteid")
+        ?? inferExistingValue(context.recordsByCollection.applications ?? [], "siteid")
+    );
+    applyDefaultIfAllowed(context, collection, record, "serviceid", inferTableServiceId(context, record));
+    applyDefaultIfAllowed(context, collection, record, "seqno", nextSeq(context.recordsByCollection.tables ?? []));
     if (!record.tablename) throw new Error("create_table thieu tablename.");
-    if (!record.appid) warnings.push("create_table chua co appid; neu operation phu thuoc app moi, apply tool hien chua resolve bien tam.");
   }
 
   if (collection === "columns") {
+    resolveTableReference(context, record, warnings);
     if (!record.columnname && record.name) record.columnname = record.name;
     if (!record.caption && record.label) record.caption = record.label;
     if (!record.datatype && record.columntype) record.datatype = record.columntype;
     if (!record.columntype && record.datatype) record.columntype = record.datatype;
+    applyDefaultIfAllowed(
+      context,
+      collection,
+      record,
+      "siteid",
+      inferSessionSiteId(context.session)
+        ?? inferExistingValue(context.recordsByCollection.columns ?? [], "siteid")
+        ?? inferExistingValue(context.recordsByCollection.applications ?? [], "siteid")
+    );
     if (!record.seqno) record.seqno = nextSeq(context.recordsByCollection.columns ?? []);
     if (!record.columnname) throw new Error("create_column thieu columnname.");
   }
@@ -1092,28 +1315,75 @@ function materializeCreateRecord(
     resolveAppReference(context, collection, record, warnings);
     if (!record.windowname && record.name) record.windowname = record.name;
     if (!record.windowtype) record.windowtype = "window";
-    if (!record.seqno) record.seqno = nextSeq(context.recordsByCollection.windows ?? []);
+    applyDefaultIfAllowed(
+      context,
+      collection,
+      record,
+      "siteid",
+      inferSessionSiteId(context.session)
+        ?? inferExistingValue(context.recordsByCollection.windows ?? [], "siteid")
+        ?? inferExistingValue(context.recordsByCollection.applications ?? [], "siteid")
+    );
+    applyDefaultIfAllowed(context, collection, record, "seqno", nextSeq(context.recordsByCollection.windows ?? []));
     if (!record.windowname) throw new Error("create_window thieu windowname.");
   }
 
   if (collection === "tabs") {
+    resolveWindowReference(context, record, warnings);
+    resolveTableReference(context, record, warnings);
     if (!record.tabname && record.name) record.tabname = record.name;
     if (record.tablevel === undefined) record.tablevel = record.parenttabid ? 1 : 0;
+    applyDefaultIfAllowed(
+      context,
+      collection,
+      record,
+      "siteid",
+      inferSessionSiteId(context.session)
+        ?? inferExistingValue(context.recordsByCollection.tabs ?? [], "siteid")
+        ?? inferExistingValue(context.recordsByCollection.applications ?? [], "siteid")
+    );
     if (!record.seqno) record.seqno = nextSeq(context.recordsByCollection.tabs ?? []);
     if (!record.tabname) throw new Error("create_tab thieu tabname.");
   }
 
   if (collection === "fields") {
+    resolveTabReference(context, record, warnings);
+    resolveColumnReference(context, record, warnings);
     if (!record.fieldname && record.name) record.fieldname = record.name;
     if (!record.fieldname && record.columnname) record.fieldname = record.columnname;
+    if (!record.fieldname && record.columnid) {
+      const column = findRecordById(context, "columns", record.columnid);
+      const columnName = column ? ci(column, "columnname") : undefined;
+      if (columnName) record.fieldname = columnName;
+    }
+    applyDefaultIfAllowed(
+      context,
+      collection,
+      record,
+      "siteid",
+      inferSessionSiteId(context.session)
+        ?? inferExistingValue(context.recordsByCollection.fields ?? [], "siteid")
+        ?? inferExistingValue(context.recordsByCollection.applications ?? [], "siteid")
+    );
     if (!record.seqno) record.seqno = nextSeq(context.recordsByCollection.fields ?? []);
     if (!record.fieldname) throw new Error("create_field thieu fieldname/columnname.");
   }
 
   if (collection === "menus") {
     resolveAppReference(context, collection, record, warnings);
+    resolveWindowLinkReference(context, record, warnings);
     if (!record.menuname && record.name) record.menuname = record.name;
     if (!record.translate) record.translate = record.menuname;
+    applyDefaultIfAllowed(context, collection, record, "menutype", "menu");
+    applyDefaultIfAllowed(
+      context,
+      collection,
+      record,
+      "siteid",
+      inferSessionSiteId(context.session)
+        ?? inferExistingValue(context.recordsByCollection.menus ?? [], "siteid")
+        ?? inferExistingValue(context.recordsByCollection.applications ?? [], "siteid")
+    );
     if (!record.seqno) record.seqno = nextSeq(context.recordsByCollection.menus ?? []);
     if (!record.menuname) throw new Error("create_menu thieu menuname.");
   }
@@ -1124,7 +1394,11 @@ function materializeCreateRecord(
     if (record.values && !record.domainjson) record.domainjson = JSON.stringify(record.values);
   }
 
-  return filterRecordByAllowedColumns(context, collection, record, warnings);
+  stripReferenceOnlyFields(record);
+  const filtered = filterRecordByAllowedColumns(context, collection, record, warnings);
+  validateRequiredFields(context, collection, filtered);
+  ensureNoDuplicateCreateRecord(context, collection, filtered);
+  return filtered;
 }
 
 function resolveAppReference(
@@ -1158,6 +1432,125 @@ function resolveAppReference(
   }
 }
 
+function resolveTableReference(
+  context: WriteContext,
+  record: Record<string, unknown>,
+  warnings: string[]
+): void {
+  if (hasUsableValue(record.tableid)) return;
+  const tableRef = record.table_ref ?? record.table_name ?? record.table ?? record.tablename ?? record.alias;
+  if (!hasUsableValue(tableRef)) return;
+
+  const appid = record.appid ?? resolveInlineAppReference(context, record);
+  const tableid = findUniqueRecordId(context, "tables", String(tableRef), { appid });
+  if (!tableid) throw new Error(`Khong tim thay table theo ten/id: ${String(tableRef)}.`);
+  record.tableid = tableid;
+  warnings.push(`Resolve table reference ${String(tableRef)} -> tableid=${String(tableid)}.`);
+}
+
+function resolveWindowReference(
+  context: WriteContext,
+  record: Record<string, unknown>,
+  warnings: string[]
+): void {
+  if (hasUsableValue(record.windowid)) return;
+  const windowRef = record.window_ref ?? record.window_name ?? record.window ?? record.windowname;
+  if (!hasUsableValue(windowRef)) return;
+
+  const appid = record.appid ?? resolveInlineAppReference(context, record);
+  const windowid = findUniqueRecordId(context, "windows", String(windowRef), { appid });
+  if (!windowid) throw new Error(`Khong tim thay window theo ten/id: ${String(windowRef)}.`);
+  record.windowid = windowid;
+  warnings.push(`Resolve window reference ${String(windowRef)} -> windowid=${String(windowid)}.`);
+}
+
+function resolveTabReference(
+  context: WriteContext,
+  record: Record<string, unknown>,
+  warnings: string[]
+): void {
+  if (hasUsableValue(record.tabid)) return;
+  const tabRef = record.tab_ref ?? record.tab_name ?? record.tab ?? record.tabname;
+  if (!hasUsableValue(tabRef)) return;
+
+  const tabid = findUniqueRecordId(context, "tabs", String(tabRef), {
+    windowid: record.windowid,
+    tableid: record.tableid
+  });
+  if (!tabid) throw new Error(`Khong tim thay tab theo ten/id: ${String(tabRef)}.`);
+  record.tabid = tabid;
+  warnings.push(`Resolve tab reference ${String(tabRef)} -> tabid=${String(tabid)}.`);
+}
+
+function resolveColumnReference(
+  context: WriteContext,
+  record: Record<string, unknown>,
+  warnings: string[]
+): void {
+  if (hasUsableValue(record.columnid)) return;
+  const columnRef = record.column_ref ?? record.column_name ?? record.column ?? record.columnname ?? record.fieldname;
+  if (!hasUsableValue(columnRef)) return;
+
+  const columnid = findUniqueRecordId(context, "columns", String(columnRef), {
+    tableid: record.tableid
+  });
+  if (!columnid) throw new Error(`Khong tim thay column theo ten/id: ${String(columnRef)}.`);
+  record.columnid = columnid;
+  warnings.push(`Resolve column reference ${String(columnRef)} -> columnid=${String(columnid)}.`);
+}
+
+function resolveWindowLinkReference(
+  context: WriteContext,
+  record: Record<string, unknown>,
+  warnings: string[]
+): void {
+  if (hasUsableValue(record.linkwindowid) || hasUsableValue(record.windowid)) {
+    mirrorMenuWindowLinkColumns(context, record);
+    return;
+  }
+
+  const windowRef = record.linkwindow_ref
+    ?? record.link_window
+    ?? record.linkwindow
+    ?? record.window_ref
+    ?? record.window_name
+    ?? record.window
+    ?? record.windowname;
+  if (!hasUsableValue(windowRef)) {
+    return;
+  }
+
+  const appid = record.appid ?? resolveInlineAppReference(context, record);
+  const windowid = findUniqueRecordId(context, "windows", String(windowRef), { appid });
+  if (!windowid) throw new Error(`Khong tim thay window de link menu: ${String(windowRef)}.`);
+  setMenuWindowLink(context, record, windowid);
+  warnings.push(`Resolve menu window link ${String(windowRef)} -> ${getMenuWindowLinkColumns(context).join("/") || "linkwindowid"}=${String(windowid)}.`);
+}
+
+function setMenuWindowLink(context: WriteContext, record: Record<string, unknown>, windowid: unknown): void {
+  const columns = getMenuWindowLinkColumns(context);
+  if (!columns.length) {
+    record.linkwindowid = windowid;
+    return;
+  }
+  for (const column of columns) {
+    record[column] = windowid;
+  }
+}
+
+function mirrorMenuWindowLinkColumns(context: WriteContext, record: Record<string, unknown>): void {
+  const value = hasUsableValue(record.linkwindowid) ? record.linkwindowid : record.windowid;
+  if (!hasUsableValue(value)) return;
+  setMenuWindowLink(context, record, value);
+}
+
+function getMenuWindowLinkColumns(context: WriteContext): string[] {
+  const columns: string[] = [];
+  if (isColumnAllowed(context, "menus", "linkwindowid")) columns.push("linkwindowid");
+  if (isColumnAllowed(context, "menus", "windowid")) columns.push("windowid");
+  return columns;
+}
+
 function findApplicationId(context: WriteContext, value: string): unknown {
   const normalized = normalizeLookupKey(value);
   if (!normalized) return undefined;
@@ -1178,6 +1571,87 @@ function findApplicationId(context: WriteContext, value: string): unknown {
   }
 
   return undefined;
+}
+
+function resolveInlineAppReference(context: WriteContext, record: Record<string, unknown>): unknown {
+  const appRef = record.app_ref
+    ?? record.app_name
+    ?? record.application
+    ?? record.application_name
+    ?? record.app;
+  if (!hasUsableValue(appRef) || isReferenceValue(appRef)) return undefined;
+  return findApplicationId(context, String(appRef));
+}
+
+function findUniqueRecordId(
+  context: WriteContext,
+  collection: string,
+  value: string,
+  filters: Record<string, unknown> = {}
+): unknown {
+  if (isReferenceValue(value)) return value;
+  const normalized = normalizeLookupKey(value);
+  if (!normalized) return undefined;
+
+  const records = context.recordsByCollection[collection] ?? [];
+  const idField = TARGET_ID_FIELD[collection];
+  const matches = records.filter(record => {
+    for (const [key, expected] of Object.entries(filters)) {
+      if (!hasUsableValue(expected) || isReferenceValue(expected)) continue;
+      const actual = ci(record, key);
+      if (hasUsableValue(actual) && !sameId(actual, expected)) return false;
+    }
+
+    return recordLookupCandidates(collection, record, idField)
+      .map(candidate => normalizeLookupKey(String(candidate ?? "")))
+      .filter(Boolean)
+      .includes(normalized);
+  });
+
+  if (matches.length > 1) {
+    const preview = matches
+      .slice(0, 5)
+      .map(record => `${String(ci(record, idField))}:${String(ci(record, "appname") ?? ci(record, "tablename") ?? ci(record, "windowname") ?? ci(record, "tabname") ?? ci(record, "columnname") ?? ci(record, "fieldname") ?? ci(record, "menuname") ?? "")}`)
+      .join(", ");
+    throw new Error(`Tim thay nhieu ${collection} khop "${value}": ${preview}. Hay chi ro id.`);
+  }
+
+  return matches[0] ? ci(matches[0], idField) : undefined;
+}
+
+function findRecordById(
+  context: WriteContext,
+  collection: string,
+  idValue: unknown
+): Record<string, unknown> | undefined {
+  if (!hasUsableValue(idValue) || isReferenceValue(idValue)) return undefined;
+  const idField = TARGET_ID_FIELD[collection];
+  return (context.recordsByCollection[collection] ?? [])
+    .find(record => sameId(ci(record, idField), idValue));
+}
+
+function recordLookupCandidates(collection: string, record: Record<string, unknown>, idField: string): unknown[] {
+  const common = [
+    ci(record, idField),
+    ci(record, "name"),
+    ci(record, "appname"),
+    ci(record, "tablename"),
+    ci(record, "alias"),
+    ci(record, "columnname"),
+    ci(record, "windowname"),
+    ci(record, "tabname"),
+    ci(record, "fieldname"),
+    ci(record, "menuname"),
+    ci(record, "domainname")
+  ];
+
+  if (collection === "columns") {
+    common.push(`${String(ci(record, "tablename") ?? "")}.${String(ci(record, "columnname") ?? "")}`);
+  }
+  if (collection === "fields") {
+    common.push(`${String(ci(record, "tabname") ?? "")}.${String(ci(record, "fieldname") ?? "")}`);
+  }
+  return common;
 }
 
 function resolveTargetIdValue(
@@ -1276,6 +1750,81 @@ function filterRecordByAllowedColumns(
   return output;
 }
 
+function validateRequiredFields(
+  context: WriteContext,
+  collection: string,
+  record: Record<string, unknown>
+): void {
+  const required = CREATE_REQUIRED_FIELDS[collection] ?? [];
+  const missing = required.filter(key => isColumnAllowed(context, collection, key) && !hasUsableValue(record[key]));
+  if (missing.length) {
+    const label = LEVEL3_COLLECTIONS.has(collection)
+      ? "Level 3 create metadata"
+      : "Create metadata";
+    throw new Error(`${label} ${collection} thieu field bat buoc: ${missing.join(", ")}.`);
+  }
+}
+
+function ensureNoDuplicateCreateRecord(
+  context: WriteContext,
+  collection: string,
+  record: Record<string, unknown>
+): void {
+  const records = context.recordsByCollection[collection] ?? [];
+  if (!records.length) return;
+
+  if (collection === "applications") {
+    ensureUniqueByKeys(records, record, ["appname"], "app");
+  } else if (collection === "tables") {
+    ensureUniqueByKeys(records, record, ["tablename"], "table");
+  } else if (collection === "columns") {
+    ensureUniqueByKeys(records, record, ["tableid", "columnname"], "column");
+  } else if (collection === "windows") {
+    ensureUniqueByKeys(records, record, ["appid", "windowname"], "window");
+  } else if (collection === "tabs") {
+    ensureUniqueByKeys(records, record, ["windowid", "tabname"], "tab");
+  } else if (collection === "fields") {
+    ensureUniqueByKeys(records, record, ["tabid", "columnid"], "field");
+  } else if (collection === "menus") {
+    ensureUniqueByKeys(records, record, ["appid", "menuname"], "menu");
+  } else if (collection === "domains") {
+    ensureUniqueByKeys(records, record, ["domainname"], "domain");
+  }
+}
+
+function ensureUniqueByKeys(
+  records: Record<string, unknown>[],
+  record: Record<string, unknown>,
+  keys: string[],
+  label: string
+): void {
+  const effectiveKeys = keys.filter(key => hasUsableValue(record[key]) && !isReferenceValue(record[key]));
+  if (effectiveKeys.length !== keys.length) return;
+
+  const duplicate = records.find(existing =>
+    effectiveKeys.every(key => sameLookupValue(ci(existing, key), record[key]))
+  );
+  if (!duplicate) return;
+
+  const idPreview = ["appid", "tableid", "columnid", "windowid", "tabid", "fieldid", "menuid", "domainid"]
+    .map(key => ci(duplicate, key))
+    .find(hasUsableValue);
+  throw new Error(`Da ton tai ${label} voi ${keys.map(key => `${key}=${String(record[key])}`).join(", ")}${idPreview ? ` (id=${String(idPreview)})` : ""}. Khong tao trung.`);
+}
+
+function stripReferenceOnlyFields(record: Record<string, unknown>): void {
+  for (const key of [
+    "app_ref", "app_name", "application", "application_name", "app",
+    "table_ref", "table_name", "table",
+    "window_ref", "window_name", "window",
+    "tab_ref", "tab_name", "tab",
+    "column_ref", "column_name", "column",
+    "linkwindow_ref", "link_window", "linkwindow"
+  ]) {
+    delete record[key];
+  }
+}
+
 function applyDefaultIfAllowed(
   context: WriteContext,
   collection: string,
@@ -1288,6 +1837,19 @@ function applyDefaultIfAllowed(
   if (!allowed || allowed.size === 0 || allowed.has(key.toLowerCase())) {
     record[key] = value;
   }
+}
+
+function isColumnAllowed(context: WriteContext, collection: string, key: string): boolean {
+  const allowed = context.allowedColumnsByCollection[collection];
+  return !allowed || allowed.size === 0 || allowed.has(key.toLowerCase());
+}
+
+function hasUsableValue(value: unknown): boolean {
+  return value !== undefined && value !== null && value !== "";
+}
+
+function isReferenceValue(value: unknown): boolean {
+  return typeof value === "string" && /^\$[A-Za-z0-9_-]+\.[A-Za-z0-9_]+$/.test(value.trim());
 }
 
 function nextSeq(records: Record<string, unknown>[]): number {
@@ -1308,6 +1870,71 @@ function inferExistingValue(records: Record<string, unknown>[], key: string): un
 
 function inferSessionSiteId(session: ZilcodeSession): unknown {
   return ci(session.user, "siteid") ?? ci(session.user, "site_id");
+}
+
+function inferTableServiceId(context: WriteContext, record: Record<string, unknown>): unknown {
+  const tabletype = normalizeLookupKey(String(record.tabletype ?? "table"));
+  const tables = context.recordsByCollection.tables ?? [];
+  const candidates = tables.filter(table => {
+    const existingType = normalizeLookupKey(String(ci(table, "tabletype") ?? "table"));
+    return existingType === tabletype && hasUsableValue(ci(table, "serviceid"));
+  });
+  const mode = inferMostCommonValue(candidates, "serviceid");
+  if (hasUsableValue(mode)) return mode;
+  return inferExistingValue(tables, "serviceid");
+}
+
+function inferMostCommonValue(records: Record<string, unknown>[], key: string): unknown {
+  const counts = new Map<string, { value: unknown; count: number; firstIndex: number }>();
+  records.forEach((record, index) => {
+    const value = ci(record, key);
+    if (!hasUsableValue(value)) return;
+    const normalized = String(value);
+    const existing = counts.get(normalized);
+    if (existing) {
+      existing.count += 1;
+    } else {
+      counts.set(normalized, { value, count: 1, firstIndex: index });
+    }
+  });
+
+  return [...counts.values()]
+    .sort((left, right) => right.count - left.count || left.firstIndex - right.firstIndex)[0]?.value;
+}
+
+function normalizeApplicationType(
+  context: WriteContext,
+  record: Record<string, unknown>,
+  warnings: string[]
+): void {
+  if (!isColumnAllowed(context, "applications", "apptype")) return;
+
+  const apps = context.recordsByCollection.applications ?? [];
+  const existingTypes = apps
+    .map(app => ci(app, "apptype"))
+    .filter(hasUsableValue);
+  const defaultType = existingTypes.find(type => normalizeLookupKey(String(type)) === "app")
+    ?? inferExistingValue(apps, "apptype")
+    ?? "app";
+  const current = record.apptype;
+
+  if (!hasUsableValue(current)) {
+    record.apptype = defaultType;
+    return;
+  }
+
+  if (typeof current === "number" && Number.isFinite(current)) return;
+
+  if (typeof current === "string") {
+    const trimmed = current.trim();
+    if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
+      record.apptype = Number(trimmed);
+      return;
+    }
+  }
+
+  warnings.push(`create_app apptype="${String(current)}" khong phai gia tri metadata hop le; dung default apptype=${String(defaultType)}.`);
+  record.apptype = defaultType;
 }
 
 function summarizePlan(plan: PendingChange): Record<string, unknown> {
@@ -1332,6 +1959,14 @@ function summarizeOperation(operation: PreparedOperation): Record<string, unknow
 }
 
 function getOperationLabel(target: string, record: Record<string, unknown>, idValue: unknown): string {
+  if (target === "app") return String(record.appname ?? idValue ?? target);
+  if (target === "table") return String(record.tablename ?? record.alias ?? idValue ?? target);
+  if (target === "column") return String(record.columnname ?? idValue ?? target);
+  if (target === "window") return String(record.windowname ?? idValue ?? target);
+  if (target === "tab") return String(record.tabname ?? idValue ?? target);
+  if (target === "field") return String(record.fieldname ?? record.columnname ?? idValue ?? target);
+  if (target === "menu") return String(record.menuname ?? idValue ?? target);
+  if (target === "domain") return String(record.domainname ?? idValue ?? target);
   return String(
     record.appname
     ?? record.tablename
@@ -1344,6 +1979,15 @@ function getOperationLabel(target: string, record: Record<string, unknown>, idVa
     ?? idValue
     ?? target
   );
+}
+
+function compactRecord(record: Record<string, unknown>, keys: string[]): Record<string, unknown> {
+  const output: Record<string, unknown> = {};
+  for (const key of keys) {
+    const value = ci(record, key);
+    if (value !== undefined) output[key] = value;
+  }
+  return output;
 }
 
 function buildIdWhere(idField: string, idValue: unknown): string {
