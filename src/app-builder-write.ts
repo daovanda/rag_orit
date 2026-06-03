@@ -99,7 +99,7 @@ async function prepareChange(
   const intent = getStringArg(args, "intent") || "change_app_builder";
   const userSummary = getStringArg(args, "summary") || getStringArg(args, "user_request");
   const warnings: string[] = [];
-  const rawOperations = expandRawOperations(context, getRawOperations(args), warnings);
+  const rawOperations = expandRawOperations(context, normalizeRawOperations(getRawOperations(args), warnings), warnings);
 
   if (!rawOperations.length) {
     return {
@@ -307,7 +307,11 @@ function prepareOperation(
   if (!collection) throw new Error(`Target khong ho tro: ${target}`);
   if (!context.collections[collection]) throw new Error(`Khong tim thay collection metadata: ${collection}`);
 
-  const record = asRecord(rawOperation.record) ?? stripOperationFields(rawOperation);
+  const record = normalizeRecordAliases(
+    target,
+    asRecord(rawOperation.record) ?? stripOperationFields(rawOperation),
+    warnings
+  );
   const preparedRecord = action === "create"
     ? materializeCreateRecord(context, collection, record, warnings)
     : action === "update"
@@ -475,6 +479,167 @@ function getRawOperations(args: Record<string, unknown>): Record<string, unknown
 
   const single = asRecord(args.operation) ?? plan;
   return single ? [single] : [];
+}
+
+function normalizeRawOperations(
+  rawOperations: Record<string, unknown>[],
+  warnings: string[]
+): Record<string, unknown>[] {
+  const counters: Record<string, number> = {};
+  const referenceAliases: Record<string, string> = {};
+  const normalized = rawOperations.map(rawOperation => {
+    const op = getOperationName(rawOperation);
+    const action = getAction(op);
+    const target = getTarget(op, rawOperation);
+    const canonicalOp = `${action}_${target}`;
+    const counterKey = canonicalOp;
+    counters[counterKey] = (counters[counterKey] ?? 0) + 1;
+
+    const originalId = getStringFromUnknown(rawOperation.id);
+    const oldImplicitId = `${op}_${counters[counterKey]}`;
+    const canonicalId = canonicalizeOperationId(originalId || oldImplicitId, canonicalOp, counters[counterKey]);
+    referenceAliases[oldImplicitId] = canonicalId;
+    if (originalId) referenceAliases[originalId] = canonicalId;
+
+    const record = asRecord(rawOperation.record)
+      ? normalizeRecordAliases(target, asRecord(rawOperation.record) as Record<string, unknown>, warnings)
+      : undefined;
+
+    return {
+      ...rawOperation,
+      id: canonicalId,
+      op: canonicalOp,
+      record
+    };
+  });
+
+  return normalized.map(operation => rewriteOperationReferences(operation, referenceAliases));
+}
+
+function canonicalizeOperationId(id: string, canonicalOp: string, index: number): string {
+  const normalized = id.trim();
+  if (!normalized) return `${canonicalOp}_${index}`;
+  return normalized
+    .replace(/^add_/, "create_")
+    .replace(/^edit_/, "update_")
+    .replace(/^rename_/, "update_")
+    .replace(/^remove_/, "delete_");
+}
+
+function normalizeRecordAliases(
+  target: string,
+  record: Record<string, unknown>,
+  warnings: string[]
+): Record<string, unknown> {
+  const output: Record<string, unknown> = {};
+  for (const [rawKey, value] of Object.entries(record)) {
+    output[normalizeRecordKey(target, rawKey, warnings)] = value;
+  }
+  return output;
+}
+
+function normalizeRecordKey(target: string, key: string, warnings: string[]): string {
+  const normalized = key
+    .replace(/([a-z])([A-Z])/g, "$1_$2")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+  const common: Record<string, string> = {
+    app_id: "appid",
+    application_id: "appid",
+    app_name: "app_name",
+    application_name: "application_name",
+    table_id: "tableid",
+    table_name: "tablename",
+    column_id: "columnid",
+    column_name: "columnname",
+    data_type: "datatype",
+    column_type: "columntype",
+    window_id: "windowid",
+    window_name: "windowname",
+    tab_id: "tabid",
+    tab_name: "tabname",
+    field_id: "fieldid",
+    field_name: "fieldname",
+    menu_id: "menuid",
+    menu_name: "menuname",
+    domain_id: "domainid",
+    domain_name: "domainname",
+    target_window_id: "linkwindowid",
+    link_window_id: "linkwindowid",
+    parent_menu_id: "parentid",
+    parent_tab_id: "parenttabid",
+    display_name: "translate",
+    label: "translate",
+    title: "translate"
+  };
+
+  const targetSpecific: Record<string, Record<string, string>> = {
+    column: {
+      is_primary: "isprimarykey",
+      is_primary_key: "isprimarykey",
+      primary_key: "isprimarykey",
+      is_required: "isrequired",
+      required: "isrequired",
+      default: "defaultvalue",
+      default_value: "defaultvalue"
+    },
+    field: {
+      is_required: "isrequire",
+      required: "isrequire",
+      readonly: "isreadonly",
+      is_readonly: "isreadonly",
+      control_type: "controltype",
+      field_type: "fieldtype",
+      default: "defaultvalue",
+      default_value: "defaultvalue"
+    },
+    table: {
+      table_type: "tabletype",
+      display_column: "columndisplay",
+      key_column: "columnkey",
+      code_column: "columncode",
+      find_column: "columnfind"
+    },
+    window: {
+      window_type: "windowtype"
+    }
+  };
+
+  const mapped = targetSpecific[target]?.[normalized] ?? common[normalized] ?? key;
+  if (mapped !== key) warnings.push(`Chuan hoa field ${key} -> ${mapped}.`);
+  return mapped;
+}
+
+function rewriteOperationReferences(
+  operation: Record<string, unknown>,
+  referenceAliases: Record<string, string>
+): Record<string, unknown> {
+  return rewriteUnknownReferences(operation, referenceAliases) as Record<string, unknown>;
+}
+
+function rewriteUnknownReferences(value: unknown, referenceAliases: Record<string, string>): unknown {
+  if (typeof value === "string") {
+    return value.replace(/\$([A-Za-z0-9_-]+)\./g, (match, operationId: string) => {
+      const canonical = referenceAliases[operationId];
+      return canonical ? `$${canonical}.` : match;
+    });
+  }
+
+  if (Array.isArray(value)) {
+    return value.map(item => rewriteUnknownReferences(item, referenceAliases));
+  }
+
+  if (value && typeof value === "object") {
+    const output: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      output[key] = rewriteUnknownReferences(item, referenceAliases);
+    }
+    return output;
+  }
+
+  return value;
 }
 
 function expandRawOperations(
@@ -868,7 +1033,20 @@ function normalizeTarget(value: string): string {
 function stripOperationFields(record: Record<string, unknown>): Record<string, unknown> {
   const output: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(record)) {
-    if (["op", "action", "type", "target", "id", "id_value", "where"].includes(key)) continue;
+    if ([
+      "op",
+      "action",
+      "type",
+      "target",
+      "id",
+      "id_value",
+      "where",
+      "record",
+      "after",
+      "creates_node",
+      "cascade",
+      "include_related"
+    ].includes(key)) continue;
     output[key] = value;
   }
   return output;
@@ -905,6 +1083,7 @@ function materializeCreateRecord(
     if (!record.columnname && record.name) record.columnname = record.name;
     if (!record.caption && record.label) record.caption = record.label;
     if (!record.datatype && record.columntype) record.datatype = record.columntype;
+    if (!record.columntype && record.datatype) record.columntype = record.datatype;
     if (!record.seqno) record.seqno = nextSeq(context.recordsByCollection.columns ?? []);
     if (!record.columnname) throw new Error("create_column thieu columnname.");
   }
