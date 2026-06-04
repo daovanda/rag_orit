@@ -2,13 +2,13 @@ export const TOOLS = [
   {
     name: "general_chat",
     description:
-      "Tra loi hoi thoai thong thuong khi khong can tai lieu RAG hoac du lieu Zilcode that.",
+      "Trả lời hội thoại thông thường khi không cần tài liệu RAG hoặc dữ liệu Zilcode thật.",
     parameters: {
       type: "object",
       properties: {
         message: {
           type: "string",
-          description: "Tin nhan nguoi dung can tra loi truc tiep."
+          description: "Tin nhắn người dùng cần trả lời trực tiếp."
         }
       },
       required: ["message"]
@@ -32,7 +32,7 @@ export const TOOLS = [
   {
     name: "app_builder_graph_overview",
     description:
-      "Doc App Builder that va tra skeleton graph toan he thong: root, apps, services/appservices, tables, columns, windows, tabs, fields, menus, domains, caches, role/app/menu/table access va edges lien ket. Dung dau tien khi hoi ve App Builder hoac can tao/sua cau hinh.",
+      "Đọc App Builder thật và trả skeleton graph toàn hệ thống: root, apps, services/appservices, tables, columns, windows, tabs, fields, menus, domains, caches, role/app/menu/table access và edges liên kết. Dùng đầu tiên khi hỏi về App Builder hoặc cần tạo/sửa cấu hình.",
     parameters: {
       type: "object",
       properties: {
@@ -58,7 +58,7 @@ export const TOOLS = [
   {
     name: "app_builder_graph_search",
     description:
-      "Tim node trong App Builder graph theo ten/id/summary. Dung de resolve appid, serviceid, tableid, windowid, tabid, fieldid, menuid, domainid, cacheid hoac role/access node truoc khi mo subgraph/detail.",
+      "Tìm node trong App Builder graph theo tên/id/summary. Dùng để resolve appid, serviceid, tableid, windowid, tabid, fieldid, menuid, domainid, cacheid hoặc role/access node trước khi mở subgraph/detail.",
     parameters: {
       type: "object",
       properties: {
@@ -85,13 +85,13 @@ export const TOOLS = [
   {
     name: "app_builder_graph_subgraph",
     description:
-      "Mo vung graph lien quan quanh mot hoac nhieu node_id. Dung sau overview/search khi can xem quan he lan can cua app/table/window/tab/field.",
+      "Mở vùng graph liên quan quanh một hoặc nhiều node_id. Dùng sau overview/search khi cần xem quan hệ lân cận của app/table/window/tab/field.",
     parameters: {
       type: "object",
       properties: {
         node_id: {
           type: "string",
-          description: "Mot node id tu overview/search, vi du app:12 hoac table:12:34."
+          description: "Một node id từ overview/search, ví dụ app:12 hoặc table:12:34."
         },
         node_ids: {
           type: "string",
@@ -99,7 +99,7 @@ export const TOOLS = [
         },
         query: {
           type: "string",
-          description: "Optional. Neu khong biet node_id, tool se tim node gan nhat theo query."
+          description: "Optional. Nếu không biết node_id, tool sẽ tìm node gần nhất theo query."
         },
         depth: {
           type: "string",
@@ -119,7 +119,7 @@ export const TOOLS = [
   {
     name: "app_builder_node_detail",
     description:
-      "Lay detail cua mot node cu the trong App Builder graph: app/table/column/window/tab/field/menu/domain. Dung khi subgraph chua du de tra loi hoac can lap plan tao/sua.",
+      "Lấy detail của một node cụ thể trong App Builder graph: app/table/column/window/tab/field/menu/domain. Dùng khi subgraph chưa đủ để trả lời hoặc cần lập plan tạo/sửa.",
     parameters: {
       type: "object",
       properties: {
@@ -129,7 +129,7 @@ export const TOOLS = [
         },
         query: {
           type: "string",
-          description: "Optional. Neu khong biet node_id, tool se tim node gan nhat theo query."
+          description: "Optional. Nếu không biết node_id, tool sẽ tìm node gần nhất theo query."
         },
         include_neighbors: {
           type: "string",
@@ -149,13 +149,13 @@ export const TOOLS = [
   {
     name: "app_builder_creation_schema",
     description:
-      "Tra quy tac tao/sua App Builder o dang planning schema: app -> appservice/service -> table -> column va app -> window -> tab -> field/menu/domain/cache/role access. Tool nay khong ghi du lieu.",
+      "Trả quy tắc tạo/sửa App Builder ở dạng planning schema: app -> appservice/service -> table -> column và app -> window -> tab -> field/menu/domain/cache/role access. Tool này không ghi dữ liệu.",
     parameters: {
       type: "object",
       properties: {
         intent: {
           type: "string",
-          description: "create_app, add_table, add_window, add_tab, add_field, update_node hoac general."
+          description: "create_app, add_table, add_window, add_tab, add_field, update_node hoặc general."
         }
       }
     }
@@ -163,7 +163,7 @@ export const TOOLS = [
   {
     name: "app_builder_prepare_change",
     description:
-      "Chuan bi ke hoach tao/sua/xoa App Builder de user xac nhan. Tool validate, loc field khong ton tai theo metadata that, resolve structured plan thanh operations va luu pending plan. Xoa app/window phai dung cascade de don field/tab/menu/cache/role access truoc. Chua ghi du lieu.",
+      "Chuẩn bị kế hoạch tạo/sửa/xóa App Builder để user xác nhận. Tool validate, lọc field không tồn tại theo metadata thật, resolve structured plan thành operations và lưu pending plan. Xóa app/window phải dùng cascade để dọn field/tab/menu/cache/role access trước. Chưa ghi dữ liệu.",
     parameters: {
       type: "object",
       properties: {
@@ -173,7 +173,7 @@ export const TOOLS = [
         },
         summary: {
           type: "string",
-          description: "Tom tat yeu cau nguoi dung."
+          description: "Tóm tắt yêu cầu người dùng."
         },
         operations: {
           type: "array",
@@ -194,7 +194,7 @@ export const TOOLS = [
   {
     name: "app_builder_apply_change",
     description:
-      "Sau khi user xac nhan ro rang, thuc thi pending plan da tao boi app_builder_prepare_change. Ghi vao Zilcode qua REST API va dung o buoc loi dau tien.",
+      "Sau khi user xác nhận rõ ràng, thực thi pending plan đã tạo bởi app_builder_prepare_change. Ghi vào Zilcode qua REST API và dừng ở bước lỗi đầu tiên.",
     parameters: {
       type: "object",
       properties: {

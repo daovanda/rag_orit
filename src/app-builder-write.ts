@@ -1,4 +1,6 @@
 import type { Env } from "./config";
+import { invalidateAppBuilderGraphCache } from "./app-builder-graph";
+import * as zipsonModule from "./vendor/zipson.min.js";
 import { asRecord, getCaseInsensitiveValue, getNumberArg, getStringArg, toArrayValues, truncateDebugText } from "./utils";
 import {
   assertZilcodeSuccess,
@@ -9,6 +11,14 @@ import {
 
 const PENDING_CHANGE_PREFIX = "app_builder_change:";
 const PENDING_CHANGE_TTL_SECONDS = 60 * 30;
+const zipson = "default" in zipsonModule ? zipsonModule.default : zipsonModule;
+
+const CACHE_ERD_KEYS = {
+  window: ["windowid", "windowname", "windowtype", "appid", "execname", "isopenfind", "translate"],
+  tab: ["tabid", "parenttabid", "tabname", "tablevel", "seqno", "layoutcols", "linkchildfield", "linkparentfield", "linktableid", "whereclause", "orderby", "tableid", "windowid", "relatechildfield", "relateparentfield", "relatetableid", "filterfield", "filterclause", "noinsert", "noupdate", "nodelete", "isarchive", "islock", "isautosave", "translate", "noselect", "noexport", "workflowid", "isviewonly", "labelspan"],
+  field: ["fieldid", "fieldname", "translate", "hideingrid", "hideinform", "hideinfind", "displaylength", "seqno", "isreadonly", "fieldlength", "vformat", "defaultvalue", "isrequire", "isfrozen", "fieldgroup", "tabid", "columnid", "fieldtype", "linktableid", "domainid", "issearchtonghop", "parentfieldid", "wherefieldname", "placeholder", "calculation", "colspan", "rowspan", "mapcolumn", "displaylogic", "columnname", "tableid", "whereclause", "bindfieldname", "options", "columntype", "linkcolumn"],
+  menu: ["menuid", "menuname", "parentid", "seqno", "translate", "issummary", "appid", "windowid", "siteid", "tabid", "menutype", "execname", "icon", "reportid"]
+};
 
 const TARGET_COLLECTION: Record<string, string> = {
   app: "applications",
@@ -127,7 +137,7 @@ export async function runAppBuilderWriteTool(
   args: Record<string, unknown>
 ): Promise<Record<string, unknown>> {
   if (!session) {
-    return { error: "Chua dang nhap Zilcode nen khong the tao/sua/xoa App Builder." };
+    return { error: "Chưa đăng nhập Zilcode nên không thể tạo/sửa/xóa App Builder." };
   }
 
   if (toolName === "app_builder_prepare_change") {
@@ -138,7 +148,7 @@ export async function runAppBuilderWriteTool(
     return applyChange(env, session, args);
   }
 
-  return { error: `Unsupported App Builder write tool: ${toolName}` };
+  return { error: `Tool ghi App Builder không được hỗ trợ: ${toolName}` };
 }
 
 async function prepareChange(
@@ -158,7 +168,7 @@ async function prepareChange(
       status: "invalid",
       valid: false,
       blocking_errors: [
-        "Thieu operations. Hay truyen operations gom cac buoc create/update/delete app/table/column/window/tab/field/menu/domain."
+        "Thiếu operations. Hãy truyền operations gồm các bước create/update/delete app/table/column/window/tab/field/menu/domain."
       ]
     };
   }
@@ -227,7 +237,7 @@ async function applyChange(
       mode: "apply_change",
       ok: false,
       status: "invalid",
-      error: "Thieu plan_id. Hay goi app_builder_prepare_change truoc va chi apply sau khi user xac nhan."
+      error: "Thiếu plan_id. Hãy gọi app_builder_prepare_change trước và chỉ apply sau khi user xác nhận."
     };
   }
 
@@ -238,7 +248,7 @@ async function applyChange(
       ok: false,
       status: "not_found",
       plan_id: planId,
-      error: "Khong tim thay pending plan hoac plan da het han."
+      error: "Không tìm thấy pending plan hoặc plan đã hết hạn."
     };
   }
 
@@ -259,7 +269,11 @@ async function applyChange(
     try {
       request = buildOperationRequestAudit(context, operation, state);
       const result = await applyOperation(env, context, operation, state);
-      const reference = extractOperationReference(operation, result);
+      const resolvedRecord = operation.record ? resolveRecordReferences(operation.record, state) : {};
+      const reference = {
+        ...resolvedRecord,
+        ...extractOperationReference(operation, result)
+      };
       state.refs[operation.id] = reference;
       results.push({ operation_id: operation.id, ok: true, request, result, reference });
     } catch (error) {
@@ -274,7 +288,27 @@ async function applyChange(
   }
 
   if (!failed) {
+    try {
+      const cacheDeploy = await deployAffectedWindowCaches(env, context, operationsToApply, state);
+      if (cacheDeploy.deployed_count) {
+        results.push({ operation_id: "auto_deploy_window_cache", ok: true, result: cacheDeploy });
+      }
+    } catch (error) {
+      failed = true;
+      results.push({
+        operation_id: "auto_deploy_window_cache",
+        ok: false,
+        error: truncateDebugText(error)
+      });
+    }
+  }
+
+  if (!failed) {
     await env.CHUNKS.delete(`${PENDING_CHANGE_PREFIX}${planId}`);
+  }
+
+  if (results.some(result => result.ok === true)) {
+    invalidateAppBuilderGraphCache(session);
   }
 
   return {
@@ -287,7 +321,7 @@ async function applyChange(
     results,
     next_step: failed
       ? "Sua lai plan dua tren loi va prepare_change lai. Cac buoc sau loi da bi skip."
-      : "Goi app_builder_graph_overview/search/detail de verify cau hinh sau khi ghi."
+      : "Gọi app_builder_graph_overview/search/detail để verify cấu hình sau khi ghi."
   };
 }
 
@@ -419,8 +453,8 @@ function prepareOperation(
   const collection = TARGET_COLLECTION[target];
   const warnings: string[] = [];
 
-  if (!collection) throw new Error(`Target khong ho tro: ${target}`);
-  if (!context.collections[collection]) throw new Error(`Khong tim thay collection metadata: ${collection}`);
+  if (!collection) throw new Error(`Target không hỗ trợ: ${target}`);
+  if (!context.collections[collection]) throw new Error(`Không tìm thấy collection metadata: ${collection}`);
 
   const record = getOperationRecordPayload(target, rawOperation, warnings);
   const preparedRecord = action === "create"
@@ -430,10 +464,10 @@ function prepareOperation(
       : undefined;
 
   if (action === "create" && (!preparedRecord || !Object.keys(preparedRecord).length)) {
-    throw new Error("Create operation khong co record hop le.");
+    throw new Error("Create operation không có record hợp lệ.");
   }
   if (action === "update" && (!preparedRecord || !Object.keys(preparedRecord).length)) {
-    throw new Error("Update operation khong con field hop le sau khi loc metadata.");
+    throw new Error("Update operation không còn field hợp lệ sau khi lọc metadata.");
   }
 
   const idField = TARGET_ID_FIELD[collection];
@@ -454,7 +488,7 @@ function prepareOperation(
     || (whereRecord && idValue === undefined ? buildWhereFromRecord(context, collection, whereRecord, warnings) : "");
 
   if ((action === "update" || action === "delete") && (idValue === undefined || idValue === null || idValue === "") && !where) {
-    throw new Error("Update/delete can id_value hoac where.");
+    throw new Error("Update/delete cần id_value hoặc where.");
   }
 
   const operation: PreparedOperation = {
@@ -493,7 +527,7 @@ function autoWirePreparedOperations(context: WriteContext, operations: PreparedO
     if (!isColumnAllowed(context, operation.collection, "appid")) continue;
     if (operation.record.appid !== undefined) continue;
     operation.record.appid = `$${firstCreatedApp.id}.appid`;
-    warnings.push(`${operation.id}: tu dong lien ket appid voi ${firstCreatedApp.id}.appid.`);
+    warnings.push(`${operation.id}: tự động liên kết appid với ${firstCreatedApp.id}.appid.`);
   }
 }
 
@@ -545,10 +579,10 @@ function resolveStringReferences(value: unknown, state: ApplyState): string {
 
 function getReferenceValue(state: ApplyState, operationId: string, field: string): unknown {
   const record = state.refs[operationId];
-  if (!record) throw new Error(`Khong resolve duoc reference $${operationId}.${field}; operation truoc do chua co ket qua.`);
+  if (!record) throw new Error(`Không resolve được reference $${operationId}.${field}; operation trước đó chưa có kết quả.`);
   const value = ci(record, field);
   if (value === undefined || value === null || value === "") {
-    throw new Error(`Khong resolve duoc reference $${operationId}.${field}; ket qua khong co field nay.`);
+    throw new Error(`Không resolve được reference $${operationId}.${field}; kết quả không có field này.`);
   }
   return value;
 }
@@ -622,7 +656,7 @@ async function applyOperation(
   const collection = context.collections[operation.collection];
   const sourceTable = asRecord(collection.source_table) ?? {};
   const endpoint = String(sourceTable.urledit ?? sourceTable.urlview ?? "");
-  if (!endpoint) throw new Error(`Collection ${operation.collection} khong co urledit/urlview.`);
+  if (!endpoint) throw new Error(`Collection ${operation.collection} không có urledit/urlview.`);
 
   if (operation.action === "create") {
     const record = resolveRecordReferences(operation.record ?? {}, state);
@@ -670,6 +704,253 @@ async function applyOperation(
     : deleteResult;
 }
 
+async function deployAffectedWindowCaches(
+  env: Env,
+  context: WriteContext,
+  operations: PreparedOperation[],
+  state: ApplyState
+): Promise<Record<string, unknown>> {
+  const windowIds = collectAffectedWindowIds(context, operations, state);
+  const deployed: Record<string, unknown>[] = [];
+
+  for (const windowId of windowIds) {
+    const result = await deployWindowCache(env, context, windowId);
+    if (result.skipped) continue;
+    deployed.push(result);
+  }
+
+  return {
+    deployed_count: deployed.length,
+    window_ids: deployed.map(item => item.windowid),
+    deployed
+  };
+}
+
+function collectAffectedWindowIds(
+  context: WriteContext,
+  operations: PreparedOperation[],
+  state: ApplyState
+): string[] {
+  const output = new Set<string>();
+
+  for (const operation of operations) {
+    if (operation.collection === "applications") continue;
+    if (operation.collection === "caches") continue;
+    if (operation.collection === "windows" && operation.action === "delete") continue;
+
+    const windowId = getAffectedWindowId(context, operation, state);
+    if (windowId) output.add(windowId);
+  }
+
+  return [...output];
+}
+
+function getAffectedWindowId(
+  context: WriteContext,
+  operation: PreparedOperation,
+  state: ApplyState
+): string | undefined {
+  const record = operation.record ? resolveRecordReferences(operation.record, state) : {};
+  const reference = state.refs[operation.id] ?? {};
+
+  if (operation.collection === "windows") {
+    return stringId(reference.windowid ?? record.windowid ?? operation.id_value);
+  }
+
+  if (operation.collection === "tabs") {
+    const tabid = reference.tabid ?? record.tabid ?? operation.id_value;
+    return stringId(record.windowid ?? reference.windowid ?? findWindowIdForTab(context, state, tabid));
+  }
+
+  if (operation.collection === "fields") {
+    const fieldid = reference.fieldid ?? record.fieldid ?? operation.id_value;
+    const tabid = record.tabid ?? reference.tabid ?? findTabIdForField(context, state, fieldid);
+    return stringId(findWindowIdForTab(context, state, tabid));
+  }
+
+  if (operation.collection === "menus") {
+    const menuid = reference.menuid ?? record.menuid ?? operation.id_value;
+    return stringId(
+      record.linkwindowid
+      ?? record.windowid
+      ?? reference.linkwindowid
+      ?? reference.windowid
+      ?? findWindowIdForMenu(context, state, menuid)
+    );
+  }
+
+  return undefined;
+}
+
+async function deployWindowCache(
+  env: Env,
+  context: WriteContext,
+  windowId: string
+): Promise<Record<string, unknown>> {
+  const windowRecord = await fetchFirstDataRecord(env, context, "windows", `windowid=${formatSqlValue(windowId)}`);
+  if (!windowRecord) return { windowid: windowId, skipped: true, reason: "window_not_found" };
+
+  const appid = ci(windowRecord, "appid");
+  const cache: Record<string, unknown> = {
+    window: packRecordByKeys(windowRecord, CACHE_ERD_KEYS.window)
+  };
+
+  if (!ci(windowRecord, "execname")) {
+    const tabs = await fetchDataRecords(env, context, "tabs", {
+      where: `windowid=${formatSqlValue(windowId)}`,
+      orderby: "tablevel,seqno",
+      limit: 1000
+    });
+    cache.tabs = tabs.map(tab => packRecordByKeys(tab, CACHE_ERD_KEYS.tab));
+
+    const fields = await fetchDataRecords(env, context, "field_columns", {
+      fallbackPath: "rest/applicationjs_nut/dbo/data/nv_field_column",
+      where: `windowid=${formatSqlValue(windowId)}`,
+      orderby: "tabid,fieldgroup,seqno",
+      limit: 5000
+    });
+    cache.fields = fields.map(field => packRecordByKeys(field, CACHE_ERD_KEYS.field));
+
+    const menus = await fetchDataRecords(env, context, "menus", {
+      where: `windowid=${formatSqlValue(windowId)} AND menutype=N'tool'`,
+      orderby: "seqno",
+      limit: 1000
+    });
+    cache.menus = menus.map(menu => packRecordByKeys(menu, CACHE_ERD_KEYS.menu));
+  }
+
+  const configjson = zipson.stringify(cache);
+  const existingCache = await fetchFirstDataRecord(env, context, "caches", `windowid=${formatSqlValue(windowId)}`);
+  const cachePayload: Record<string, unknown> = { configjson };
+  let action = "update";
+
+  if (existingCache) {
+    await writeDataRecords(env, context, "caches", "PUT", [cachePayload], `windowid=${formatSqlValue(windowId)}`);
+  } else {
+    action = "insert";
+    cachePayload.windowid = windowId;
+    cachePayload.appid = appid;
+    cachePayload.siteid = inferSessionSiteId(context.session)
+      ?? ci(windowRecord, "siteid")
+      ?? inferExistingValue(context.recordsByCollection.caches ?? [], "siteid")
+      ?? inferExistingValue(context.recordsByCollection.applications ?? [], "siteid");
+    await writeDataRecords(env, context, "caches", "POST", [cachePayload], undefined, { returnid: "true" });
+  }
+
+  return {
+    windowid: windowId,
+    appid,
+    action,
+    configjson_chars: configjson.length,
+    counts: {
+      tabs: Array.isArray(cache.tabs) ? cache.tabs.length : 0,
+      fields: Array.isArray(cache.fields) ? cache.fields.length : 0,
+      tool_menus: Array.isArray(cache.menus) ? cache.menus.length : 0
+    }
+  };
+}
+
+async function fetchFirstDataRecord(
+  env: Env,
+  context: WriteContext,
+  collection: string,
+  where: string
+): Promise<Record<string, unknown> | undefined> {
+  return (await fetchDataRecords(env, context, collection, { where, limit: 1 }))[0];
+}
+
+async function fetchDataRecords(
+  env: Env,
+  context: WriteContext,
+  collection: string,
+  options: {
+    where?: string;
+    orderby?: string;
+    limit?: number;
+    fallbackPath?: string;
+  }
+): Promise<Record<string, unknown>[]> {
+  const collectionMeta = context.collections[collection];
+  const sourceTable = asRecord(collectionMeta?.source_table) ?? {};
+  const endpoint = String(sourceTable.urlview ?? sourceTable.urledit ?? options.fallbackPath ?? "");
+  if (!endpoint) return [];
+
+  const envelope = await callZilcodeJson<unknown>(env, addQuery(endpoint, {
+    where: options.where,
+    orderby: options.orderby,
+    limit: options.limit === undefined ? undefined : String(options.limit)
+  }), {
+    token: context.session.token,
+    baseUrl: context.session.base_url,
+    headers: options.limit ? {
+      Range: `0-${Math.max(0, options.limit - 1)}`,
+      Prefer: "count=exact"
+    } : undefined
+  });
+
+  return toArrayValues(assertZilcodeSuccess(envelope))
+    .filter((record): record is Record<string, unknown> => Boolean(record) && typeof record === "object");
+}
+
+async function writeDataRecords(
+  env: Env,
+  context: WriteContext,
+  collection: string,
+  method: "POST" | "PUT",
+  records: Record<string, unknown>[],
+  where?: string,
+  query: Record<string, string> = {}
+): Promise<unknown> {
+  const collectionMeta = context.collections[collection];
+  const sourceTable = asRecord(collectionMeta?.source_table) ?? {};
+  const endpoint = String(sourceTable.urledit ?? sourceTable.urlview ?? "");
+  if (!endpoint) throw new Error(`Collection ${collection} không có endpoint để ghi cache.`);
+
+  const envelope = await callZilcodeJson<unknown>(env, addQuery(endpoint, { ...query, where }), {
+    method,
+    token: context.session.token,
+    baseUrl: context.session.base_url,
+    data: records
+  });
+  return assertZilcodeSuccess(envelope);
+}
+
+function packRecordByKeys(record: Record<string, unknown>, keys: string[]): unknown[] {
+  return keys.map(key => ci(record, key) ?? null);
+}
+
+function findTabIdForField(context: WriteContext, state: ApplyState, fieldid: unknown): unknown {
+  if (!hasUsableValue(fieldid)) return undefined;
+  const stateField = findRefById(state, "fieldid", fieldid);
+  if (stateField && hasUsableValue(stateField.tabid)) return stateField.tabid;
+  return ci((context.recordsByCollection.fields ?? []).find(field => sameId(ci(field, "fieldid"), fieldid)) ?? {}, "tabid");
+}
+
+function findWindowIdForTab(context: WriteContext, state: ApplyState, tabid: unknown): unknown {
+  if (!hasUsableValue(tabid)) return undefined;
+  const stateTab = findRefById(state, "tabid", tabid);
+  if (stateTab && hasUsableValue(stateTab.windowid)) return stateTab.windowid;
+  return ci((context.recordsByCollection.tabs ?? []).find(tab => sameId(ci(tab, "tabid"), tabid)) ?? {}, "windowid");
+}
+
+function findWindowIdForMenu(context: WriteContext, state: ApplyState, menuid: unknown): unknown {
+  if (!hasUsableValue(menuid)) return undefined;
+  const stateMenu = findRefById(state, "menuid", menuid);
+  if (stateMenu && (hasUsableValue(stateMenu.linkwindowid) || hasUsableValue(stateMenu.windowid))) {
+    return stateMenu.linkwindowid ?? stateMenu.windowid;
+  }
+  const menu = (context.recordsByCollection.menus ?? []).find(item => sameId(ci(item, "menuid"), menuid));
+  return menu ? ci(menu, "linkwindowid") ?? ci(menu, "windowid") : undefined;
+}
+
+function findRefById(state: ApplyState, idField: string, idValue: unknown): Record<string, unknown> | undefined {
+  return Object.values(state.refs).find(record => sameId(ci(record, idField), idValue));
+}
+
+function stringId(value: unknown): string | undefined {
+  return hasUsableValue(value) ? String(value) : undefined;
+}
+
 function buildApplicationDeleteCleanupAudit(
   operation: PreparedOperation,
   state: ApplyState
@@ -678,7 +959,7 @@ function buildApplicationDeleteCleanupAudit(
   if (!appIdText) {
     return {
       status: "skipped",
-      reason: "Khong resolve duoc appid so tu id_value/where nen khong the cleanup metadata an truoc delete_app."
+      reason: "Không resolve được appid số từ id_value/where nên không thể cleanup metadata ẩn trước delete_app."
     };
   }
 
@@ -686,7 +967,7 @@ function buildApplicationDeleteCleanupAudit(
     status: "will_run_before_delete_app",
     appid: appIdText,
     fixed_order: ["n_cache", "n_field", "n_tab", "n_rolemenu", "n_menu", "n_roleapp", "n_appservice", "n_domain", "n_window"],
-    note: "Dung query endpoint de don metadata co the bi an khoi data endpoint, vi FK/cache/role/menu/window van chan xoa n_app."
+    note: "Dùng query endpoint để dọn metadata có thể bị ẩn khỏi data endpoint, vì FK/cache/role/menu/window vẫn chặn xóa n_app."
   };
 }
 
@@ -919,9 +1200,8 @@ function normalizeRawOperations(
     if (originalId) referenceAliases[originalId] = canonicalId;
 
     const explicitRecord = asRecord(rawOperation.record) ?? asRecord(rawOperation.fields) ?? asRecord(rawOperation.updates);
-    const record = explicitRecord
-      ? normalizeRecordAliases(target, explicitRecord as Record<string, unknown>, warnings)
-      : undefined;
+    const recordSource = explicitRecord ?? stripOperationFields(rawOperation);
+    const record = normalizeRecordAliases(target, recordSource, warnings);
 
     return {
       ...rawOperation,
@@ -1051,7 +1331,7 @@ function normalizeRecordKey(target: string, key: string, warnings: string[]): st
   };
 
   const mapped = targetSpecific[target]?.[normalized] ?? common[normalized] ?? key;
-  if (mapped !== key) warnings.push(`Chuan hoa field ${key} -> ${mapped}.`);
+  if (mapped !== key) warnings.push(`Chuẩn hóa field ${key} -> ${mapped}.`);
   return mapped;
 }
 
@@ -1150,7 +1430,7 @@ function buildCreateTabWithFieldsOperations(
     ? tableRef
     : findUniqueRecordId(context, "tables", String(tableRef), { appid });
   if (!hasUsableValue(tableid)) {
-    throw new Error(`Khong tim thay table de tao fields tu table: ${String(tableRef)}.`);
+    throw new Error(`Không tìm thấy table để tạo fields từ table: ${String(tableRef)}.`);
   }
 
   record.tableid = tableid;
@@ -1205,7 +1485,7 @@ function buildDeleteWindowCascadeOperations(
 ): Record<string, unknown>[] {
   const windowId = getDeleteIdValue(rawOperation, "windowid");
   if (windowId === undefined || windowId === null || windowId === "") {
-    throw new Error("delete_window cascade thieu windowid/id_value.");
+    throw new Error("delete_window cascade thiếu windowid/id_value.");
   }
 
   const windowIdText = String(windowId);
@@ -1223,7 +1503,7 @@ function buildDeleteWindowCascadeOperations(
     .filter(rolemenu => menuIds.has(String(ci(rolemenu, "menuid") ?? "")));
 
   warnings.push(
-    `delete_window cascade windowid=${windowIdText}: se xoa ${caches.length} cache, ${fields.length} field, ${tabs.length} tab, ${rolemenus.length} rolemenu, ${menus.length} menu lien ket va window. Khong xoa table/column/du lieu that.`
+    `delete_window cascade windowid=${windowIdText}: sẽ xóa ${caches.length} cache, ${fields.length} field, ${tabs.length} tab, ${rolemenus.length} rolemenu, ${menus.length} menu liên kết và window. Không xóa table/column/dữ liệu thật.`
   );
 
   const operations: Record<string, unknown>[] = [];
@@ -1289,7 +1569,7 @@ function buildDeleteWindowCascadeOperations(
       .map(item => String(item))
       .filter(item => !["tab", "tabs", "field", "fields", "menu", "menus", "cache", "caches", "rolemenu", "rolemenus"].includes(item.toLowerCase()));
     if (unsupported.length) {
-      warnings.push(`Chua ho tro tu dong xoa related metadata ngoai window/tab/field/menu/cache/rolemenu: ${unsupported.join(", ")}.`);
+      warnings.push(`Chưa hỗ trợ tự động xóa related metadata ngoài window/tab/field/menu/cache/rolemenu: ${unsupported.join(", ")}.`);
     }
   }
 
@@ -1303,7 +1583,7 @@ function buildDeleteAppCascadeOperations(
 ): Record<string, unknown>[] {
   const appId = getDeleteIdValue(rawOperation, "appid");
   if (appId === undefined || appId === null || appId === "") {
-    throw new Error("delete_app thieu appid/id_value.");
+    throw new Error("delete_app thiếu appid/id_value.");
   }
 
   const appIdText = String(appId);
@@ -1347,7 +1627,7 @@ function buildDeleteAppCascadeOperations(
   const menuSubquery = `SELECT menuid FROM n_menu WHERE ${menuWhere}`;
 
   warnings.push(
-    `delete_app cascade appid=${appIdText}: se xoa UI/access metadata lien quan truoc app (${caches.length} cache, ${fields.length} field, ${tabs.length} tab, ${rolemenus.length} rolemenu, ${menus.length} menu, ${roleapps.length} roleapp, ${appservices.length} appservice, ${domains.length} domain, ${windows.length} window da doc duoc). Khong xoa table/column/du lieu that.`
+    `delete_app cascade appid=${appIdText}: sẽ xóa UI/access metadata liên quan trước app (${caches.length} cache, ${fields.length} field, ${tabs.length} tab, ${rolemenus.length} rolemenu, ${menus.length} menu, ${roleapps.length} roleapp, ${appservices.length} appservice, ${domains.length} domain, ${windows.length} window đã đọc được). Không xóa table/column/dữ liệu thật.`
   );
 
   return [
@@ -1722,7 +2002,7 @@ function findWindowOperationRef(record: Record<string, unknown>, windowRefs: Map
 function getOperationName(rawOperation: Record<string, unknown>): string {
   const value = rawOperation.op ?? rawOperation.action ?? rawOperation.type;
   if (typeof value !== "string" || !value.trim()) {
-    throw new Error("Operation thieu op/action, vi du create_app, update_field, delete_menu.");
+    throw new Error("Operation thiếu op/action, ví dụ create_app, update_field, delete_menu.");
   }
   const op = value.trim().toLowerCase();
   if (["create", "add", "update", "edit", "rename", "delete", "remove"].includes(op)) {
@@ -1741,7 +2021,7 @@ function getAction(op: string): "create" | "update" | "delete" {
   if (op.startsWith("create_") || op.startsWith("add_")) return "create";
   if (op.startsWith("update_") || op.startsWith("edit_") || op.startsWith("rename_")) return "update";
   if (op.startsWith("delete_") || op.startsWith("remove_")) return "delete";
-  throw new Error(`Action khong ho tro: ${op}`);
+  throw new Error(`Action không hỗ trợ: ${op}`);
 }
 
 function getTarget(op: string, rawOperation: Record<string, unknown>): string {
@@ -1807,7 +2087,7 @@ function materializeCreateRecord(
 
   if (collection === "applications") {
     if (!record.appname && record.name) record.appname = record.name;
-    if (!record.appname) throw new Error("create_app thieu appname.");
+    if (!record.appname) throw new Error("create_app thiếu appname.");
     const apps = context.recordsByCollection.applications ?? [];
     applyDefaultIfAllowed(context, collection, record, "seqno", nextSeq(apps));
     normalizeApplicationType(context, record, warnings);
@@ -1826,7 +2106,7 @@ function materializeCreateRecord(
         ?? inferExistingValue(context.recordsByCollection.applications ?? [], "siteid")
     );
     applyDefaultIfAllowed(context, collection, record, "seqno", nextSeq(context.recordsByCollection.services ?? []));
-    if (!record.servicename) throw new Error("create_service thieu servicename.");
+    if (!record.servicename) throw new Error("create_service thiếu servicename.");
   }
 
   if (collection === "appservices") {
@@ -1863,7 +2143,7 @@ function materializeCreateRecord(
     );
     applyDefaultIfAllowed(context, collection, record, "serviceid", inferTableServiceId(context, record));
     applyDefaultIfAllowed(context, collection, record, "seqno", nextSeq(context.recordsByCollection.tables ?? []));
-    if (!record.tablename) throw new Error("create_table thieu tablename.");
+    if (!record.tablename) throw new Error("create_table thiếu tablename.");
   }
 
   if (collection === "columns") {
@@ -1882,7 +2162,7 @@ function materializeCreateRecord(
         ?? inferExistingValue(context.recordsByCollection.applications ?? [], "siteid")
     );
     if (!record.seqno) record.seqno = nextSeq(context.recordsByCollection.columns ?? []);
-    if (!record.columnname) throw new Error("create_column thieu columnname.");
+    if (!record.columnname) throw new Error("create_column thiếu columnname.");
   }
 
   if (collection === "windows") {
@@ -1899,7 +2179,7 @@ function materializeCreateRecord(
         ?? inferExistingValue(context.recordsByCollection.applications ?? [], "siteid")
     );
     applyDefaultIfAllowed(context, collection, record, "seqno", nextSeq(context.recordsByCollection.windows ?? []));
-    if (!record.windowname) throw new Error("create_window thieu windowname.");
+    if (!record.windowname) throw new Error("create_window thiếu windowname.");
   }
 
   if (collection === "tabs") {
@@ -1917,7 +2197,7 @@ function materializeCreateRecord(
         ?? inferExistingValue(context.recordsByCollection.applications ?? [], "siteid")
     );
     if (!record.seqno) record.seqno = nextSeq(context.recordsByCollection.tabs ?? []);
-    if (!record.tabname) throw new Error("create_tab thieu tabname.");
+    if (!record.tabname) throw new Error("create_tab thiếu tabname.");
   }
 
   if (collection === "fields") {
@@ -1940,7 +2220,7 @@ function materializeCreateRecord(
         ?? inferExistingValue(context.recordsByCollection.applications ?? [], "siteid")
     );
     if (!record.seqno) record.seqno = nextSeq(context.recordsByCollection.fields ?? []);
-    if (!record.fieldname) throw new Error("create_field thieu fieldname/columnname.");
+    if (!record.fieldname) throw new Error("create_field thiếu fieldname/columnname.");
   }
 
   if (collection === "menus") {
@@ -1959,13 +2239,13 @@ function materializeCreateRecord(
         ?? inferExistingValue(context.recordsByCollection.applications ?? [], "siteid")
     );
     if (!record.seqno) record.seqno = nextSeq(context.recordsByCollection.menus ?? []);
-    if (!record.menuname) throw new Error("create_menu thieu menuname.");
+    if (!record.menuname) throw new Error("create_menu thiếu menuname.");
   }
 
   if (collection === "domains") {
     resolveAppReference(context, collection, record, warnings);
     if (!record.domainname && record.name) record.domainname = record.name;
-    if (!record.domainname) throw new Error("create_domain thieu domainname.");
+    if (!record.domainname) throw new Error("create_domain thiếu domainname.");
     if (record.values && !record.domainjson) record.domainjson = JSON.stringify(record.values);
     applyDefaultIfAllowed(
       context,
@@ -2058,7 +2338,7 @@ function resolveAppReference(
   if (appRef !== undefined && appRef !== null && appRef !== "") {
     const appid = findApplicationId(context, String(appRef));
     if (!appid) {
-      throw new Error(`Khong tim thay app theo ten/id: ${String(appRef)}.`);
+      throw new Error(`Không tìm thấy app theo tên/id: ${String(appRef)}.`);
     }
     record.appid = appid;
   }
@@ -2068,7 +2348,7 @@ function resolveAppReference(
   }
 
   if (record.appid === undefined || record.appid === null || record.appid === "") {
-    warnings.push(`${collection}: chua co appid. Neu day la node thuoc app moi, tool se tu noi appid sau prepare neu plan co create_app.`);
+    warnings.push(`${collection}: chưa có appid. Nếu đây là node thuộc app mới, tool sẽ tự nối appid sau prepare nếu plan có create_app.`);
   }
 }
 
@@ -2083,7 +2363,7 @@ function resolveTableReference(
 
   const appid = record.appid ?? resolveInlineAppReference(context, record);
   const tableid = findUniqueRecordId(context, "tables", String(tableRef), { appid });
-  if (!tableid) throw new Error(`Khong tim thay table theo ten/id: ${String(tableRef)}.`);
+  if (!tableid) throw new Error(`Không tìm thấy table theo tên/id: ${String(tableRef)}.`);
   record.tableid = tableid;
   warnings.push(`Resolve table reference ${String(tableRef)} -> tableid=${String(tableid)}.`);
 }
@@ -2098,7 +2378,7 @@ function resolveServiceReference(
   if (!hasUsableValue(serviceRef)) return;
 
   const serviceid = findUniqueRecordId(context, "services", String(serviceRef));
-  if (!serviceid) throw new Error(`Khong tim thay service theo ten/id: ${String(serviceRef)}.`);
+  if (!serviceid) throw new Error(`Không tìm thấy service theo tên/id: ${String(serviceRef)}.`);
   record.serviceid = serviceid;
   warnings.push(`Resolve service reference ${String(serviceRef)} -> serviceid=${String(serviceid)}.`);
 }
@@ -2113,7 +2393,7 @@ function resolveRoleReference(
   if (!hasUsableValue(roleRef)) return;
 
   const roleid = findUniqueRecordId(context, "roles", String(roleRef));
-  if (!roleid) throw new Error(`Khong tim thay role theo ten/id: ${String(roleRef)}.`);
+  if (!roleid) throw new Error(`Không tìm thấy role theo tên/id: ${String(roleRef)}.`);
   record.roleid = roleid;
   warnings.push(`Resolve role reference ${String(roleRef)} -> roleid=${String(roleid)}.`);
 }
@@ -2129,7 +2409,7 @@ function resolveMenuReference(
 
   const appid = record.appid ?? resolveInlineAppReference(context, record);
   const menuid = findUniqueRecordId(context, "menus", String(menuRef), { appid });
-  if (!menuid) throw new Error(`Khong tim thay menu theo ten/id: ${String(menuRef)}.`);
+  if (!menuid) throw new Error(`Không tìm thấy menu theo tên/id: ${String(menuRef)}.`);
   record.menuid = menuid;
   warnings.push(`Resolve menu reference ${String(menuRef)} -> menuid=${String(menuid)}.`);
 }
@@ -2145,7 +2425,7 @@ function resolveWindowReference(
 
   const appid = record.appid ?? resolveInlineAppReference(context, record);
   const windowid = findUniqueRecordId(context, "windows", String(windowRef), { appid });
-  if (!windowid) throw new Error(`Khong tim thay window theo ten/id: ${String(windowRef)}.`);
+  if (!windowid) throw new Error(`Không tìm thấy window theo tên/id: ${String(windowRef)}.`);
   record.windowid = windowid;
   warnings.push(`Resolve window reference ${String(windowRef)} -> windowid=${String(windowid)}.`);
 }
@@ -2163,7 +2443,7 @@ function resolveTabReference(
     windowid: record.windowid,
     tableid: record.tableid
   });
-  if (!tabid) throw new Error(`Khong tim thay tab theo ten/id: ${String(tabRef)}.`);
+  if (!tabid) throw new Error(`Không tìm thấy tab theo tên/id: ${String(tabRef)}.`);
   record.tabid = tabid;
   warnings.push(`Resolve tab reference ${String(tabRef)} -> tabid=${String(tabid)}.`);
 }
@@ -2180,7 +2460,7 @@ function resolveColumnReference(
   const columnid = findUniqueRecordId(context, "columns", String(columnRef), {
     tableid: record.tableid
   });
-  if (!columnid) throw new Error(`Khong tim thay column theo ten/id: ${String(columnRef)}.`);
+  if (!columnid) throw new Error(`Không tìm thấy column theo tên/id: ${String(columnRef)}.`);
   record.columnid = columnid;
   warnings.push(`Resolve column reference ${String(columnRef)} -> columnid=${String(columnid)}.`);
 }
@@ -2208,7 +2488,7 @@ function resolveWindowLinkReference(
 
   const appid = record.appid ?? resolveInlineAppReference(context, record);
   const windowid = findUniqueRecordId(context, "windows", String(windowRef), { appid });
-  if (!windowid) throw new Error(`Khong tim thay window de link menu: ${String(windowRef)}.`);
+  if (!windowid) throw new Error(`Không tìm thấy window để link menu: ${String(windowRef)}.`);
   setMenuWindowLink(context, record, windowid);
   warnings.push(`Resolve menu window link ${String(windowRef)} -> ${getMenuWindowLinkColumns(context).join("/") || "linkwindowid"}=${String(windowid)}.`);
 }
@@ -2441,7 +2721,7 @@ function filterRecordByAllowedColumns(
     if (allowed.has(key.toLowerCase())) {
       output[key] = value;
     } else {
-      warnings.push(`Bo qua field khong ton tai trong ${collection}: ${key}`);
+      warnings.push(`Bỏ qua field không tồn tại trong ${collection}: ${key}`);
     }
   }
   return output;
@@ -2458,7 +2738,7 @@ function validateRequiredFields(
     const label = LEVEL3_COLLECTIONS.has(collection)
       ? "Level 3 create metadata"
       : "Create metadata";
-    throw new Error(`${label} ${collection} thieu field bat buoc: ${missing.join(", ")}.`);
+    throw new Error(`${label} ${collection} thiếu field bắt buộc: ${missing.join(", ")}.`);
   }
 }
 
@@ -2506,7 +2786,7 @@ function ensureUniqueByKeys(
   const idPreview = ["appid", "serviceid", "appserviceid", "tableid", "columnid", "windowid", "tabid", "fieldid", "menuid", "domainid", "cacheid", "roleappid", "rolemenuid", "accessid", "archiveid"]
     .map(key => ci(duplicate, key))
     .find(hasUsableValue);
-  throw new Error(`Da ton tai ${label} voi ${keys.map(key => `${key}=${String(record[key])}`).join(", ")}${idPreview ? ` (id=${String(idPreview)})` : ""}. Khong tao trung.`);
+  throw new Error(`Đã tồn tại ${label} với ${keys.map(key => `${key}=${String(record[key])}`).join(", ")}${idPreview ? ` (id=${String(idPreview)})` : ""}. Không tạo trùng.`);
 }
 
 function stripReferenceOnlyFields(record: Record<string, unknown>): void {
@@ -2569,7 +2849,8 @@ function inferExistingValue(records: Record<string, unknown>[], key: string): un
 }
 
 function inferSessionSiteId(session: ZilcodeSession): unknown {
-  return ci(session.user, "siteid") ?? ci(session.user, "site_id");
+  const user = asRecord(session.user);
+  return user ? ci(user, "siteid") ?? ci(user, "site_id") : undefined;
 }
 
 function inferTableServiceId(context: WriteContext, record: Record<string, unknown>): unknown {
@@ -2633,7 +2914,7 @@ function normalizeApplicationType(
     }
   }
 
-  warnings.push(`create_app apptype="${String(current)}" khong phai gia tri metadata hop le; dung default apptype=${String(defaultType)}.`);
+  warnings.push(`create_app apptype="${String(current)}" không phải giá trị metadata hợp lệ; dùng default apptype=${String(defaultType)}.`);
   record.apptype = defaultType;
 }
 
@@ -2692,7 +2973,7 @@ function compactRecord(record: Record<string, unknown>, keys: string[]): Record<
 
 function buildIdWhere(idField: string, idValue: unknown): string {
   if (idValue === undefined || idValue === null || idValue === "") {
-    throw new Error("Delete thieu id_value.");
+    throw new Error("Delete thiếu id_value.");
   }
   return `${idField}=${formatSqlValue(idValue)}`;
 }

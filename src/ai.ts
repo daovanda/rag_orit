@@ -1,4 +1,4 @@
-﻿import {
+import {
   CHAT_MODEL,
   EMBEDDING_MODEL,
   INTERNAL_CHAT_FALLBACK_MODEL,
@@ -94,7 +94,7 @@ function normalizeMessagesForOpenRouter(messages: AIMessage[]): OpenRouterMessag
     if (message.role === "tool") {
       return {
         role: "user",
-        content: `Káº¿t quáº£ cÃ´ng cá»¥${message.tool_call_id ? ` (${message.tool_call_id})` : ""}:\n${message.content}`
+        content: `Kết quả công cụ${message.tool_call_id ? ` (${message.tool_call_id})` : ""}:\n${message.content}`
       };
     }
 
@@ -122,7 +122,7 @@ function getRuntimeToolDescription(name: string, description: string): string {
 
   return `${description}
 
-Bá»• sung sau ingest: rag_search cÅ©ng cÃ³ thá»ƒ tra cá»©u doc/logic/*.md. DÃ¹ng nÃ³ khi cáº§n hiá»ƒu cÃ¡ch Zilcode hoáº¡t Ä‘á»™ng, domain model, REST API contract, runtime architecture, window/tab/field config, tool safety rules, hoáº·c khi cáº§n láº¥y kiáº¿n thá»©c logic Ä‘á»ƒ chá»n/gá»i cÃ¡c tool Zilcode Ä‘Ãºng hÆ¡n vÃ  káº¿t há»£p vá»›i dá»¯ liá»‡u tháº­t.`;
+Bổ sung sau ingest: rag_search cũng có thể tra cứu doc/logic/*.md. Dùng nó khi cần hiểu cách Zilcode hoạt động, domain model, REST API contract, runtime architecture, window/tab/field config, tool safety rules, hoặc khi cần lấy kiến thức logic để chọn/gọi các tool Zilcode đúng hơn và kết hợp với dữ liệu thật.`;
 }
 
 function buildCloudflareChatRequest(
@@ -249,7 +249,7 @@ async function callOpenRouterChat(
   env: Env
 ): Promise<ChatModelResponse> {
   if (!env.OPENROUTER_API_KEY || !env.OPENROUTER_MODEL) {
-    throw new Error("Thiáº¿u OPENROUTER_API_KEY hoáº·c OPENROUTER_MODEL Ä‘á»ƒ fallback sang OpenRouter.");
+    throw new Error("Thiếu OPENROUTER_API_KEY hoặc OPENROUTER_MODEL để fallback sang OpenRouter.");
   }
 
   const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -279,7 +279,7 @@ async function callOpenRouterChat(
   }
 
   if (!response.ok) {
-    throw new Error(`OpenRouter API lá»—i ${response.status}: ${getErrorText(data)}`);
+    throw new Error(`OpenRouter API lỗi ${response.status}: ${getErrorText(data)}`);
   }
 
   return normalizeOpenRouterResponse(data);
@@ -311,7 +311,7 @@ export async function runChatModel(
     return await callCloudflareChatModel(cfModel, request, env);
   } catch (error) {
     if (isCloudflareInternalModelError(error) && cfModel !== INTERNAL_CHAT_FALLBACK_MODEL) {
-      console.log(`[CHAT_MODEL] ${cfModel} lá»—i ná»™i bá»™, fallback sang ${INTERNAL_CHAT_FALLBACK_MODEL}`);
+      console.log(`[CHAT_MODEL] ${cfModel} lỗi nội bộ, fallback sang ${INTERNAL_CHAT_FALLBACK_MODEL}`);
       return callCloudflareChatModel(INTERNAL_CHAT_FALLBACK_MODEL, request, env);
     }
 
@@ -331,7 +331,7 @@ async function callOpenRouterEmbedding(
   const model = env.OPENROUTER_EMBEDDING_MODEL ?? env.OPENROUTER_MODEL;
 
   if (!env.OPENROUTER_API_KEY || !model) {
-    throw new Error("Thiáº¿u OPENROUTER_API_KEY vÃ  OPENROUTER_EMBEDDING_MODEL/OPENROUTER_MODEL Ä‘á»ƒ fallback embedding sang OpenRouter.");
+    throw new Error("Thiếu OPENROUTER_API_KEY và OPENROUTER_EMBEDDING_MODEL/OPENROUTER_MODEL để fallback embedding sang OpenRouter.");
   }
 
   const response = await fetch("https://openrouter.ai/api/v1/embeddings", {
@@ -358,7 +358,7 @@ async function callOpenRouterEmbedding(
   }
 
   if (!response.ok) {
-    throw new Error(`OpenRouter Embeddings API lá»—i ${response.status}: ${getErrorText(data)}`);
+    throw new Error(`OpenRouter Embeddings API lỗi ${response.status}: ${getErrorText(data)}`);
   }
 
   const payload = data as {
@@ -369,12 +369,12 @@ async function callOpenRouterEmbedding(
   const embedding = payload.data?.[0]?.embedding;
 
   if (!embedding?.length) {
-    throw new Error("OpenRouter Embeddings API khÃ´ng tráº£ vá» embedding.");
+    throw new Error("OpenRouter Embeddings API không trả về embedding.");
   }
 
   if (embedding.length !== RAG_VECTOR_DIMENSIONS) {
     throw new Error(
-      `Embedding OpenRouter cÃ³ ${embedding.length} chiá»u, nhÆ°ng Vectorize index hiá»‡n táº¡i cáº§n ${RAG_VECTOR_DIMENSIONS} chiá»u. Cáº§n dÃ¹ng embedding model há»— trá»£ dimensions=${RAG_VECTOR_DIMENSIONS} hoáº·c táº¡o láº¡i Vectorize index vÃ  ingest láº¡i.`
+      `Embedding OpenRouter có ${embedding.length} chiều, nhưng Vectorize index hiện tại cần ${RAG_VECTOR_DIMENSIONS} chiều. Cần dùng embedding model hỗ trợ dimensions=${RAG_VECTOR_DIMENSIONS} hoặc tạo lại Vectorize index và ingest lại.`
     );
   }
 
@@ -422,7 +422,7 @@ export async function embedQuery(
 }
 
 function formatScore(score?: number): string {
-  return typeof score === "number" ? score.toFixed(3) : "khÃ´ng cÃ³";
+  return typeof score === "number" ? score.toFixed(3) : "không có";
 }
 
 function truncateForRerank(text: string): string {
@@ -500,32 +500,32 @@ function getAmbiguousRagQueryReason(query: string, chatHistory: AIMessage[]): st
   if (!normalized) return null;
 
   const contextualPatterns = [
-    /(^|\s)(nÃ³|Ä‘Ã³|nÃ y|kia)(\s|$)/u,
-    /(^|\s)(cÃ¡i|pháº§n|má»¥c|chá»—|bÆ°á»›c|trang|mÃ n hÃ¬nh|module|chá»©c nÄƒng|tÃ­nh nÄƒng|workflow|node)\s+(Ä‘Ã³|nÃ y|kia)(\s|$)/u,
-    /(^|\s)(á»Ÿ trÃªn|nhÆ° trÃªn|vá»«a rá»“i|vá»«a nÃ³i|ban nÃ£y|tiáº¿p theo|sau Ä‘Ã³)(\s|$)/u,
-    /(^|\s)(cÃ²n|váº­y|tháº¿)\s+(thÃ¬|nÃ³|pháº§n|bÆ°á»›c|má»¥c|cÃ¡i)(\s|$)/u
+    /(^|\s)(nó|đó|này|kia)(\s|$)/u,
+    /(^|\s)(cái|phần|mục|chỗ|bước|trang|màn hình|module|chức năng|tính năng|workflow|node)\s+(đó|này|kia)(\s|$)/u,
+    /(^|\s)(ở trên|như trên|vừa rồi|vừa nói|ban nãy|tiếp theo|sau đó)(\s|$)/u,
+    /(^|\s)(còn|vậy|thế)\s+(thì|nó|phần|bước|mục|cái)(\s|$)/u
   ];
 
   if (contextualPatterns.some(pattern => pattern.test(normalized))) {
-    return "query cÃ³ Ä‘áº¡i tá»« hoáº·c tham chiáº¿u phá»¥ thuá»™c lá»‹ch sá»­ chat";
+    return "query có đại từ hoặc tham chiếu phụ thuộc lịch sử chat";
   }
 
   const genericQueries = [
-    "lÃ  gÃ¬",
-    "dÃ¹ng tháº¿ nÃ o",
-    "sá»­ dá»¥ng tháº¿ nÃ o",
-    "hÆ°á»›ng dáº«n tÃ´i",
-    "lÃ m sao",
-    "lÃ m tháº¿ nÃ o",
-    "cÃ¡ch lÃ m",
-    "tiáº¿p theo",
-    "sá»­a lá»—i",
-    "giáº£i thÃ­ch thÃªm",
-    "nÃ³i rÃµ hÆ¡n"
+    "là gì",
+    "dùng thế nào",
+    "sử dụng thế nào",
+    "hướng dẫn tôi",
+    "làm sao",
+    "làm thế nào",
+    "cách làm",
+    "tiếp theo",
+    "sửa lỗi",
+    "giải thích thêm",
+    "nói rõ hơn"
   ];
 
   if (genericQueries.includes(normalized)) {
-    return "query quÃ¡ ngáº¯n hoáº·c quÃ¡ chung, cáº§n lá»‹ch sá»­ Ä‘á»ƒ lÃ m rÃµ";
+    return "query quá ngắn hoặc quá chung, cần lịch sử để làm rõ";
   }
 
   return null;
@@ -535,7 +535,7 @@ function formatHistoryForRewrite(chatHistory: AIMessage[]): string {
   return chatHistory
     .slice(-MAX_HISTORY_MESSAGES)
     .map(message => {
-      const role = message.role === "user" ? "NgÆ°á»i dÃ¹ng" : "Trá»£ lÃ½";
+      const role = message.role === "user" ? "Người dùng" : "Trợ lý";
       return `${role}: ${normalizeSpaces(message.content).slice(0, MAX_HISTORY_CONTENT_CHARS)}`;
     })
     .join("\n");
@@ -545,8 +545,8 @@ function cleanRewrittenQuery(raw: string, fallback: string): string {
   const cleaned = normalizeSpaces(
     raw
       .replace(/```json|```/g, "")
-      .replace(/^(truy váº¥n|query|rewritten query|cÃ¢u truy váº¥n)\s*[:ï¼š-]\s*/i, "")
-  ).replace(/^["'â€œâ€]+|["'â€œâ€]+$/g, "").trim();
+      .replace(/^(truy vấn|query|rewritten query|câu truy vấn)\s*[:：-]\s*/i, "")
+  ).replace(/^["'“”]+|["'“”]+$/g, "").trim();
 
   if (!cleaned || cleaned.length < 4) return fallback;
   return cleaned.slice(0, 320).trim();
@@ -562,7 +562,7 @@ async function maybeRewriteRagQuery(
   const reason = getAmbiguousRagQueryReason(originalQuery, chatHistory);
 
   if (!reason) {
-    addDebugStep(debugSteps, "rag.query_rewrite", "skip", chatHistory.length ? "Query Ä‘Ã£ Ä‘á»§ rÃµ, khÃ´ng cáº§n rewrite." : "KhÃ´ng cÃ³ history Ä‘á»ƒ rewrite.", {
+    addDebugStep(debugSteps, "rag.query_rewrite", "skip", chatHistory.length ? "Query đã đủ rõ, không cần rewrite." : "Không có history để rewrite.", {
       original_query: originalQuery,
       history_messages: chatHistory.length
     });
@@ -573,13 +573,13 @@ async function maybeRewriteRagQuery(
         original_query: originalQuery,
         rewritten_query: originalQuery,
         used: false,
-        reason: chatHistory.length ? "query Ä‘Ã£ Ä‘á»§ rÃµ, khÃ´ng cáº§n rewrite" : "khÃ´ng cÃ³ history Ä‘á»ƒ rewrite"
+        reason: chatHistory.length ? "query đã đủ rõ, không cần rewrite" : "không có history để rewrite"
       }
     };
   }
 
   try {
-    addDebugStep(debugSteps, "rag.query_rewrite", "start", "Rewrite query mÆ¡ há»“ báº±ng history.", {
+    addDebugStep(debugSteps, "rag.query_rewrite", "start", "Rewrite query mơ hồ bằng history.", {
       model: QUERY_REWRITE_MODEL,
       original_query: originalQuery,
       reason,
@@ -592,21 +592,21 @@ async function maybeRewriteRagQuery(
       messages: [
         {
           role: "system",
-          content: `Báº¡n lÃ  bá»™ rewrite query cho há»‡ thá»‘ng RAG tÃ i liá»‡u Zilcode.
-Nhiá»‡m vá»¥: dá»±a vÃ o lá»‹ch sá»­ há»™i thoáº¡i vÃ  cÃ¢u há»i hiá»‡n táº¡i, viáº¿t láº¡i thÃ nh má»™t truy váº¥n tÃ¬m kiáº¿m Ä‘á»™c láº­p, rÃµ nghÄ©a.
-Chá»‰ tráº£ vá» Ä‘Ãºng má»™t cÃ¢u truy váº¥n, khÃ´ng giáº£i thÃ­ch, khÃ´ng markdown, khÃ´ng JSON.
-Giá»¯ thuáº­t ngá»¯ Zilcode quan trá»ng nhÆ° App Builder, SQL Cloud, User, Role, Organization, Application, Window, Tab, Field, Workflow náº¿u cÃ³.
-Náº¿u cÃ¢u há»i hiá»‡n táº¡i Ä‘Ã£ rÃµ sau khi xÃ©t lá»‹ch sá»­, váº«n viáº¿t láº¡i thÃ nh cÃ¢u truy váº¥n ngáº¯n gá»n vÃ  Ä‘áº§y Ä‘á»§ ngá»¯ cáº£nh.`
+          content: `Bạn là bộ rewrite query cho hệ thống RAG tài liệu Zilcode.
+Nhiệm vụ: dựa vào lịch sử hội thoại và câu hỏi hiện tại, viết lại thành một truy vấn tìm kiếm độc lập, rõ nghĩa.
+Chỉ trả về đúng một câu truy vấn, không giải thích, không markdown, không JSON.
+Giữ thuật ngữ Zilcode quan trọng như App Builder, SQL Cloud, User, Role, Organization, Application, Window, Tab, Field, Workflow nếu có.
+Nếu câu hỏi hiện tại đã rõ sau khi xét lịch sử, vẫn viết lại thành câu truy vấn ngắn gọn và đầy đủ ngữ cảnh.`
         },
         {
           role: "user",
           content: [
-            "Lá»‹ch sá»­ há»™i thoáº¡i gáº§n nháº¥t:",
+            "Lịch sử hội thoại gần nhất:",
             formatHistoryForRewrite(chatHistory),
             "",
-            `CÃ¢u há»i/query hiá»‡n táº¡i: ${originalQuery}`,
+            `Câu hỏi/query hiện tại: ${originalQuery}`,
             "",
-            "Truy váº¥n tÃ¬m kiáº¿m Ä‘á»™c láº­p cho tÃ i liá»‡u Zilcode:"
+            "Truy vấn tìm kiếm độc lập cho tài liệu Zilcode:"
           ].join("\n")
         }
       ]
@@ -615,7 +615,7 @@ Náº¿u cÃ¢u há»i hiá»‡n táº¡i Ä‘Ã£ rÃµ sau khi xÃ©t lá�
     const rewrittenQuery = cleanRewrittenQuery(response.response ?? "", originalQuery);
     const used = rewrittenQuery.toLowerCase() !== originalQuery.toLowerCase();
 
-    addDebugStep(debugSteps, "rag.query_rewrite", "ok", used ? "ÄÃ£ rewrite query cho retrieval." : "Model giá»¯ nguyÃªn query gá»‘c.", {
+    addDebugStep(debugSteps, "rag.query_rewrite", "ok", used ? "Đã rewrite query cho retrieval." : "Model giữ nguyên query gốc.", {
       original_query: originalQuery,
       rewritten_query: rewrittenQuery,
       used
@@ -632,8 +632,8 @@ Náº¿u cÃ¢u há»i hiá»‡n táº¡i Ä‘Ã£ rÃµ sau khi xÃ©t lá�
       }
     };
   } catch (error) {
-    console.log(`[RAG_REWRITE] Lá»—i rewrite, dÃ¹ng query gá»‘c: ${getErrorText(error)}`);
-    addDebugStep(debugSteps, "rag.query_rewrite", "error", "Rewrite lá»—i, fallback vá» query gá»‘c.", {
+    console.log(`[RAG_REWRITE] Lỗi rewrite, dùng query gốc: ${getErrorText(error)}`);
+    addDebugStep(debugSteps, "rag.query_rewrite", "error", "Rewrite lỗi, fallback về query gốc.", {
       original_query: originalQuery,
       error: getErrorText(error)
     });
@@ -644,7 +644,7 @@ Náº¿u cÃ¢u há»i hiá»‡n táº¡i Ä‘Ã£ rÃµ sau khi xÃ©t lá�
         original_query: originalQuery,
         rewritten_query: originalQuery,
         used: false,
-        reason: `rewrite lá»—i, dÃ¹ng query gá»‘c: ${getErrorText(error)}`,
+        reason: `rewrite lỗi, dùng query gốc: ${getErrorText(error)}`,
         model: QUERY_REWRITE_MODEL
       }
     };
@@ -659,7 +659,7 @@ async function rerankRagCandidates(
 ): Promise<RagCandidate[]> {
   if (candidates.length === 0) return [];
 
-  addDebugStep(debugSteps, "rag.rerank", "start", "Báº¯t Ä‘áº§u rerank cÃ¡c chunk tá»« Vectorize.", {
+  addDebugStep(debugSteps, "rag.rerank", "start", "Bắt đầu rerank các chunk từ Vectorize.", {
     model: CHAT_MODEL,
     candidates: candidates.length,
     query
@@ -678,10 +678,10 @@ async function rerankRagCandidates(
     messages: [
       {
         role: "system",
-        content: `Báº¡n lÃ  bá»™ rerank tÃ i liá»‡u cho chatbot RAG Zilcode.
-Nhiá»‡m vá»¥: xáº¿p háº¡ng cÃ¡c chunk theo má»©c liÃªn quan vá»›i cÃ¢u há»i ngÆ°á»i dÃ¹ng.
-Æ¯u tiÃªn chunk tráº£ lá»i trá»±c tiáº¿p cÃ¢u há»i, Ä‘Ãºng Ä‘á»‘i tÆ°á»£ng ngÆ°á»i dÃ¹ng/quáº£n trá»‹, vÃ  cÃ³ ná»™i dung thao tÃ¡c cá»¥ thá»ƒ.
-Chá»‰ tráº£ vá» JSON há»£p lá»‡, khÃ´ng giáº£i thÃ­ch thÃªm.
+        content: `Bạn là bộ rerank tài liệu cho chatbot RAG Zilcode.
+Nhiệm vụ: xếp hạng các chunk theo mức liên quan với câu hỏi người dùng.
+Ưu tiên chunk trả lời trực tiếp câu hỏi, đúng đối tượng người dùng/quản trị, và có nội dung thao tác cụ thể.
+Chỉ trả về JSON hợp lệ, không giải thích thêm.
 Schema: {"ranked_ids":["chunk-id-1","chunk-id-2"]}`
       },
       {
@@ -698,7 +698,7 @@ Schema: {"ranked_ids":["chunk-id-1","chunk-id-2"]}`
   const rankedIds = getStringArray(parsed?.ranked_ids);
 
   if (!rankedIds.length) {
-    addDebugStep(debugSteps, "rag.rerank", "skip", "Rerank khÃ´ng tráº£ JSON há»£p lá»‡, fallback theo Ä‘iá»ƒm Vectorize.", {
+    addDebugStep(debugSteps, "rag.rerank", "skip", "Rerank không trả JSON hợp lệ, fallback theo điểm Vectorize.", {
       selected_ids: sortByVectorScore(candidates).slice(0, RAG_MAX_CONTEXT_CHUNKS).map(candidate => candidate.id)
     });
 
@@ -727,7 +727,7 @@ Schema: {"ranked_ids":["chunk-id-1","chunk-id-2"]}`
     .slice(0, RAG_MAX_CONTEXT_CHUNKS)
     .map((candidate, index) => ({ ...candidate, rerank_rank: index + 1 }));
 
-  addDebugStep(debugSteps, "rag.rerank", "ok", "ÄÃ£ chá»n cÃ¡c chunk tá»‘t nháº¥t sau rerank.", {
+  addDebugStep(debugSteps, "rag.rerank", "ok", "Đã chọn các chunk tốt nhất sau rerank.", {
     selected_ids: selected.map(candidate => candidate.id)
   });
 
@@ -740,7 +740,7 @@ export async function searchRag(
   chatHistory: AIMessage[] = [],
   debugSteps?: DebugStep[]
 ): Promise<ToolExecutionResult> {
-  addDebugStep(debugSteps, "rag.search", "start", "Báº¯t Ä‘áº§u RAG search.", {
+  addDebugStep(debugSteps, "rag.search", "start", "Bắt đầu RAG search.", {
     original_query: query,
     history_messages: chatHistory.length
   });
@@ -748,7 +748,7 @@ export async function searchRag(
   const rewritten = await maybeRewriteRagQuery(query, chatHistory, env, debugSteps);
   const retrievalQuery = rewritten.query;
 
-  addDebugStep(debugSteps, "rag.embedding", "start", "Embedding query dÃ¹ng cho retrieval.", {
+  addDebugStep(debugSteps, "rag.embedding", "start", "Embedding query dùng cho retrieval.", {
     query: retrievalQuery,
     model: EMBEDDING_MODEL
   });
@@ -756,7 +756,7 @@ export async function searchRag(
   const embeddingResult = await embedQuery(retrievalQuery, env);
   const queryVector = embeddingResult.vector;
 
-  addDebugStep(debugSteps, "rag.embedding", "ok", "Embedding query hoÃ n táº¥t.", {
+  addDebugStep(debugSteps, "rag.embedding", "ok", "Embedding query hoàn tất.", {
     provider: embeddingResult.debug.provider,
     model: embeddingResult.debug.model,
     dimensions: embeddingResult.debug.dimensions,
@@ -774,14 +774,14 @@ export async function searchRag(
   });
 
   const vectorMatches = matches.matches as VectorMatch[];
-  addDebugStep(debugSteps, "rag.vectorize", "ok", "Vectorize tráº£ káº¿t quáº£.", {
+  addDebugStep(debugSteps, "rag.vectorize", "ok", "Vectorize trả kết quả.", {
     matches: vectorMatches.length,
     top_score: vectorMatches[0]?.score
   });
 
   if (!vectorMatches.length) {
     return {
-      content: "KhÃ´ng tÃ¬m tháº¥y tÃ i liá»‡u liÃªn quan.",
+      content: "Không tìm thấy tài liệu liên quan.",
       embedding_debug: embeddingResult.debug,
       rag_query_debug: rewritten.debug
     };
@@ -791,7 +791,7 @@ export async function searchRag(
     typeof match.score !== "number" || match.score >= RAG_MIN_SCORE
   );
 
-  addDebugStep(debugSteps, "rag.filter", "ok", "Lá»c match theo ngÆ°á»¡ng score.", {
+  addDebugStep(debugSteps, "rag.filter", "ok", "Lọc match theo ngưỡng score.", {
     before: vectorMatches.length,
     after: filteredMatches.length,
     min_score: RAG_MIN_SCORE
@@ -799,14 +799,14 @@ export async function searchRag(
 
   if (!filteredMatches.length) {
     return {
-      content: `KhÃ´ng tÃ¬m tháº¥y tÃ i liá»‡u Ä‘á»§ liÃªn quan. Äiá»ƒm liÃªn quan cao nháº¥t lÃ  ${formatScore(vectorMatches[0]?.score)}, tháº¥p hÆ¡n ngÆ°á»¡ng ${RAG_MIN_SCORE}.`,
+      content: `Không tìm thấy tài liệu đủ liên quan. Điểm liên quan cao nhất là ${formatScore(vectorMatches[0]?.score)}, thấp hơn ngưỡng ${RAG_MIN_SCORE}.`,
       embedding_debug: embeddingResult.debug,
       rag_query_debug: rewritten.debug
     };
   }
 
   const candidates: RagCandidate[] = [];
-  addDebugStep(debugSteps, "rag.kv", "start", "Láº¥y ná»™i dung chunk tá»« KV.", {
+  addDebugStep(debugSteps, "rag.kv", "start", "Lấy nội dung chunk từ KV.", {
     requested_chunks: filteredMatches.length
   });
 
@@ -823,13 +823,13 @@ export async function searchRag(
     });
   }
 
-  addDebugStep(debugSteps, "rag.kv", "ok", "ÄÃ£ táº£i ná»™i dung chunk tá»« KV.", {
+  addDebugStep(debugSteps, "rag.kv", "ok", "Đã tải nội dung chunk từ KV.", {
     loaded_chunks: candidates.length
   });
 
   if (!candidates.length) {
     return {
-      content: "KhÃ´ng tÃ¬m tháº¥y ná»™i dung chunk tÆ°Æ¡ng á»©ng trong KV.",
+      content: "Không tìm thấy nội dung chunk tương ứng trong KV.",
       embedding_debug: embeddingResult.debug,
       rag_query_debug: rewritten.debug
     };
@@ -838,10 +838,10 @@ export async function searchRag(
   const reranked = await rerankRagCandidates(retrievalQuery, candidates, env, debugSteps);
   const content = reranked
     .map((candidate, index) => [
-      `[Nguá»“n ${index + 1}: ${candidate.source_label}]`,
+      `[Nguồn ${index + 1}: ${candidate.source_label}]`,
       `ID: ${candidate.id}`,
-      `Äiá»ƒm Vectorize: ${formatScore(candidate.vector_score)}`,
-      `Thá»© háº¡ng rerank: ${candidate.rerank_rank ?? index + 1}`,
+      `Điểm Vectorize: ${formatScore(candidate.vector_score)}`,
+      `Thứ hạng rerank: ${candidate.rerank_rank ?? index + 1}`,
       "",
       candidate.text
     ].join("\n"))

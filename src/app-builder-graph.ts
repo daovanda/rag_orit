@@ -45,6 +45,11 @@ interface GraphContext {
   edges: AppBuilderEdge[];
   nodeById: Map<string, AppBuilderNode>;
   sourceByNodeId: Map<string, SourceRecord>;
+  cache?: {
+    hit: boolean;
+    cache_key: string;
+    expires_in_ms?: number;
+  };
 }
 
 const CHILD_KEYS = new Set([
@@ -64,6 +69,20 @@ const CHILD_KEYS = new Set([
   "archives",
   "archives_summary"
 ]);
+const GRAPH_CONTEXT_CACHE_TTL_MS = 90 * 1000;
+const graphContextCache = new Map<string, { expiresAt: number; context: GraphContext }>();
+
+export function invalidateAppBuilderGraphCache(session?: ZilcodeSession | null): void {
+  if (!session) {
+    graphContextCache.clear();
+    return;
+  }
+
+  const prefix = graphContextCachePrefix(session);
+  for (const key of graphContextCache.keys()) {
+    if (key.startsWith(prefix)) graphContextCache.delete(key);
+  }
+}
 
 export function isAppBuilderGraphTool(name: string): boolean {
   return APP_BUILDER_GRAPH_TOOL_NAMES.has(name);
@@ -81,7 +100,7 @@ export async function runAppBuilderGraphTool(
 
   if (!session) {
     return {
-      error: "Chua dang nhap Zilcode trong chatbot. Hay dang nhap truoc khi doc App Builder graph."
+      error: "Chưa đăng nhập Zilcode trong chatbot. Hãy đăng nhập trước khi đọc App Builder graph."
     };
   }
 
@@ -106,6 +125,20 @@ async function buildAppBuilderGraphContext(
   session: ZilcodeSession,
   args: Record<string, unknown>
 ): Promise<GraphContext> {
+  const cacheKey = graphContextCacheKey(session, args);
+  const now = Date.now();
+  const cached = graphContextCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) {
+    return {
+      ...cached.context,
+      cache: {
+        hit: true,
+        cache_key: cacheKey,
+        expires_in_ms: cached.expiresAt - now
+      }
+    };
+  }
+
   const blueprint = await buildZilcodeAppBuilderBlueprint(env, session, {
     appid: getStringArg(args, "app_builder_appid") || getStringArg(args, "appid") || "1",
     mode: "graph",
@@ -116,7 +149,17 @@ async function buildAppBuilderGraphContext(
     max_windows_per_app: String(getNumberArg(args, "max_windows_per_app", 50, 1, 300))
   });
 
-  return buildGraphFromBlueprint(blueprint);
+  const context = buildGraphFromBlueprint(blueprint);
+  const expiresAt = now + GRAPH_CONTEXT_CACHE_TTL_MS;
+  graphContextCache.set(cacheKey, { expiresAt, context });
+  return {
+    ...context,
+    cache: {
+      hit: false,
+      cache_key: cacheKey,
+      expires_in_ms: GRAPH_CONTEXT_CACHE_TTL_MS
+    }
+  };
 }
 
 function buildGraphFromBlueprint(blueprint: Record<string, unknown>): GraphContext {
@@ -568,22 +611,30 @@ function buildGraphFromBlueprint(blueprint: Record<string, unknown>): GraphConte
 }
 
 function buildOverviewResponse(context: GraphContext, args: Record<string, unknown>): Record<string, unknown> {
-  const maxNodes = getNumberArg(args, "max_nodes", 250, 20, 1000);
-  const maxEdges = getNumberArg(args, "max_edges", 500, 20, 2000);
-  const graph = summarizeGraph(context.nodes.slice(0, maxNodes), context.edges.slice(0, maxEdges));
+  const maxApps = getNumberArg(args, "max_apps", 100, 1, 500);
+  const root = context.nodes.find(node => node.type === "root");
+  const allApps = context.nodes.filter(node => node.type === "app");
+  const apps = allApps.slice(0, maxApps);
+  const overviewNodes = root ? [root, ...apps] : apps;
+  const overviewNodeIds = new Set(overviewNodes.map(node => node.id));
+  const overviewEdges = context.edges.filter(edge => overviewNodeIds.has(edge.from) && overviewNodeIds.has(edge.to));
+  const graph = summarizeGraph(overviewNodes, overviewEdges);
 
   return {
     mode: "overview",
-    description: "Skeleton graph cua App Builder. Dung node_id tu day de goi search, subgraph hoac node_detail.",
+    description: "Tổng quan App Builder dạng rút gọn theo app. Dùng node_id/appid trong apps để gọi search, subgraph hoặc node_detail khi cần chi tiết.",
     session: context.blueprint.session,
     scan: context.blueprint.scan,
     graph,
+    apps_count: allApps.length,
+    apps,
+    graph_counts: graphCounts(context.nodes, context.edges),
     truncated: {
-      nodes: context.nodes.length > maxNodes,
-      edges: context.edges.length > maxEdges,
+      apps: allApps.length > maxApps,
       total_nodes: context.nodes.length,
       total_edges: context.edges.length
     },
+    cache: context.cache,
     errors: collectErrors(context.blueprint)
   };
 }
@@ -596,7 +647,7 @@ function buildSearchResponse(context: GraphContext, args: Record<string, unknown
   if (!query) {
     return {
       mode: "search",
-      error: "Thieu query. Hay truyen query de tim app/service/table/window/tab/field/menu/domain/cache/role/access.",
+      error: "Thiếu query. Hãy truyền query để tìm app/service/table/window/tab/field/menu/domain/cache/role/access.",
       graph_counts: graphCounts(context.nodes, context.edges)
     };
   }
@@ -623,7 +674,9 @@ function buildSearchResponse(context: GraphContext, args: Record<string, unknown
     types: types.size ? [...types] : undefined,
     matches_count: matches.length,
     matches,
-    hint: "Dung node_id trong matches de goi app_builder_graph_subgraph hoac app_builder_node_detail."
+    graph_counts: graphCounts(context.nodes, context.edges),
+    cache: context.cache,
+    hint: "Dùng node_id trong matches để gọi app_builder_graph_subgraph hoặc app_builder_node_detail."
   };
 }
 
@@ -633,7 +686,7 @@ function buildSubgraphResponse(context: GraphContext, args: Record<string, unkno
   const startIds = getNodeIds(args);
   const query = getStringArg(args, "query") || getStringArg(args, "q");
   const resolvedStartIds = startIds.length
-    ? startIds
+    ? startIds.flatMap(id => resolveNodeIdCandidates(context, id, 3).map(match => match.id))
     : query
       ? searchNodeIds(context, query, 3)
       : [];
@@ -641,7 +694,7 @@ function buildSubgraphResponse(context: GraphContext, args: Record<string, unkno
   if (!resolvedStartIds.length) {
     return {
       mode: "subgraph",
-      error: "Thieu node_id/node_ids. Co the truyen query de tool tu tim node gan nhat.",
+      error: "Thiếu node_id/node_ids. Có thể truyền query để tool tự tìm node gần nhất.",
       graph_counts: graphCounts(context.nodes, context.edges)
     };
   }
@@ -652,6 +705,8 @@ function buildSubgraphResponse(context: GraphContext, args: Record<string, unkno
     start_node_ids: resolvedStartIds,
     depth,
     graph: summarizeGraph(subgraph.nodes, subgraph.edges),
+    graph_counts: graphCounts(context.nodes, context.edges),
+    cache: context.cache,
     missing_node_ids: resolvedStartIds.filter(id => !context.nodeById.has(id))
   };
 }
@@ -659,13 +714,19 @@ function buildSubgraphResponse(context: GraphContext, args: Record<string, unkno
 function buildNodeDetailResponse(context: GraphContext, args: Record<string, unknown>): Record<string, unknown> {
   const includeNeighbors = getBooleanArg(args, "include_neighbors", true);
   const includeFields = getBooleanArg(args, "include_fields", true);
-  const nodeId = getNodeIds(args)[0] ?? searchNodeIds(context, getStringArg(args, "query") || getStringArg(args, "q"), 1)[0];
+  const requestedNodeId = getNodeIds(args)[0];
+  const query = getStringArg(args, "query") || getStringArg(args, "q");
+  const candidates = requestedNodeId
+    ? resolveNodeIdCandidates(context, requestedNodeId, 5)
+    : searchNodeMatches(context, query, 5);
+  const nodeId = candidates[0]?.id;
 
   if (!nodeId) {
     return {
       mode: "detail",
-      error: "Thieu node_id. Co the truyen query de tool tim node gan nhat.",
-      graph_counts: graphCounts(context.nodes, context.edges)
+      error: "Thiếu node_id. Có thể truyền query để tool tìm node gần nhất.",
+      graph_counts: graphCounts(context.nodes, context.edges),
+      cache: context.cache
     };
   }
 
@@ -673,17 +734,22 @@ function buildNodeDetailResponse(context: GraphContext, args: Record<string, unk
   if (!node) {
     return {
       mode: "detail",
+      requested_node_id: requestedNodeId,
       node_id: nodeId,
-      error: "Khong tim thay node_id trong graph.",
-      search_hint: "Goi app_builder_graph_search de tim node_id dung."
+      error: "Không tìm thấy node_id trong graph.",
+      candidates,
+      search_hint: "Dùng một node_id trong candidates, hoặc truyền query tên app/table/window."
     };
   }
 
   return {
     mode: "detail",
+    requested_node_id: requestedNodeId,
+    resolved_from: requestedNodeId && requestedNodeId !== nodeId ? requestedNodeId : undefined,
     node,
     detail: buildNodeDetail(context, nodeId, includeFields),
-    neighbors: includeNeighbors ? buildNeighborSummary(context, nodeId) : undefined
+    neighbors: includeNeighbors ? buildNeighborSummary(context, nodeId) : undefined,
+    cache: context.cache
   };
 }
 
@@ -694,14 +760,14 @@ function buildCreationSchema(args: Record<string, unknown>): Record<string, unkn
     mode: "creation_schema",
     intent,
     status: "prepare_then_apply",
-    note: "Dung app_builder_prepare_change de tao pending plan. Chi dung app_builder_apply_change sau khi user xac nhan ro rang.",
+    note: "Dùng app_builder_prepare_change để tạo pending plan. Chỉ dùng app_builder_apply_change sau khi user xác nhận rõ ràng.",
     graph_first_rule: [
-      "1. Goi app_builder_graph_overview de nam skeleton he thong.",
-      "2. Goi app_builder_graph_search neu can tim app/table/window/tab/field hien co.",
-      "3. Goi app_builder_graph_subgraph de mo vung lien quan.",
-      "4. Goi app_builder_node_detail cho node can sua/them nhanh.",
-      "5. Goi app_builder_prepare_change de validate va luu pending plan neu da du thong tin.",
-      "6. Chi apply sau khi user xac nhan."
+      "1. Gọi app_builder_graph_overview để nắm skeleton hệ thống.",
+      "2. Gọi app_builder_graph_search nếu cần tìm app/table/window/tab/field hiện có.",
+      "3. Gọi app_builder_graph_subgraph để mở vùng liên quan.",
+      "4. Gọi app_builder_node_detail cho node cần sửa/thêm nhanh.",
+      "5. Gọi app_builder_prepare_change để validate và lưu pending plan nếu đã đủ thông tin.",
+      "6. Chỉ apply sau khi user xác nhận."
     ],
     create_app_branch: {
       order: ["app", "service/appservice", "table", "column", "window", "tab", "field", "menu", "roleapp/rolemenu/access", "cache refresh/delete"],
@@ -720,7 +786,7 @@ function buildCreationSchema(args: Record<string, unknown>): Record<string, unkn
       ],
       required_information: {
         app: ["appname", "seqno", "apptype", "optional description"],
-        service: ["serviceid cua service hien co hoac create service truoc"],
+        service: ["serviceid của service hiện có hoặc create service trước"],
         appservice: ["appid", "serviceid"],
         table: ["serviceid", "tablename", "alias", "tabletype"],
         column: ["tableid or table reference", "columnname", "datatype/columntype", "primary/display/search flags when needed"],
@@ -735,9 +801,9 @@ function buildCreationSchema(args: Record<string, unknown>): Record<string, unkn
     edit_existing_branch: {
       order: ["search target", "subgraph around target", "node detail", "proposed patch plan"],
       rules: [
-        "Khong tao trung app/table/window/menu/field neu graph da co node tuong ung.",
-        "Neu user noi ten app/table/window mo ho, dung search truoc roi hoi lai neu co nhieu ket qua.",
-        "Neu can them field vao window, phai biet tab va column; neu column chua co thi plan can tao column truoc field."
+        "Không tạo trùng app/table/window/menu/field nếu graph đã có node tương ứng.",
+        "Nếu user nói tên app/table/window mơ hồ, dùng search trước rồi hỏi lại nếu có nhiều kết quả.",
+        "Nếu cần thêm field vào window, phải biết tab và column; nếu column chưa có thì plan cần tạo column trước field."
       ]
     },
     proposed_plan_format: {
@@ -764,7 +830,7 @@ function buildCreationSchema(args: Record<string, unknown>): Record<string, unkn
         }
       ],
       reference_rule: "Co the dung $operation_id.field de noi output cua buoc truoc vao buoc sau, vi du $create_app_1.appid.",
-      delete_rule: "Xoa node chi khi user noi ro. Dung delete_app/delete_window cascade khi xoa app/window; cascade phai don field, tab, menu, cache va role/menu access truoc.",
+      delete_rule: "Xóa node chỉ khi user nói rõ. Dùng delete_app/delete_window cascade khi xóa app/window; cascade phải dọn field, tab, menu, cache và role/menu access trước.",
       validation: ["duplicate check", "required ids", "edge completeness", "payload fields filtered by actual App Builder metadata"]
     }
   };
@@ -772,7 +838,7 @@ function buildCreationSchema(args: Record<string, unknown>): Record<string, unkn
 
 function buildNodeDetail(context: GraphContext, nodeId: string, includeFields: boolean): Record<string, unknown> {
   const source = context.sourceByNodeId.get(nodeId);
-  if (!source) return { error: "Node khong co source detail." };
+  if (!source) return { error: "Node không có source detail." };
 
   switch (source.type) {
     case "app": {
@@ -958,6 +1024,10 @@ function graphCounts(nodes: AppBuilderNode[], edges: AppBuilderEdge[]): Record<s
 }
 
 function searchNodeIds(context: GraphContext, query: string, limit: number): string[] {
+  return searchNodeMatches(context, query, limit).map(match => match.id);
+}
+
+function searchNodeMatches(context: GraphContext, query: string, limit: number): Array<AppBuilderNode & { score: number }> {
   const normalizedQuery = normalizeSearchText(query);
   if (!normalizedQuery) return [];
   return context.nodes
@@ -965,7 +1035,20 @@ function searchNodeIds(context: GraphContext, query: string, limit: number): str
     .filter(item => item.score > 0)
     .sort((a, b) => b.score - a.score)
     .slice(0, limit)
-    .map(item => item.node.id);
+    .map(item => ({ ...item.node, score: item.score }));
+}
+
+function resolveNodeIdCandidates(context: GraphContext, rawNodeId: string, limit: number): Array<AppBuilderNode & { score: number }> {
+  const direct = context.nodeById.get(rawNodeId);
+  if (direct) return [{ ...direct, score: 100 }];
+
+  const [prefix, ...rest] = rawNodeId.split(":");
+  const query = rest.length ? rest.join(":") : rawNodeId;
+  const type = rest.length ? prefix : "";
+  const candidates = searchNodeMatches(context, query, limit);
+  return type
+    ? candidates.filter(candidate => candidate.type === type)
+    : candidates;
 }
 
 function scoreNode(node: AppBuilderNode, normalizedQuery: string): number {
@@ -1003,6 +1086,25 @@ function normalizeSearchText(text: string): string {
     .replace(/[_:-]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function graphContextCachePrefix(session: ZilcodeSession): string {
+  return [
+    "app_builder_graph",
+    session.base_url ?? "",
+    session.roleid ?? "",
+    session.orgid ?? "",
+    hashString(String(session.token ?? ""))
+  ].join("|");
+}
+
+function graphContextCacheKey(session: ZilcodeSession, args: Record<string, unknown>): string {
+  return [
+    graphContextCachePrefix(session),
+    getStringArg(args, "app_builder_appid") || getStringArg(args, "appid") || "1",
+    getNumberArg(args, "max_records_per_table", 500, 1, 5000),
+    getNumberArg(args, "max_windows_per_app", 50, 1, 300)
+  ].join("|");
 }
 
 function resolveTableNode(
