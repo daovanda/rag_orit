@@ -568,6 +568,9 @@ function buildOperationRequestAudit(
 
   const where = resolveStringReferences(operation.where, state)
     || buildIdWhere(idField, resolveValueReference(operation.id_value, state));
+  const hiddenMetadataCleanup = operation.collection === "applications"
+    ? buildApplicationDeleteCleanupAudit(operation, state)
+    : undefined;
   return {
     method: "DELETE",
     collection: operation.collection,
@@ -576,7 +579,8 @@ function buildOperationRequestAudit(
     source_table: compactRecord(sourceTable, ["tableid", "tablename", "alias", "urledit", "urlview"]),
     id_field: idField,
     id_value: operation.id_value,
-    where
+    where,
+    hidden_metadata_cleanup: hiddenMetadataCleanup
   };
 }
 
@@ -623,12 +627,175 @@ async function applyOperation(
 
   const where = resolveStringReferences(operation.where, state)
     || buildIdWhere(TARGET_ID_FIELD[operation.collection], resolveValueReference(operation.id_value, state));
+  const hiddenMetadataCleanup = operation.collection === "applications"
+    ? await cleanupApplicationMetadataBeforeDelete(env, context, operation, state)
+    : undefined;
   const envelope = await callZilcodeJson<unknown>(env, addQuery(endpoint, { where }), {
     method: "DELETE",
     token: context.session.token,
     baseUrl: context.session.base_url
   });
-  return assertZilcodeSuccess(envelope);
+  const deleteResult = assertZilcodeSuccess(envelope);
+  return hiddenMetadataCleanup
+    ? { delete_result: deleteResult, hidden_metadata_cleanup: hiddenMetadataCleanup }
+    : deleteResult;
+}
+
+function buildApplicationDeleteCleanupAudit(
+  operation: PreparedOperation,
+  state: ApplyState
+): Record<string, unknown> | undefined {
+  const appIdText = getNumericAppIdText(resolveDeleteApplicationId(operation, state));
+  if (!appIdText) {
+    return {
+      status: "skipped",
+      reason: "Khong resolve duoc appid so tu id_value/where nen khong the cleanup metadata an truoc delete_app."
+    };
+  }
+
+  return {
+    status: "will_run_before_delete_app",
+    appid: appIdText,
+    fixed_order: ["n_field", "n_tab", "n_menu", "n_window"],
+    note: "Dung query endpoint de don metadata co the bi an khoi data endpoint, vi FK n_window/n_menu van chan xoa n_app."
+  };
+}
+
+async function cleanupApplicationMetadataBeforeDelete(
+  env: Env,
+  context: WriteContext,
+  operation: PreparedOperation,
+  state: ApplyState
+): Promise<Record<string, unknown> | undefined> {
+  const appIdText = getNumericAppIdText(resolveDeleteApplicationId(operation, state));
+  if (!appIdText) return undefined;
+
+  const endpoint = getZilcodeQueryEndpoint(context, "applications");
+  const statements = buildDeleteApplicationMetadataStatements(context, appIdText);
+  const results: Record<string, unknown>[] = [];
+
+  for (const statement of statements) {
+    const envelope = await callZilcodeJson<unknown>(env, endpoint, {
+      method: "PUT",
+      token: context.session.token,
+      baseUrl: context.session.base_url,
+      data: { body: statement.sql }
+    });
+    const result = assertZilcodeSuccess(envelope);
+    results.push({
+      label: statement.label,
+      ok: true,
+      result: summarizeCleanupQueryResult(result)
+    });
+  }
+
+  return {
+    appid: appIdText,
+    query_endpoint: endpoint,
+    statements_count: statements.length,
+    results
+  };
+}
+
+function resolveDeleteApplicationId(operation: PreparedOperation, state: ApplyState): unknown {
+  const idValue = resolveValueReference(operation.id_value, state);
+  if (hasUsableValue(idValue)) return idValue;
+  return extractNumericIdFromSimpleWhere(resolveStringReferences(operation.where, state), "appid");
+}
+
+function getNumericAppIdText(value: unknown): string | undefined {
+  const text = String(value ?? "").trim();
+  return /^\d+$/.test(text) ? text : undefined;
+}
+
+function extractNumericIdFromSimpleWhere(where: string, field: string): string | undefined {
+  const normalizedField = field.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const equalsMatch = where.match(new RegExp(`^\\s*${normalizedField}\\s*=\\s*(\\d+)\\s*$`, "i"));
+  if (equalsMatch) return equalsMatch[1];
+  const inMatch = where.match(new RegExp(`^\\s*${normalizedField}\\s+IN\\s*\\(\\s*(\\d+)\\s*\\)\\s*$`, "i"));
+  return inMatch?.[1];
+}
+
+function buildDeleteApplicationMetadataStatements(
+  context: WriteContext,
+  appIdText: string
+): Array<{ label: string; sql: string }> {
+  const fieldsTable = getSqlTableName(context, "fields", "n_field");
+  const tabsTable = getSqlTableName(context, "tabs", "n_tab");
+  const menusTable = getSqlTableName(context, "menus", "n_menu");
+  const windowsTable = getSqlTableName(context, "windows", "n_window");
+  const appidColumn = getSqlColumnName("appid");
+  const tabidColumn = getSqlColumnName("tabid");
+  const windowidColumn = getSqlColumnName("windowid");
+  const windowSubquery = `SELECT ${windowidColumn} FROM ${windowsTable} WHERE ${appidColumn}=${appIdText}`;
+  const tabSubquery = `SELECT ${tabidColumn} FROM ${tabsTable} WHERE ${windowidColumn} IN (${windowSubquery})`;
+  const menuClauses: string[] = [];
+
+  if (isColumnAllowed(context, "menus", "appid")) {
+    menuClauses.push(`${appidColumn}=${appIdText}`);
+  }
+  for (const linkColumn of getMenuWindowLinkColumns(context)) {
+    menuClauses.push(`${getSqlColumnName(linkColumn)} IN (${windowSubquery})`);
+  }
+
+  const statements: Array<{ label: string; sql: string }> = [
+    {
+      label: "delete fields of app windows",
+      sql: `DELETE FROM ${fieldsTable} WHERE ${tabidColumn} IN (${tabSubquery})`
+    },
+    {
+      label: "delete tabs of app windows",
+      sql: `DELETE FROM ${tabsTable} WHERE ${windowidColumn} IN (${windowSubquery})`
+    }
+  ];
+
+  if (menuClauses.length) {
+    statements.push({
+      label: "delete menus linked to app/windows",
+      sql: `DELETE FROM ${menusTable} WHERE ${menuClauses.join(" OR ")}`
+    });
+  }
+
+  statements.push({
+    label: "delete windows of app",
+    sql: `DELETE FROM ${windowsTable} WHERE ${appidColumn}=${appIdText}`
+  });
+
+  return statements;
+}
+
+function getZilcodeQueryEndpoint(context: WriteContext, collection: string): string {
+  const collectionMeta = context.collections[collection] ?? context.collections.applications;
+  const sourceTable = asRecord(collectionMeta?.source_table) ?? {};
+  const endpoint = String(sourceTable.urledit ?? sourceTable.urlview ?? "");
+  const match = endpoint.match(/^(.*?rest\/[^/]+\/[^/]+)\/data(?:\/|$)/i);
+  return match ? `${match[1]}/query` : "rest/applicationjs_nut/dbo/query";
+}
+
+function getSqlTableName(context: WriteContext, collection: string, fallback: string): string {
+  const collectionMeta = context.collections[collection];
+  const sourceTable = asRecord(collectionMeta?.source_table) ?? {};
+  return getSqlIdentifier(String(ci(sourceTable, "tablename") ?? fallback), fallback);
+}
+
+function getSqlColumnName(column: string): string {
+  return getSqlIdentifier(column, column);
+}
+
+function getSqlIdentifier(value: string, fallback: string): string {
+  const text = value.trim();
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(text) ? text : fallback;
+}
+
+function summarizeCleanupQueryResult(result: unknown): unknown {
+  if (Array.isArray(result)) {
+    return { rows: result.length };
+  }
+  if (result && typeof result === "object") {
+    const record = result as Record<string, unknown>;
+    return compactRecord(record, ["rowsAffected", "affectedRows", "count", "message"]);
+  }
+  return result ?? null;
 }
 
 function getRawOperations(args: Record<string, unknown>): Record<string, unknown>[] {
