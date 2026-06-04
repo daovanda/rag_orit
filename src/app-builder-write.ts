@@ -19,40 +19,69 @@ const TARGET_COLLECTION: Record<string, string> = {
   tab: "tabs",
   field: "fields",
   menu: "menus",
-  domain: "domains"
+  domain: "domains",
+  service: "services",
+  appservice: "appservices",
+  app_service: "appservices",
+  cache: "caches",
+  roleapp: "roleapps",
+  role_app: "roleapps",
+  rolemenu: "rolemenus",
+  role_menu: "rolemenus",
+  access: "accesses",
+  archive: "archives"
 };
 
 const TARGET_ID_FIELD: Record<string, string> = {
   applications: "appid",
+  services: "serviceid",
+  appservices: "appserviceid",
   tables: "tableid",
   columns: "columnid",
   windows: "windowid",
   tabs: "tabid",
   fields: "fieldid",
   menus: "menuid",
-  domains: "domainid"
+  domains: "domainid",
+  caches: "cacheid",
+  roleapps: "roleappid",
+  rolemenus: "rolemenuid",
+  accesses: "accessid",
+  archives: "archiveid"
 };
 
 const CREATE_REQUIRED_FIELDS: Record<string, string[]> = {
   applications: ["appname", "seqno", "apptype"],
+  services: ["servicename", "servicetype", "siteid"],
+  appservices: ["appid", "serviceid", "siteid"],
   tables: ["tablename", "tabletype", "siteid", "serviceid"],
   columns: ["tableid", "columnname", "seqno", "siteid"],
   windows: ["appid", "windowname", "windowtype", "siteid"],
   tabs: ["windowid", "tableid", "tabname", "seqno", "siteid"],
   fields: ["tabid", "columnid", "fieldname", "seqno", "siteid"],
   menus: ["appid", "menuname", "seqno", "siteid", "menutype"],
-  domains: ["domainname"]
+  domains: ["domainname"],
+  caches: ["appid", "siteid"],
+  roleapps: ["roleid", "appid", "siteid"],
+  rolemenus: ["roleid", "menuid", "siteid"],
+  accesses: ["roleid", "tableid", "siteid"]
 };
 
 const LEVEL3_COLLECTIONS = new Set(["windows", "tabs", "fields", "menus"]);
 
 const IMPLICIT_ALLOWED_FIELDS: Record<string, string[]> = {
+  services: ["siteid"],
+  appservices: ["siteid"],
   tables: ["siteid", "serviceid"],
   columns: ["siteid"],
   windows: ["siteid"],
   tabs: ["siteid"],
   fields: ["siteid"],
-  menus: ["siteid", "menutype"]
+  menus: ["siteid", "menutype"],
+  caches: ["siteid"],
+  roleapps: ["siteid"],
+  rolemenus: ["siteid"],
+  accesses: ["siteid"]
 };
 
 interface PreparedOperation {
@@ -460,7 +489,7 @@ function autoWirePreparedOperations(context: WriteContext, operations: PreparedO
 
   for (const operation of operations) {
     if (operation.action !== "create" || !operation.record) continue;
-    if (!["tables", "windows", "menus"].includes(operation.collection)) continue;
+    if (!["appservices", "windows", "menus", "domains", "caches", "roleapps"].includes(operation.collection)) continue;
     if (!isColumnAllowed(context, operation.collection, "appid")) continue;
     if (operation.record.appid !== undefined) continue;
     operation.record.appid = `$${firstCreatedApp.id}.appid`;
@@ -656,8 +685,8 @@ function buildApplicationDeleteCleanupAudit(
   return {
     status: "will_run_before_delete_app",
     appid: appIdText,
-    fixed_order: ["n_field", "n_tab", "n_menu", "n_window"],
-    note: "Dung query endpoint de don metadata co the bi an khoi data endpoint, vi FK n_window/n_menu van chan xoa n_app."
+    fixed_order: ["n_cache", "n_field", "n_tab", "n_rolemenu", "n_menu", "n_roleapp", "n_appservice", "n_domain", "n_window"],
+    note: "Dung query endpoint de don metadata co the bi an khoi data endpoint, vi FK/cache/role/menu/window van chan xoa n_app."
   };
 }
 
@@ -720,16 +749,23 @@ function buildDeleteApplicationMetadataStatements(
   context: WriteContext,
   appIdText: string
 ): Array<{ label: string; sql: string }> {
+  const cachesTable = getSqlTableName(context, "caches", "n_cache");
   const fieldsTable = getSqlTableName(context, "fields", "n_field");
   const tabsTable = getSqlTableName(context, "tabs", "n_tab");
+  const rolemenusTable = getSqlTableName(context, "rolemenus", "n_rolemenu");
   const menusTable = getSqlTableName(context, "menus", "n_menu");
+  const roleappsTable = getSqlTableName(context, "roleapps", "n_roleapp");
+  const appservicesTable = getSqlTableName(context, "appservices", "n_appservice");
+  const domainsTable = getSqlTableName(context, "domains", "n_domain");
   const windowsTable = getSqlTableName(context, "windows", "n_window");
   const appidColumn = getSqlColumnName("appid");
   const tabidColumn = getSqlColumnName("tabid");
+  const menuidColumn = getSqlColumnName("menuid");
   const windowidColumn = getSqlColumnName("windowid");
   const windowSubquery = `SELECT ${windowidColumn} FROM ${windowsTable} WHERE ${appidColumn}=${appIdText}`;
   const tabSubquery = `SELECT ${tabidColumn} FROM ${tabsTable} WHERE ${windowidColumn} IN (${windowSubquery})`;
   const menuClauses: string[] = [];
+  const cacheClauses: string[] = [];
 
   if (isColumnAllowed(context, "menus", "appid")) {
     menuClauses.push(`${appidColumn}=${appIdText}`);
@@ -738,7 +774,25 @@ function buildDeleteApplicationMetadataStatements(
     menuClauses.push(`${getSqlColumnName(linkColumn)} IN (${windowSubquery})`);
   }
 
-  const statements: Array<{ label: string; sql: string }> = [
+  if (isColumnAllowed(context, "caches", "appid")) {
+    cacheClauses.push(`${appidColumn}=${appIdText}`);
+  }
+  if (isColumnAllowed(context, "caches", "windowid")) {
+    cacheClauses.push(`${windowidColumn} IN (${windowSubquery})`);
+  }
+
+  const menuWhere = menuClauses.length ? menuClauses.join(" OR ") : "";
+  const menuSubquery = menuWhere ? `SELECT ${menuidColumn} FROM ${menusTable} WHERE ${menuWhere}` : "";
+  const statements: Array<{ label: string; sql: string }> = [];
+
+  if (cacheClauses.length) {
+    statements.push({
+      label: "delete generated cache linked to app/windows",
+      sql: `DELETE FROM ${cachesTable} WHERE ${cacheClauses.join(" OR ")}`
+    });
+  }
+
+  statements.push(
     {
       label: "delete fields of app windows",
       sql: `DELETE FROM ${fieldsTable} WHERE ${tabidColumn} IN (${tabSubquery})`
@@ -747,12 +801,40 @@ function buildDeleteApplicationMetadataStatements(
       label: "delete tabs of app windows",
       sql: `DELETE FROM ${tabsTable} WHERE ${windowidColumn} IN (${windowSubquery})`
     }
-  ];
+  );
+
+  if (menuSubquery) {
+    statements.push({
+      label: "delete role-menu permissions linked to app menus",
+      sql: `DELETE FROM ${rolemenusTable} WHERE ${menuidColumn} IN (${menuSubquery})`
+    });
+  }
 
   if (menuClauses.length) {
     statements.push({
       label: "delete menus linked to app/windows",
-      sql: `DELETE FROM ${menusTable} WHERE ${menuClauses.join(" OR ")}`
+      sql: `DELETE FROM ${menusTable} WHERE ${menuWhere}`
+    });
+  }
+
+  if (isColumnAllowed(context, "roleapps", "appid")) {
+    statements.push({
+      label: "delete role-app permissions linked to app",
+      sql: `DELETE FROM ${roleappsTable} WHERE ${appidColumn}=${appIdText}`
+    });
+  }
+
+  if (isColumnAllowed(context, "appservices", "appid")) {
+    statements.push({
+      label: "delete app-service links",
+      sql: `DELETE FROM ${appservicesTable} WHERE ${appidColumn}=${appIdText}`
+    });
+  }
+
+  if (isColumnAllowed(context, "domains", "appid")) {
+    statements.push({
+      label: "delete domains linked to app",
+      sql: `DELETE FROM ${domainsTable} WHERE ${appidColumn}=${appIdText}`
     });
   }
 
@@ -899,6 +981,10 @@ function normalizeRecordKey(target: string, key: string, warnings: string[]): st
     application_id: "appid",
     app_name: "app_name",
     application_name: "application_name",
+    service_id: "serviceid",
+    service_name: "servicename",
+    appservice_id: "appserviceid",
+    app_service_id: "appserviceid",
     table_id: "tableid",
     table_name: "tablename",
     column_id: "columnid",
@@ -915,6 +1001,14 @@ function normalizeRecordKey(target: string, key: string, warnings: string[]): st
     menu_name: "menuname",
     domain_id: "domainid",
     domain_name: "domainname",
+    cache_id: "cacheid",
+    role_id: "roleid",
+    roleapp_id: "roleappid",
+    role_app_id: "roleappid",
+    rolemenu_id: "rolemenuid",
+    role_menu_id: "rolemenuid",
+    access_id: "accessid",
+    archive_id: "archiveid",
     target_window_id: "linkwindowid",
     link_window_id: "linkwindowid",
     parent_menu_id: "parentid",
@@ -1122,12 +1216,27 @@ function buildDeleteWindowCascadeOperations(
     .filter(field => tabIds.has(String(ci(field, "tabid") ?? "")));
   const menus = (context.recordsByCollection.menus ?? [])
     .filter(menu => sameId(ci(menu, "linkwindowid") ?? ci(menu, "windowid"), windowIdText));
+  const menuIds = new Set(menus.map(menu => String(ci(menu, "menuid") ?? "")).filter(Boolean));
+  const caches = (context.recordsByCollection.caches ?? [])
+    .filter(cache => sameId(ci(cache, "windowid"), windowIdText));
+  const rolemenus = (context.recordsByCollection.rolemenus ?? [])
+    .filter(rolemenu => menuIds.has(String(ci(rolemenu, "menuid") ?? "")));
 
   warnings.push(
-    `delete_window cascade windowid=${windowIdText}: se xoa ${fields.length} field, ${tabs.length} tab, ${menus.length} menu lien ket va window. Khong xoa table/column/du lieu that.`
+    `delete_window cascade windowid=${windowIdText}: se xoa ${caches.length} cache, ${fields.length} field, ${tabs.length} tab, ${rolemenus.length} rolemenu, ${menus.length} menu lien ket va window. Khong xoa table/column/du lieu that.`
   );
 
   const operations: Record<string, unknown>[] = [];
+  for (const cache of caches) {
+    const cacheId = ci(cache, "cacheid");
+    if (cacheId === undefined || cacheId === null || cacheId === "") continue;
+    operations.push({
+      id: `delete_cache_${cacheId}`,
+      op: "delete_cache",
+      id_value: cacheId
+    });
+  }
+
   for (const field of fields) {
     const fieldId = ci(field, "fieldid");
     if (fieldId === undefined || fieldId === null || fieldId === "") continue;
@@ -1145,6 +1254,16 @@ function buildDeleteWindowCascadeOperations(
       id: `delete_tab_${tabId}`,
       op: "delete_tab",
       id_value: tabId
+    });
+  }
+
+  for (const rolemenu of rolemenus) {
+    const rolemenuId = ci(rolemenu, "rolemenuid");
+    if (rolemenuId === undefined || rolemenuId === null || rolemenuId === "") continue;
+    operations.push({
+      id: `delete_rolemenu_${rolemenuId}`,
+      op: "delete_rolemenu",
+      id_value: rolemenuId
     });
   }
 
@@ -1168,9 +1287,9 @@ function buildDeleteWindowCascadeOperations(
   if (Array.isArray(includeRelated)) {
     const unsupported = includeRelated
       .map(item => String(item))
-      .filter(item => !["tab", "tabs", "field", "fields", "menu", "menus"].includes(item.toLowerCase()));
+      .filter(item => !["tab", "tabs", "field", "fields", "menu", "menus", "cache", "caches", "rolemenu", "rolemenus"].includes(item.toLowerCase()));
     if (unsupported.length) {
-      warnings.push(`Chua ho tro tu dong xoa related metadata ngoai window/tab/field/menu: ${unsupported.join(", ")}.`);
+      warnings.push(`Chua ho tro tu dong xoa related metadata ngoai window/tab/field/menu/cache/rolemenu: ${unsupported.join(", ")}.`);
     }
   }
 
@@ -1210,12 +1329,33 @@ function buildDeleteAppCascadeOperations(
       sameId(ci(menu, "appid"), appIdText)
       || windowIds.has(String(ci(menu, "linkwindowid") ?? ci(menu, "windowid") ?? ""))
     );
+  const menuIds = new Set(menus.map(menu => String(ci(menu, "menuid") ?? "")).filter(Boolean));
+  const caches = (context.recordsByCollection.caches ?? [])
+    .filter(cache =>
+      sameId(ci(cache, "appid"), appIdText)
+      || windowIds.has(String(ci(cache, "windowid") ?? ""))
+    );
+  const rolemenus = (context.recordsByCollection.rolemenus ?? [])
+    .filter(rolemenu => menuIds.has(String(ci(rolemenu, "menuid") ?? "")));
+  const roleapps = (context.recordsByCollection.roleapps ?? [])
+    .filter(roleapp => sameId(ci(roleapp, "appid"), appIdText));
+  const appservices = (context.recordsByCollection.appservices ?? [])
+    .filter(appservice => sameId(ci(appservice, "appid"), appIdText));
+  const domains = (context.recordsByCollection.domains ?? [])
+    .filter(domain => sameId(ci(domain, "appid"), appIdText));
+  const menuWhere = menuClauses.join(" OR ");
+  const menuSubquery = `SELECT menuid FROM n_menu WHERE ${menuWhere}`;
 
   warnings.push(
-    `delete_app cascade appid=${appIdText}: se xoa UI metadata lien quan truoc app (${fields.length} field, ${tabs.length} tab, ${menus.length} menu, ${windows.length} window da doc duoc). Khong xoa table/column/du lieu that.`
+    `delete_app cascade appid=${appIdText}: se xoa UI/access metadata lien quan truoc app (${caches.length} cache, ${fields.length} field, ${tabs.length} tab, ${rolemenus.length} rolemenu, ${menus.length} menu, ${roleapps.length} roleapp, ${appservices.length} appservice, ${domains.length} domain, ${windows.length} window da doc duoc). Khong xoa table/column/du lieu that.`
   );
 
   return [
+    {
+      id: `delete_app_${appIdText}_caches`,
+      op: "delete_cache",
+      where: `appid=${formatSqlValue(appId)} OR windowid IN (${windowSubquery})`
+    },
     {
       id: `delete_app_${appIdText}_fields`,
       op: "delete_field",
@@ -1227,9 +1367,29 @@ function buildDeleteAppCascadeOperations(
       where: `windowid IN (${windowSubquery})`
     },
     {
+      id: `delete_app_${appIdText}_rolemenus`,
+      op: "delete_rolemenu",
+      where: `menuid IN (${menuSubquery})`
+    },
+    {
       id: `delete_app_${appIdText}_menus`,
       op: "delete_menu",
-      where: menuClauses.join(" OR ")
+      where: menuWhere
+    },
+    {
+      id: `delete_app_${appIdText}_roleapps`,
+      op: "delete_roleapp",
+      where: appWhere
+    },
+    {
+      id: `delete_app_${appIdText}_appservices`,
+      op: "delete_appservice",
+      where: appWhere
+    },
+    {
+      id: `delete_app_${appIdText}_domains`,
+      op: "delete_domain",
+      where: appWhere
     },
     {
       id: `delete_app_${appIdText}_windows`,
@@ -1654,6 +1814,35 @@ function materializeCreateRecord(
     applyDefaultIfAllowed(context, collection, record, "siteid", inferSessionSiteId(context.session) ?? inferExistingValue(apps, "siteid"));
   }
 
+  if (collection === "services") {
+    if (!record.servicename && record.name) record.servicename = record.name;
+    applyDefaultIfAllowed(
+      context,
+      collection,
+      record,
+      "siteid",
+      inferSessionSiteId(context.session)
+        ?? inferExistingValue(context.recordsByCollection.services ?? [], "siteid")
+        ?? inferExistingValue(context.recordsByCollection.applications ?? [], "siteid")
+    );
+    applyDefaultIfAllowed(context, collection, record, "seqno", nextSeq(context.recordsByCollection.services ?? []));
+    if (!record.servicename) throw new Error("create_service thieu servicename.");
+  }
+
+  if (collection === "appservices") {
+    resolveAppReference(context, collection, record, warnings);
+    resolveServiceReference(context, record, warnings);
+    applyDefaultIfAllowed(
+      context,
+      collection,
+      record,
+      "siteid",
+      inferSessionSiteId(context.session)
+        ?? inferExistingValue(context.recordsByCollection.appservices ?? [], "siteid")
+        ?? inferExistingValue(context.recordsByCollection.applications ?? [], "siteid")
+    );
+  }
+
   if (collection === "tables") {
     if (isColumnAllowed(context, collection, "appid")) {
       resolveAppReference(context, collection, record, warnings);
@@ -1774,9 +1963,75 @@ function materializeCreateRecord(
   }
 
   if (collection === "domains") {
+    resolveAppReference(context, collection, record, warnings);
     if (!record.domainname && record.name) record.domainname = record.name;
     if (!record.domainname) throw new Error("create_domain thieu domainname.");
     if (record.values && !record.domainjson) record.domainjson = JSON.stringify(record.values);
+    applyDefaultIfAllowed(
+      context,
+      collection,
+      record,
+      "siteid",
+      inferSessionSiteId(context.session)
+        ?? inferExistingValue(context.recordsByCollection.domains ?? [], "siteid")
+        ?? inferExistingValue(context.recordsByCollection.applications ?? [], "siteid")
+    );
+  }
+
+  if (collection === "caches") {
+    resolveAppReference(context, collection, record, warnings);
+    resolveWindowReference(context, record, warnings);
+    applyDefaultIfAllowed(
+      context,
+      collection,
+      record,
+      "siteid",
+      inferSessionSiteId(context.session)
+        ?? inferExistingValue(context.recordsByCollection.caches ?? [], "siteid")
+        ?? inferExistingValue(context.recordsByCollection.applications ?? [], "siteid")
+    );
+  }
+
+  if (collection === "roleapps") {
+    resolveAppReference(context, collection, record, warnings);
+    resolveRoleReference(context, record, warnings);
+    applyDefaultIfAllowed(
+      context,
+      collection,
+      record,
+      "siteid",
+      inferSessionSiteId(context.session)
+        ?? inferExistingValue(context.recordsByCollection.roleapps ?? [], "siteid")
+        ?? inferExistingValue(context.recordsByCollection.applications ?? [], "siteid")
+    );
+  }
+
+  if (collection === "rolemenus") {
+    resolveRoleReference(context, record, warnings);
+    resolveMenuReference(context, record, warnings);
+    applyDefaultIfAllowed(
+      context,
+      collection,
+      record,
+      "siteid",
+      inferSessionSiteId(context.session)
+        ?? inferExistingValue(context.recordsByCollection.rolemenus ?? [], "siteid")
+        ?? inferExistingValue(context.recordsByCollection.applications ?? [], "siteid")
+    );
+  }
+
+  if (collection === "accesses") {
+    resolveRoleReference(context, record, warnings);
+    resolveTableReference(context, record, warnings);
+    applyDefaultIfAllowed(
+      context,
+      collection,
+      record,
+      "siteid",
+      inferSessionSiteId(context.session)
+        ?? inferExistingValue(context.recordsByCollection.accesses ?? [], "siteid")
+        ?? inferExistingValue(context.recordsByCollection.applications ?? [], "siteid")
+    );
   }
 
   stripReferenceOnlyFields(record);
@@ -1831,6 +2086,52 @@ function resolveTableReference(
   if (!tableid) throw new Error(`Khong tim thay table theo ten/id: ${String(tableRef)}.`);
   record.tableid = tableid;
   warnings.push(`Resolve table reference ${String(tableRef)} -> tableid=${String(tableid)}.`);
+}
+
+function resolveServiceReference(
+  context: WriteContext,
+  record: Record<string, unknown>,
+  warnings: string[]
+): void {
+  if (hasUsableValue(record.serviceid)) return;
+  const serviceRef = record.service_ref ?? record.service_name ?? record.service ?? record.servicename;
+  if (!hasUsableValue(serviceRef)) return;
+
+  const serviceid = findUniqueRecordId(context, "services", String(serviceRef));
+  if (!serviceid) throw new Error(`Khong tim thay service theo ten/id: ${String(serviceRef)}.`);
+  record.serviceid = serviceid;
+  warnings.push(`Resolve service reference ${String(serviceRef)} -> serviceid=${String(serviceid)}.`);
+}
+
+function resolveRoleReference(
+  context: WriteContext,
+  record: Record<string, unknown>,
+  warnings: string[]
+): void {
+  if (hasUsableValue(record.roleid)) return;
+  const roleRef = record.role_ref ?? record.role_name ?? record.role ?? record.rolename;
+  if (!hasUsableValue(roleRef)) return;
+
+  const roleid = findUniqueRecordId(context, "roles", String(roleRef));
+  if (!roleid) throw new Error(`Khong tim thay role theo ten/id: ${String(roleRef)}.`);
+  record.roleid = roleid;
+  warnings.push(`Resolve role reference ${String(roleRef)} -> roleid=${String(roleid)}.`);
+}
+
+function resolveMenuReference(
+  context: WriteContext,
+  record: Record<string, unknown>,
+  warnings: string[]
+): void {
+  if (hasUsableValue(record.menuid)) return;
+  const menuRef = record.menu_ref ?? record.menu_name ?? record.menu ?? record.menuname;
+  if (!hasUsableValue(menuRef)) return;
+
+  const appid = record.appid ?? resolveInlineAppReference(context, record);
+  const menuid = findUniqueRecordId(context, "menus", String(menuRef), { appid });
+  if (!menuid) throw new Error(`Khong tim thay menu theo ten/id: ${String(menuRef)}.`);
+  record.menuid = menuid;
+  warnings.push(`Resolve menu reference ${String(menuRef)} -> menuid=${String(menuid)}.`);
 }
 
 function resolveWindowReference(
@@ -2027,7 +2328,9 @@ function recordLookupCandidates(collection: string, record: Record<string, unkno
     ci(record, "tabname"),
     ci(record, "fieldname"),
     ci(record, "menuname"),
-    ci(record, "domainname")
+    ci(record, "domainname"),
+    ci(record, "servicename"),
+    ci(record, "rolename")
   ];
 
   if (collection === "columns") {
@@ -2084,7 +2387,9 @@ function resolveTargetIdValue(
       ci(record, "tabname"),
       ci(record, "fieldname"),
       ci(record, "menuname"),
-      ci(record, "domainname")
+      ci(record, "domainname"),
+      ci(record, "servicename"),
+      ci(record, "rolename")
     ]
       .map(value => normalizeLookupKey(String(value ?? "")))
       .filter(Boolean);
@@ -2104,8 +2409,15 @@ function parseNodeIdForCollection(collection: string, nodeId: string): string | 
   const type = parts[0];
 
   if (collection === "applications" && type === "app") return parts[1];
+  if (collection === "services" && type === "service") return parts[1];
+  if (collection === "appservices" && type === "appservice") return parts[2] ?? parts[1];
   if (collection === "windows" && type === "window") return parts[1];
   if (collection === "domains" && type === "domain") return parts[1];
+  if (collection === "caches" && type === "cache") return parts[1];
+  if (collection === "roleapps" && type === "roleapp") return parts[2] ?? parts[1];
+  if (collection === "rolemenus" && type === "rolemenu") return parts[2] ?? parts[1];
+  if (collection === "accesses" && type === "access") return parts[2] ?? parts[1];
+  if (collection === "archives" && type === "archive") return parts[1];
   if (collection === "tables" && type === "table") return parts[2] ?? parts[1];
   if (collection === "columns" && type === "column") return parts[3] ?? parts[2] ?? parts[1];
   if (collection === "tabs" && type === "tab") return parts[2] ?? parts[1];
@@ -2191,7 +2503,7 @@ function ensureUniqueByKeys(
   );
   if (!duplicate) return;
 
-  const idPreview = ["appid", "tableid", "columnid", "windowid", "tabid", "fieldid", "menuid", "domainid"]
+  const idPreview = ["appid", "serviceid", "appserviceid", "tableid", "columnid", "windowid", "tabid", "fieldid", "menuid", "domainid", "cacheid", "roleappid", "rolemenuid", "accessid", "archiveid"]
     .map(key => ci(duplicate, key))
     .find(hasUsableValue);
   throw new Error(`Da ton tai ${label} voi ${keys.map(key => `${key}=${String(record[key])}`).join(", ")}${idPreview ? ` (id=${String(idPreview)})` : ""}. Khong tao trung.`);
@@ -2201,10 +2513,13 @@ function stripReferenceOnlyFields(record: Record<string, unknown>): void {
   for (const key of [
     "app_ref", "app_name", "application", "application_name", "app",
     "table_ref", "table_name", "table",
+    "service_ref", "service_name", "service",
     "window_ref", "window_name", "window",
     "tab_ref", "tab_name", "tab",
     "column_ref", "column_name", "column",
-    "linkwindow_ref", "link_window", "linkwindow"
+    "linkwindow_ref", "link_window", "linkwindow",
+    "role_ref", "role_name", "role",
+    "menu_ref", "menu_name", "menu"
   ]) {
     delete record[key];
   }

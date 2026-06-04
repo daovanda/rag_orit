@@ -32,7 +32,7 @@ export const TOOLS = [
   {
     name: "app_builder_graph_overview",
     description:
-      "Doc App Builder that va tra skeleton graph toan he thong: root, apps, tables, columns, windows, tabs, fields, menus, domains va edges lien ket. Dung dau tien khi hoi ve App Builder hoac can tao/sua cau hinh.",
+      "Doc App Builder that va tra skeleton graph toan he thong: root, apps, services/appservices, tables, columns, windows, tabs, fields, menus, domains, caches, role/app/menu/table access va edges lien ket. Dung dau tien khi hoi ve App Builder hoac can tao/sua cau hinh.",
     parameters: {
       type: "object",
       properties: {
@@ -58,7 +58,7 @@ export const TOOLS = [
   {
     name: "app_builder_graph_search",
     description:
-      "Tim node trong App Builder graph theo ten/id/summary. Dung de resolve appid, tableid, windowid, tabid, fieldid, domainid truoc khi mo subgraph/detail.",
+      "Tim node trong App Builder graph theo ten/id/summary. Dung de resolve appid, serviceid, tableid, windowid, tabid, fieldid, menuid, domainid, cacheid hoac role/access node truoc khi mo subgraph/detail.",
     parameters: {
       type: "object",
       properties: {
@@ -149,7 +149,7 @@ export const TOOLS = [
   {
     name: "app_builder_creation_schema",
     description:
-      "Tra quy tac tao/sua App Builder o dang planning schema: thu tu tao app/table/column/window/tab/field/menu, required edges va proposed plan format. Tool nay khong ghi du lieu.",
+      "Tra quy tac tao/sua App Builder o dang planning schema: app -> appservice/service -> table -> column va app -> window -> tab -> field/menu/domain/cache/role access. Tool nay khong ghi du lieu.",
     parameters: {
       type: "object",
       properties: {
@@ -163,7 +163,7 @@ export const TOOLS = [
   {
     name: "app_builder_prepare_change",
     description:
-      "Chuan bi ke hoach tao/sua/xoa App Builder de user xac nhan. Tool nay validate, loc field khong ton tai theo metadata that, resolve structured plan thanh operations va luu pending plan. Chua ghi du lieu.",
+      "Chuan bi ke hoach tao/sua/xoa App Builder de user xac nhan. Tool validate, loc field khong ton tai theo metadata that, resolve structured plan thanh operations va luu pending plan. Xoa app/window phai dung cascade de don field/tab/menu/cache/role access truoc. Chua ghi du lieu.",
     parameters: {
       type: "object",
       properties: {

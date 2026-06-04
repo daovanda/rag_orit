@@ -1406,6 +1406,7 @@ interface AppBuilderRecordSpec {
   table_aliases: string[];
   table_names: string[];
   summary_keys: string[];
+  optional?: boolean;
 }
 
 const APP_BUILDER_DEFAULT_APPID = "1";
@@ -1415,28 +1416,42 @@ const APP_BUILDER_RECORD_SPECS: AppBuilderRecordSpec[] = [
     description: "Các app hiện có được tạo/cấu hình trong App Builder.",
     table_aliases: ["NApplication"],
     table_names: ["n_app"],
-    summary_keys: ["appid", "appname", "appcode", "description", "siteid", "seqno", "active", "apptype"]
+    summary_keys: ["appid", "appname", "appcode", "description", "siteid", "seqno", "apptype", "theme", "translate", "linkurl", "startexec", "icon", "color"]
+  },
+  {
+    key: "services",
+    description: "Data service metadata. App links to service through n_appservice; tables belong to service.",
+    table_aliases: ["NService"],
+    table_names: ["n_service"],
+    summary_keys: ["serviceid", "servicename", "url", "servicetype", "description", "accessuser", "seqno", "siteid"]
+  },
+  {
+    key: "appservices",
+    description: "Bridge table between app and service.",
+    table_aliases: ["NAppService"],
+    table_names: ["n_appservice"],
+    summary_keys: ["appserviceid", "appid", "serviceid", "siteid"]
   },
   {
     key: "tables",
-    description: "Các table/view metadata của các app.",
+    description: "Table/view metadata. Tables are linked to apps through serviceid -> n_appservice, not directly by appid.",
     table_aliases: ["NTable"],
     table_names: ["n_table"],
-    summary_keys: ["tableid", "tablename", "alias", "tabletype", "appid", "serviceid", "servicetype", "columnkey", "columncode", "columndisplay", "columnfind", "urlview", "urledit", "isreadonly", "isview", "seqno"]
+    summary_keys: ["tableid", "tablename", "alias", "tabletype", "serviceid", "url", "description", "viewname", "iscache", "archivetype", "beforechange", "afterchange", "maplayer", "hasattach", "isreadonly", "seqno"]
   },
   {
     key: "columns",
     description: "Các column hiện có của table.",
     table_aliases: ["NColumn"],
     table_names: ["n_column"],
-    summary_keys: ["columnid", "columnname", "tablename", "tableid", "caption", "label", "datatype", "columntype", "isprimarykey", "isrequired", "defaultvalue", "seqno"]
+    summary_keys: ["columnid", "columnname", "alias", "tablename", "tableid", "datatype", "columntype", "isprimarykey", "isrequired", "isnotnull", "defaultvalue", "domainid", "linktableid", "linkcolumn", "mapcolumn", "length", "seqno", "siteid"]
   },
   {
     key: "windows",
     description: "Các window hiện có.",
     table_aliases: ["NWindow"],
     table_names: ["n_window"],
-    summary_keys: ["windowid", "windowname", "windowtype", "appid", "execname", "isopenfind", "translate", "seqno"]
+    summary_keys: ["windowid", "windowname", "windowtype", "appid", "execname", "isopenfind", "translate", "subtype", "siteid", "seqno"]
   },
   {
     key: "tabs",
@@ -1450,21 +1465,92 @@ const APP_BUILDER_RECORD_SPECS: AppBuilderRecordSpec[] = [
     description: "Các field hiện có trong tab/window.",
     table_aliases: ["NField"],
     table_names: ["n_field"],
-    summary_keys: ["fieldid", "fieldname", "columnname", "columnid", "tableid", "tabid", "translate", "fieldtype", "columntype", "domainid", "linktableid", "isreadonly", "isrequire", "hideingrid", "hideinform", "hideinfind", "seqno"]
+    summary_keys: ["fieldid", "fieldname", "columnname", "columnid", "tableid", "tabid", "translate", "fieldtype", "displaylength", "fieldlength", "vformat", "defaultvalue", "fieldgroup", "parentfieldid", "whereclause", "domainid", "linktableid", "displaylogic", "placeholder", "calculation", "colspan", "rowspan", "foreignwindowid", "bindfieldname", "isreadonly", "isrequire", "hideingrid", "hideinform", "hideinfind", "isfrozen", "options", "wherefieldname", "seqno", "siteid"]
   },
   {
     key: "menus",
     description: "Các menu hiện có và window mà menu mở.",
     table_aliases: ["NMenu"],
     table_names: ["n_menu"],
-    summary_keys: ["menuid", "menuname", "translate", "parentid", "seqno", "appid", "windowid", "linkwindowid", "execname", "icon", "reportid"]
+    summary_keys: ["menuid", "menutype", "menuname", "translate", "isopen", "parentid", "seqno", "appid", "windowid", "linkwindowid", "tabid", "execname", "whereclause", "icon", "reportid", "issummary", "maplayer", "calendarid", "siteid"]
   },
   {
     key: "domains",
     description: "Các domain/list giá trị dùng bởi field.",
     table_aliases: ["NDomain"],
     table_names: ["n_domain"],
-    summary_keys: ["domainid", "domainname", "name", "description", "datatype", "controltype", "iseditable", "domainjson"]
+    summary_keys: ["domainid", "domainname", "name", "domaintype", "description", "datatype", "controltype", "appid", "iseditable", "siteid", "domainjson"]
+  },
+  {
+    key: "caches",
+    description: "Generated window/app layout cache. Delete or refresh it when window/tab/field/menu metadata changes.",
+    table_aliases: ["NCache"],
+    table_names: ["n_cache"],
+    summary_keys: ["cacheid", "windowid", "appid", "siteid"]
+  },
+  {
+    key: "roleapps",
+    description: "Role access to apps.",
+    table_aliases: ["NRoleApp"],
+    table_names: ["n_roleapp"],
+    summary_keys: ["roleappid", "roleid", "appid", "siteid"]
+  },
+  {
+    key: "rolemenus",
+    description: "Role access to menus.",
+    table_aliases: ["NRoleMenu"],
+    table_names: ["n_rolemenu"],
+    summary_keys: ["rolemenuid", "roleid", "menuid", "whereclause", "siteid"]
+  },
+  {
+    key: "accesses",
+    description: "Role access flags for tables.",
+    table_aliases: ["NAccess"],
+    table_names: ["n_access"],
+    summary_keys: ["accessid", "roleid", "tableid", "isarchive", "noinsert", "noupdate", "nodelete", "noselect", "noexport", "noattach", "islock", "siteid"]
+  },
+  {
+    key: "archives",
+    description: "Archive/history rows linked to tables.",
+    table_aliases: ["NArchive"],
+    table_names: ["n_archive"],
+    summary_keys: ["archiveid", "archivetype", "archivetime", "recordid", "tableid", "siteid"],
+    optional: true
+  },
+  {
+    key: "roles",
+    description: "Roles. Sensitive fields are not included.",
+    table_aliases: ["NRole"],
+    table_names: ["n_role"],
+    summary_keys: ["roleid", "rolename", "description", "seqno", "siteid"]
+  },
+  {
+    key: "users",
+    description: "Users. Password and PIN are intentionally excluded.",
+    table_aliases: ["NUser"],
+    table_names: ["n_user"],
+    summary_keys: ["userid", "username", "fullname", "email", "phone", "active", "issystem", "isviewer", "parentid", "siteid"]
+  },
+  {
+    key: "roleusers",
+    description: "Bridge table between role and user.",
+    table_aliases: ["NRoleUser"],
+    table_names: ["n_roleuser"],
+    summary_keys: ["roleuserid", "roleid", "userid", "siteid"]
+  },
+  {
+    key: "orgs",
+    description: "Organizations.",
+    table_aliases: ["NOrg"],
+    table_names: ["n_org"],
+    summary_keys: ["orgid", "orgname", "orgcode", "active", "description", "parentid", "seqno", "siteid"]
+  },
+  {
+    key: "orgusers",
+    description: "Bridge table between org and user.",
+    table_aliases: ["NOrgUser"],
+    table_names: ["n_orguser"],
+    summary_keys: ["orguserid", "orgid", "userid", "siteid"]
   }
 ];
 
@@ -1559,31 +1645,101 @@ function sameZilcodeId(left: unknown, right: unknown): boolean {
   return String(left) === String(right);
 }
 
+function getZilcodeIdText(record: Record<string, unknown>, key: string): string | undefined {
+  const value = getCaseInsensitiveValue(record, key);
+  if (value === undefined || value === null || value === "") return undefined;
+  return String(value);
+}
+
+function collectAppBuilderIds(records: Record<string, unknown>[], key: string): Set<string> {
+  const output = new Set<string>();
+  for (const record of records) {
+    const value = getZilcodeIdText(record, key);
+    if (value) output.add(value);
+  }
+  return output;
+}
+
+function dedupeAppBuilderRecords(records: Record<string, unknown>[], idKey: string): Record<string, unknown>[] {
+  const output: Record<string, unknown>[] = [];
+  const seen = new Set<string>();
+  for (const record of records) {
+    const id = getZilcodeIdText(record, idKey) ?? JSON.stringify(record);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    output.push(record);
+  }
+  return output;
+}
+
 function buildAppBuilderInventory(
   recordLists: Record<string, Record<string, unknown>[]>
 ): Record<string, unknown> {
   const applications = recordLists.applications ?? [];
+  const services = recordLists.services ?? [];
+  const appservices = recordLists.appservices ?? [];
   const tables = recordLists.tables ?? [];
   const columns = recordLists.columns ?? [];
   const windows = recordLists.windows ?? [];
   const tabs = recordLists.tabs ?? [];
   const fields = recordLists.fields ?? [];
   const menus = recordLists.menus ?? [];
+  const domains = recordLists.domains ?? [];
+  const caches = recordLists.caches ?? [];
+  const roleapps = recordLists.roleapps ?? [];
+  const rolemenus = recordLists.rolemenus ?? [];
+  const accesses = recordLists.accesses ?? [];
+  const archives = recordLists.archives ?? [];
 
   const apps = applications.map(app => {
     const appid = getCaseInsensitiveValue(app, "appid");
-    const appTables = tables.filter(table => sameZilcodeId(getCaseInsensitiveValue(table, "appid"), appid));
+    const appServices = appservices.filter(appservice => sameZilcodeId(getCaseInsensitiveValue(appservice, "appid"), appid));
+    const serviceIds = collectAppBuilderIds(appServices, "serviceid");
+    const appServiceRecords = services.filter(service => serviceIds.has(String(getCaseInsensitiveValue(service, "serviceid") ?? "")));
     const appWindows = windows.filter(window => sameZilcodeId(getCaseInsensitiveValue(window, "appid"), appid));
+    const appWindowIds = collectAppBuilderIds(appWindows, "windowid");
+    const appTabs = tabs.filter(tab => appWindowIds.has(String(getCaseInsensitiveValue(tab, "windowid") ?? "")));
+    const tabTableIds = new Set<string>();
+    for (const tab of appTabs) {
+      for (const key of ["tableid", "linktableid", "relatetableid"]) {
+        const value = getZilcodeIdText(tab, key);
+        if (value) tabTableIds.add(value);
+      }
+    }
+    const legacyAppTables = tables.filter(table => sameZilcodeId(getCaseInsensitiveValue(table, "appid"), appid));
+    const serviceTables = tables.filter(table => serviceIds.has(String(getCaseInsensitiveValue(table, "serviceid") ?? "")));
+    const tabTables = tables.filter(table => tabTableIds.has(String(getCaseInsensitiveValue(table, "tableid") ?? "")));
+    const appTables = dedupeAppBuilderRecords([...legacyAppTables, ...serviceTables, ...tabTables], "tableid");
     const appMenus = menus.filter(menu => sameZilcodeId(getCaseInsensitiveValue(menu, "appid"), appid));
+    const appMenuIds = collectAppBuilderIds(appMenus, "menuid");
+    const appDomains = domains.filter(domain => sameZilcodeId(getCaseInsensitiveValue(domain, "appid"), appid));
+    const appCaches = caches.filter(cache =>
+      sameZilcodeId(getCaseInsensitiveValue(cache, "appid"), appid)
+      || appWindowIds.has(String(getCaseInsensitiveValue(cache, "windowid") ?? ""))
+    );
+    const appRoleApps = roleapps.filter(roleapp => sameZilcodeId(getCaseInsensitiveValue(roleapp, "appid"), appid));
+    const appRoleMenus = rolemenus.filter(rolemenu => appMenuIds.has(String(getCaseInsensitiveValue(rolemenu, "menuid") ?? "")));
+    const tableIds = collectAppBuilderIds(appTables, "tableid");
+    const appAccesses = accesses.filter(access => tableIds.has(String(getCaseInsensitiveValue(access, "tableid") ?? "")));
+    const appArchives = archives.filter(archive => tableIds.has(String(getCaseInsensitiveValue(archive, "tableid") ?? "")));
 
     return {
       appid,
       appname: getCaseInsensitiveValue(app, "appname"),
       appcode: getCaseInsensitiveValue(app, "appcode"),
       description: getCaseInsensitiveValue(app, "description"),
+      services_count: appServiceRecords.length,
       tables_count: appTables.length,
       windows_count: appWindows.length,
       menus_count: appMenus.length,
+      domains_count: appDomains.length,
+      caches_count: appCaches.length,
+      roleapps_count: appRoleApps.length,
+      rolemenus_count: appRoleMenus.length,
+      accesses_count: appAccesses.length,
+      archives_count: appArchives.length,
+      appservices: appServices,
+      services: appServiceRecords,
       tables: appTables.map(table => {
         const tableid = getCaseInsensitiveValue(table, "tableid");
         const tablename = getCaseInsensitiveValue(table, "tablename");
@@ -1595,7 +1751,9 @@ function buildAppBuilderInventory(
         return {
           ...table,
           columns_count: tableColumns.length,
-          columns: tableColumns
+          columns: tableColumns,
+          access_count: appAccesses.filter(access => sameZilcodeId(getCaseInsensitiveValue(access, "tableid"), tableid)).length,
+          archive_count: appArchives.filter(archive => sameZilcodeId(getCaseInsensitiveValue(archive, "tableid"), tableid)).length
         };
       }),
       windows: appWindows.map(window => {
@@ -1621,12 +1779,21 @@ function buildAppBuilderInventory(
           })
         };
       }),
-      menus: appMenus
+      menus: appMenus,
+      domains: appDomains,
+      caches: appCaches,
+      roleapps: appRoleApps,
+      rolemenus: appRoleMenus,
+      accesses: appAccesses,
+      archives_summary: {
+        records_count: appArchives.length,
+        tableids: [...new Set(appArchives.map(archive => String(getCaseInsensitiveValue(archive, "tableid") ?? "")).filter(Boolean))]
+      }
     };
   });
 
   return {
-    description: "Cây dữ liệu cấu hình hiện có trong App Builder. Đọc theo thứ tự: App Builder -> applications -> từng app -> tables -> columns và từng app -> windows -> tabs -> fields.",
+    description: "Cay du lieu cau hinh hien co trong App Builder. Doc theo thu tu: App -> appservice -> service -> table -> column va App -> window -> tab -> field/menu/domain/cache/role access.",
     apps_count: apps.length,
     apps
   };
@@ -1645,7 +1812,9 @@ async function buildAppBuilderRecords(
   for (const spec of APP_BUILDER_RECORD_SPECS) {
     const table = findAppBuilderTable(appBuilderTables, spec);
     if (!table) {
-      errors.push({ key: spec.key, error: "Không tìm thấy bảng metadata tương ứng trong App Builder." });
+      if (!spec.optional) {
+        errors.push({ key: spec.key, error: "Không tìm thấy bảng metadata tương ứng trong App Builder." });
+      }
       continue;
     }
 
@@ -1683,12 +1852,21 @@ async function buildAppBuilderRecords(
     max_records_per_table: maxRecords,
     inventory: buildAppBuilderInventory(recordLists),
     relationships: {
-      tables_by_appid: groupCount(recordLists.tables ?? [], "appid"),
+      appservices_by_appid: groupCount(recordLists.appservices ?? [], "appid"),
+      appservices_by_serviceid: groupCount(recordLists.appservices ?? [], "serviceid"),
+      tables_by_serviceid: groupCount(recordLists.tables ?? [], "serviceid"),
       columns_by_tableid: groupCount(recordLists.columns ?? [], "tableid"),
       windows_by_appid: groupCount(recordLists.windows ?? [], "appid"),
       tabs_by_windowid: groupCount(recordLists.tabs ?? [], "windowid"),
       fields_by_tabid: groupCount(recordLists.fields ?? [], "tabid"),
-      menus_by_appid: groupCount(recordLists.menus ?? [], "appid")
+      menus_by_appid: groupCount(recordLists.menus ?? [], "appid"),
+      domains_by_appid: groupCount(recordLists.domains ?? [], "appid"),
+      caches_by_appid: groupCount(recordLists.caches ?? [], "appid"),
+      caches_by_windowid: groupCount(recordLists.caches ?? [], "windowid"),
+      roleapps_by_appid: groupCount(recordLists.roleapps ?? [], "appid"),
+      rolemenus_by_menuid: groupCount(recordLists.rolemenus ?? [], "menuid"),
+      accesses_by_tableid: groupCount(recordLists.accesses ?? [], "tableid"),
+      archives_by_tableid: groupCount(recordLists.archives ?? [], "tableid")
     },
     collections,
     errors: errors.length ? errors : undefined
@@ -1821,11 +1999,11 @@ export async function buildZilcodeAppBuilderBlueprint(
     scope: "app_builder",
     read_path: [
       "App Builder metadata/schema",
-      "App Builder records: NApplication, NTable, NColumn, NWindow, NTab, NField, NMenu, NDomain",
+      "App Builder records: NApplication, NService, NAppService, NTable, NColumn, NWindow, NTab, NField, NMenu, NDomain, NCache, role/access tables",
       "Configured apps from NApplication",
-      "For each configured app: tables -> columns",
+      "For each configured app: appservice -> service -> tables -> columns",
       "For each configured app: windows -> tabs -> fields",
-      "Graph relationships between app, table, column, menu, window, tab, field, domain and relation"
+      "Graph relationships between app, service, table, column, menu, window, tab, field, domain, cache, role access and relation"
     ],
     session: sessionSummary,
     scan: {

@@ -47,7 +47,23 @@ interface GraphContext {
   sourceByNodeId: Map<string, SourceRecord>;
 }
 
-const CHILD_KEYS = new Set(["tables", "columns", "windows", "tabs", "fields", "menus"]);
+const CHILD_KEYS = new Set([
+  "tables",
+  "columns",
+  "windows",
+  "tabs",
+  "fields",
+  "menus",
+  "services",
+  "appservices",
+  "domains",
+  "caches",
+  "roleapps",
+  "rolemenus",
+  "accesses",
+  "archives",
+  "archives_summary"
+]);
 
 export function isAppBuilderGraphTool(name: string): boolean {
   return APP_BUILDER_GRAPH_TOOL_NAMES.has(name);
@@ -109,10 +125,12 @@ function buildGraphFromBlueprint(blueprint: Record<string, unknown>): GraphConte
   const sourceByNodeId = new Map<string, SourceRecord>();
   const tableById = new Map<string, string>();
   const tableByAppAndName = new Map<string, string>();
+  const serviceById = new Map<string, string>();
   const columnById = new Map<string, string>();
   const columnByTableAndName = new Map<string, string>();
   const windowById = new Map<string, string>();
   const tabById = new Map<string, string>();
+  const menuById = new Map<string, string>();
   const domainById = new Map<string, string>();
   const pendingTabParents: Array<{ child: string; parenttabid: unknown }> = [];
 
@@ -148,9 +166,16 @@ function buildGraphFromBlueprint(blueprint: Record<string, unknown>): GraphConte
   for (const app of apps) {
     const appid = stringValue(ci(app, "appid") ?? fallbackId(app, "app"));
     const appNodeId = `app:${idPart(appid)}`;
+    const services = toRecords(app.services);
+    const appservices = toRecords(app.appservices);
     const tables = toRecords(app.tables);
     const windows = toRecords(app.windows);
     const menus = toRecords(app.menus);
+    const domains = toRecords(app.domains);
+    const caches = toRecords(app.caches);
+    const roleapps = toRecords(app.roleapps);
+    const rolemenus = toRecords(app.rolemenus);
+    const accesses = toRecords(app.accesses);
 
     addNode({
       id: appNodeId,
@@ -158,19 +183,56 @@ function buildGraphFromBlueprint(blueprint: Record<string, unknown>): GraphConte
       label: labelOf(app, ["appname", "app_name", "name", "appcode"], appNodeId),
       summary: compactRecord(app, ["appid", "appname", "appcode", "description", "siteid", "seqno", "active", "apptype"]),
       counts: {
+        services: services.length,
         tables: tables.length,
         windows: windows.length,
-        menus: menus.length
+        menus: menus.length,
+        domains: domains.length,
+        caches: caches.length,
+        roleapps: roleapps.length,
+        rolemenus: rolemenus.length,
+        accesses: accesses.length
       },
       has_detail: true
     }, { type: "app", record: app });
     addEdge({ from: rootId, to: appNodeId, type: "manages_app" });
+
+    for (const service of services) {
+      const serviceKey = stringValue(ci(service, "serviceid") ?? ci(service, "servicename") ?? fallbackId(service, "service"));
+      const serviceNodeId = `service:${idPart(serviceKey)}`;
+      addNode({
+        id: serviceNodeId,
+        type: "service",
+        label: labelOf(service, ["servicename", "url", "description"], serviceNodeId),
+        summary: compactRecord(service, ["serviceid", "servicename", "url", "servicetype", "description", "accessuser", "seqno", "siteid"]),
+        has_detail: true
+      }, { type: "service", record: service, parent: app });
+      serviceById.set(serviceKey, serviceNodeId);
+      addEdge({ from: appNodeId, to: serviceNodeId, type: "app_uses_service" });
+    }
+
+    for (const appservice of appservices) {
+      const appserviceKey = stringValue(ci(appservice, "appserviceid") ?? fallbackId(appservice, "appservice"));
+      const serviceId = stringValue(ci(appservice, "serviceid"));
+      const appserviceNodeId = `appservice:${idPart(appid)}:${idPart(appserviceKey)}`;
+      addNode({
+        id: appserviceNodeId,
+        type: "appservice",
+        label: `appservice ${appserviceKey}`,
+        summary: compactRecord(appservice, ["appserviceid", "appid", "serviceid", "siteid"]),
+        has_detail: true
+      }, { type: "appservice", record: appservice, parent: app });
+      addEdge({ from: appNodeId, to: appserviceNodeId, type: "app_has_appservice" });
+      const serviceNodeId = serviceId ? serviceById.get(serviceId) : undefined;
+      if (serviceNodeId) addEdge({ from: appserviceNodeId, to: serviceNodeId, type: "appservice_links_service" });
+    }
 
     for (const table of tables) {
       const tableKey = stringValue(ci(table, "tableid") ?? ci(table, "tablename") ?? fallbackId(table, "table"));
       const tableNodeId = `table:${idPart(appid)}:${idPart(tableKey)}`;
       const columns = toRecords(table.columns);
       const tableName = stringValue(ci(table, "tablename"));
+      const serviceId = stringValue(ci(table, "serviceid"));
 
       addNode({
         id: tableNodeId,
@@ -184,6 +246,10 @@ function buildGraphFromBlueprint(blueprint: Record<string, unknown>): GraphConte
         has_detail: true
       }, { type: "table", record: table, parent: app });
       addEdge({ from: appNodeId, to: tableNodeId, type: "app_has_table" });
+      const serviceNodeId = serviceId ? serviceById.get(serviceId) : undefined;
+      if (serviceNodeId) {
+        addEdge({ from: serviceNodeId, to: tableNodeId, type: "service_has_table", metadata: compactRecord(table, ["serviceid", "tableid"]) });
+      }
 
       if (tableKey) tableById.set(String(tableKey), tableNodeId);
       if (tableName) tableByAppAndName.set(`${appid}:${normalizeKey(tableName)}`, tableNodeId);
@@ -228,6 +294,29 @@ function buildGraphFromBlueprint(blueprint: Record<string, unknown>): GraphConte
     }, { type: "domain", record: domain });
     domainById.set(domainKey, domainNodeId);
     addEdge({ from: rootId, to: domainNodeId, type: "app_builder_has_domain" });
+  }
+
+  for (const app of apps) {
+    const appid = stringValue(ci(app, "appid") ?? fallbackId(app, "app"));
+    const appNodeId = `app:${idPart(appid)}`;
+    for (const domain of toRecords(app.domains)) {
+      const domainKey = stringValue(ci(domain, "domainid") ?? ci(domain, "domainname") ?? fallbackId(domain, "domain"));
+      const domainNodeId = `domain:${idPart(domainKey)}`;
+      if (!nodes.has(domainNodeId)) {
+        addNode({
+          id: domainNodeId,
+          type: "domain",
+          label: labelOf(domain, ["domainname", "name", "description"], domainNodeId),
+          summary: compactRecord(domain, [
+            "domainid", "domainname", "name", "domaintype", "description", "datatype", "controltype",
+            "appid", "domain_values_count", "domainjson_chars"
+          ]),
+          has_detail: true
+        }, { type: "domain", record: domain, parent: app });
+      }
+      domainById.set(domainKey, domainNodeId);
+      addEdge({ from: appNodeId, to: domainNodeId, type: "app_has_domain" });
+    }
   }
 
   for (const app of apps) {
@@ -359,6 +448,7 @@ function buildGraphFromBlueprint(blueprint: Record<string, unknown>): GraphConte
         has_detail: true
       }, { type: "menu", record: menu, parent: app });
       addEdge({ from: appNodeId, to: menuNodeId, type: "app_has_menu" });
+      if (menuKey) menuById.set(String(menuKey), menuNodeId);
 
       const linkedWindowId = stringValue(ci(menu, "linkwindowid") ?? ci(menu, "windowid"));
       const linkedWindowNodeId = linkedWindowId ? windowById.get(linkedWindowId) : undefined;
@@ -370,6 +460,98 @@ function buildGraphFromBlueprint(blueprint: Record<string, unknown>): GraphConte
           metadata: compactRecord(menu, ["linkwindowid", "windowid", "execname"])
         });
       }
+    }
+  }
+
+  const roleById = new Map<string, string>();
+  const rolesCollection = asRecord(collections.roles);
+  for (const role of toRecords(rolesCollection?.records)) {
+    const roleKey = stringValue(ci(role, "roleid") ?? ci(role, "rolename") ?? fallbackId(role, "role"));
+    const roleNodeId = `role:${idPart(roleKey)}`;
+    addNode({
+      id: roleNodeId,
+      type: "role",
+      label: labelOf(role, ["rolename", "description"], roleNodeId),
+      summary: compactRecord(role, ["roleid", "rolename", "description", "seqno", "siteid"]),
+      has_detail: true
+    }, { type: "role", record: role });
+    roleById.set(roleKey, roleNodeId);
+    addEdge({ from: rootId, to: roleNodeId, type: "app_builder_has_role" });
+  }
+
+  for (const app of apps) {
+    const appid = stringValue(ci(app, "appid") ?? fallbackId(app, "app"));
+    const appNodeId = `app:${idPart(appid)}`;
+
+    for (const cache of toRecords(app.caches)) {
+      const cacheKey = stringValue(ci(cache, "cacheid") ?? fallbackId(cache, "cache"));
+      const cacheNodeId = `cache:${idPart(cacheKey)}`;
+      addNode({
+        id: cacheNodeId,
+        type: "cache",
+        label: `cache ${cacheKey}`,
+        summary: compactRecord(cache, ["cacheid", "windowid", "appid", "siteid"]),
+        has_detail: true
+      }, { type: "cache", record: cache, parent: app });
+      addEdge({ from: appNodeId, to: cacheNodeId, type: "app_has_cache" });
+      const windowId = stringValue(ci(cache, "windowid"));
+      const windowNodeId = windowId ? windowById.get(windowId) : undefined;
+      if (windowNodeId) addEdge({ from: cacheNodeId, to: windowNodeId, type: "cache_for_window" });
+    }
+
+    for (const roleapp of toRecords(app.roleapps)) {
+      const roleAppKey = stringValue(ci(roleapp, "roleappid") ?? fallbackId(roleapp, "roleapp"));
+      const roleAppNodeId = `roleapp:${idPart(appid)}:${idPart(roleAppKey)}`;
+      addNode({
+        id: roleAppNodeId,
+        type: "roleapp",
+        label: `roleapp ${roleAppKey}`,
+        summary: compactRecord(roleapp, ["roleappid", "roleid", "appid", "siteid"]),
+        has_detail: true
+      }, { type: "roleapp", record: roleapp, parent: app });
+      addEdge({ from: appNodeId, to: roleAppNodeId, type: "app_has_roleapp" });
+      const roleId = stringValue(ci(roleapp, "roleid"));
+      const roleNodeId = roleId ? roleById.get(roleId) : undefined;
+      if (roleNodeId) addEdge({ from: roleNodeId, to: roleAppNodeId, type: "role_grants_app" });
+    }
+
+    for (const rolemenu of toRecords(app.rolemenus)) {
+      const roleMenuKey = stringValue(ci(rolemenu, "rolemenuid") ?? fallbackId(rolemenu, "rolemenu"));
+      const roleMenuNodeId = `rolemenu:${idPart(appid)}:${idPart(roleMenuKey)}`;
+      addNode({
+        id: roleMenuNodeId,
+        type: "rolemenu",
+        label: `rolemenu ${roleMenuKey}`,
+        summary: compactRecord(rolemenu, ["rolemenuid", "roleid", "menuid", "whereclause", "siteid"]),
+        has_detail: true
+      }, { type: "rolemenu", record: rolemenu, parent: app });
+      const menuId = stringValue(ci(rolemenu, "menuid"));
+      const menuNodeId = menuId ? menuById.get(menuId) : undefined;
+      if (menuNodeId) addEdge({ from: roleMenuNodeId, to: menuNodeId, type: "rolemenu_grants_menu" });
+      const roleId = stringValue(ci(rolemenu, "roleid"));
+      const roleNodeId = roleId ? roleById.get(roleId) : undefined;
+      if (roleNodeId) addEdge({ from: roleNodeId, to: roleMenuNodeId, type: "role_has_rolemenu" });
+    }
+
+    for (const access of toRecords(app.accesses)) {
+      const accessKey = stringValue(ci(access, "accessid") ?? fallbackId(access, "access"));
+      const accessNodeId = `access:${idPart(appid)}:${idPart(accessKey)}`;
+      addNode({
+        id: accessNodeId,
+        type: "access",
+        label: `access ${accessKey}`,
+        summary: compactRecord(access, [
+          "accessid", "roleid", "tableid", "isarchive", "noinsert", "noupdate", "nodelete",
+          "noselect", "noexport", "noattach", "islock", "siteid"
+        ]),
+        has_detail: true
+      }, { type: "access", record: access, parent: app });
+      const tableId = stringValue(ci(access, "tableid"));
+      const tableNodeId = tableId ? tableById.get(tableId) : undefined;
+      if (tableNodeId) addEdge({ from: accessNodeId, to: tableNodeId, type: "access_controls_table" });
+      const roleId = stringValue(ci(access, "roleid"));
+      const roleNodeId = roleId ? roleById.get(roleId) : undefined;
+      if (roleNodeId) addEdge({ from: roleNodeId, to: accessNodeId, type: "role_has_table_access" });
     }
   }
 
@@ -414,7 +596,7 @@ function buildSearchResponse(context: GraphContext, args: Record<string, unknown
   if (!query) {
     return {
       mode: "search",
-      error: "Thieu query. Hay truyen query de tim app/table/window/tab/field/menu/domain.",
+      error: "Thieu query. Hay truyen query de tim app/service/table/window/tab/field/menu/domain/cache/role/access.",
       graph_counts: graphCounts(context.nodes, context.edges)
     };
   }
@@ -522,10 +704,11 @@ function buildCreationSchema(args: Record<string, unknown>): Record<string, unkn
       "6. Chi apply sau khi user xac nhan."
     ],
     create_app_branch: {
-      order: ["app", "table", "column", "window", "tab", "field", "menu"],
+      order: ["app", "service/appservice", "table", "column", "window", "tab", "field", "menu", "roleapp/rolemenu/access", "cache refresh/delete"],
       required_edges: [
         "root -> app",
-        "app -> table",
+        "app -> appservice -> service",
+        "service -> table",
         "table -> column",
         "app -> window",
         "window -> tab",
@@ -536,13 +719,17 @@ function buildCreationSchema(args: Record<string, unknown>): Record<string, unkn
         "menu -> window"
       ],
       required_information: {
-        app: ["appname", "optional description"],
-        table: ["appid", "tablename", "alias", "tabletype"],
+        app: ["appname", "seqno", "apptype", "optional description"],
+        service: ["serviceid cua service hien co hoac create service truoc"],
+        appservice: ["appid", "serviceid"],
+        table: ["serviceid", "tablename", "alias", "tabletype"],
         column: ["tableid or table reference", "columnname", "datatype/columntype", "primary/display/search flags when needed"],
         window: ["appid", "windowname"],
         tab: ["windowid", "tableid", "tabname", "seqno"],
         field: ["tabid", "columnid or columnname", "fieldname/label", "seqno", "controltype/datatype when needed"],
-        menu: ["appid", "menuname", "linkwindowid", "seqno"]
+        menu: ["appid", "menuname", "linkwindowid", "seqno"],
+        role_access: ["roleapp for app access", "rolemenu for menu access", "access for table permissions when needed"],
+        cache: ["delete n_cache rows for changed app/window after UI metadata changes"]
       }
     },
     edit_existing_branch: {
@@ -566,8 +753,8 @@ function buildCreationSchema(args: Record<string, unknown>): Record<string, unkn
         {
           id: "create_table_1",
           op: "create_table",
-          after: "create_app_1",
-          record: { appid: "$create_app_1.appid", tablename: "...", alias: "...", tabletype: "table" }
+          after: "create_appservice_1",
+          record: { serviceid: "$create_service_or_existing.serviceid", tablename: "...", alias: "...", tabletype: "table" }
         },
         {
           id: "create_column_1",
@@ -577,7 +764,7 @@ function buildCreationSchema(args: Record<string, unknown>): Record<string, unkn
         }
       ],
       reference_rule: "Co the dung $operation_id.field de noi output cua buoc truoc vao buoc sau, vi du $create_app_1.appid.",
-      delete_rule: "Xoa node chi khi user noi ro. Dung delete_table/delete_column/delete_window/delete_tab/delete_field/delete_menu/delete_domain voi id_value hoac where.",
+      delete_rule: "Xoa node chi khi user noi ro. Dung delete_app/delete_window cascade khi xoa app/window; cascade phai don field, tab, menu, cache va role/menu access truoc.",
       validation: ["duplicate check", "required ids", "edge completeness", "payload fields filtered by actual App Builder metadata"]
     }
   };
@@ -589,25 +776,45 @@ function buildNodeDetail(context: GraphContext, nodeId: string, includeFields: b
 
   switch (source.type) {
     case "app": {
+      const services = toRecords(source.record.services);
       const tables = toRecords(source.record.tables);
       const windows = toRecords(source.record.windows);
       const menus = toRecords(source.record.menus);
+      const domains = toRecords(source.record.domains);
+      const caches = toRecords(source.record.caches);
+      const roleapps = toRecords(source.record.roleapps);
+      const rolemenus = toRecords(source.record.rolemenus);
+      const accesses = toRecords(source.record.accesses);
       return {
         record: stripChildren(source.record),
         counts: {
+          services: services.length,
           tables: tables.length,
           windows: windows.length,
-          menus: menus.length
+          menus: menus.length,
+          domains: domains.length,
+          caches: caches.length,
+          roleapps: roleapps.length,
+          rolemenus: rolemenus.length,
+          accesses: accesses.length
         },
+        services: services.map(service => compactRecord(service, ["serviceid", "servicename", "url", "servicetype", "siteid"])),
         tables: tables.map(table => ({
-          ...compactRecord(table, ["tableid", "tablename", "alias", "tabletype", "columnkey", "columndisplay"]),
-          columns_count: toRecords(table.columns).length
+          ...compactRecord(table, ["tableid", "tablename", "alias", "tabletype", "serviceid", "description"]),
+          columns_count: toRecords(table.columns).length,
+          access_count: Number(ci(table, "access_count") ?? 0),
+          archive_count: Number(ci(table, "archive_count") ?? 0)
         })),
         windows: windows.map(windowRecord => ({
           ...compactRecord(windowRecord, ["windowid", "windowname", "windowtype", "execname"]),
           tabs_count: toRecords(windowRecord.tabs).length
         })),
-        menus: menus.map(menu => compactRecord(menu, ["menuid", "menuname", "translate", "linkwindowid", "parentid", "seqno"]))
+        menus: menus.map(menu => compactRecord(menu, ["menuid", "menuname", "translate", "linkwindowid", "parentid", "seqno"])),
+        domains: domains.map(domain => compactRecord(domain, ["domainid", "domainname", "domaintype", "appid", "domain_values_count"])),
+        caches: caches.map(cache => compactRecord(cache, ["cacheid", "appid", "windowid", "siteid"])),
+        roleapps: roleapps.map(roleapp => compactRecord(roleapp, ["roleappid", "roleid", "appid", "siteid"])),
+        rolemenus: rolemenus.map(rolemenu => compactRecord(rolemenu, ["rolemenuid", "roleid", "menuid", "siteid"])),
+        accesses: accesses.map(access => compactRecord(access, ["accessid", "roleid", "tableid", "noinsert", "noupdate", "nodelete", "noselect", "siteid"]))
       };
     }
     case "table": {
@@ -658,6 +865,13 @@ function buildNodeDetail(context: GraphContext, nodeId: string, includeFields: b
     case "field":
     case "menu":
     case "domain":
+    case "service":
+    case "appservice":
+    case "cache":
+    case "role":
+    case "roleapp":
+    case "rolemenu":
+    case "access":
     default:
       return { record: stripChildren(source.record) };
   }
