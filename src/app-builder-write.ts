@@ -1566,7 +1566,12 @@ function getOperationName(rawOperation: Record<string, unknown>): string {
   }
   const op = value.trim().toLowerCase();
   if (["create", "add", "update", "edit", "rename", "delete", "remove"].includes(op)) {
-    const target = getStringFromUnknown(rawOperation.target ?? rawOperation.entity_type ?? rawOperation.target_type);
+    const target = getStringFromUnknown(
+      rawOperation.target
+      ?? rawOperation.entity_type
+      ?? rawOperation.target_type
+      ?? rawOperation.node_type
+    );
     if (target) return `${op}_${normalizeTarget(target)}`;
   }
   return op;
@@ -1580,12 +1585,18 @@ function getAction(op: string): "create" | "update" | "delete" {
 }
 
 function getTarget(op: string, rawOperation: Record<string, unknown>): string {
-  const explicit = getStringFromUnknown(rawOperation.target ?? rawOperation.entity_type ?? rawOperation.target_type);
+  const explicit = getStringFromUnknown(
+    rawOperation.target
+    ?? rawOperation.entity_type
+    ?? rawOperation.target_type
+    ?? rawOperation.node_type
+  );
   const target = explicit
     ? normalizeTarget(explicit)
     : normalizeTarget(op.replace(/^(create|add|update|edit|rename|delete|remove)_/, ""));
   if (target === "node") {
-    const nodeType = getStringFromUnknown(rawOperation.node_id).split(":").filter(Boolean)[0];
+    const nodeType = getStringFromUnknown(rawOperation.node_type)
+      || getStringFromUnknown(rawOperation.node_id).split(":").filter(Boolean)[0];
     if (nodeType) return normalizeTarget(nodeType);
   }
   return target;
@@ -1611,6 +1622,7 @@ function stripOperationFields(record: Record<string, unknown>): Record<string, u
       "entity_id",
       "record_id",
       "node_id",
+      "node_type",
       "where",
       "record",
       "fields",
