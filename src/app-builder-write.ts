@@ -215,11 +215,12 @@ async function applyChange(
 
   const plan = JSON.parse(raw) as PendingChange;
   const context = await loadWriteContext(env, session, args);
+  const operationsToApply = expandPreparedOperationsForApply(context, plan.operations, plan.warnings);
   const results: Record<string, unknown>[] = [];
   const state: ApplyState = { refs: {} };
   let failed = false;
 
-  for (const operation of plan.operations) {
+  for (const operation of operationsToApply) {
     if (failed) {
       results.push({ operation_id: operation.id, skipped: true });
       continue;
@@ -259,6 +260,54 @@ async function applyChange(
       ? "Sua lai plan dua tren loi va prepare_change lai. Cac buoc sau loi da bi skip."
       : "Goi app_builder_graph_overview/search/detail de verify cau hinh sau khi ghi."
   };
+}
+
+function expandPreparedOperationsForApply(
+  context: WriteContext,
+  operations: PreparedOperation[],
+  warnings: string[]
+): PreparedOperation[] {
+  const expanded: PreparedOperation[] = [];
+
+  for (const operation of operations) {
+    if (
+      operation.action === "delete"
+      && operation.collection === "applications"
+      && !hasDeleteAppCascadeOperation(operations, operation.id_value)
+    ) {
+      const rawOperations = buildDeleteAppCascadeOperations(
+        context,
+        {
+          op: "delete_app",
+          id_value: operation.id_value,
+          where: operation.where
+        },
+        warnings
+      );
+
+      for (const rawOperation of rawOperations) {
+        expanded.push(prepareOperation(context, rawOperation, expanded.length).operation);
+      }
+      continue;
+    }
+
+    expanded.push(operation);
+  }
+
+  return expanded;
+}
+
+function hasDeleteAppCascadeOperation(operations: PreparedOperation[], appId: unknown): boolean {
+  if (!hasUsableValue(appId)) return false;
+  const appIdText = String(appId);
+  return operations.some(operation =>
+    operation.action === "delete"
+    && operation.collection === "windows"
+    && (
+      String(operation.id ?? "").startsWith(`delete_app_${appIdText}_windows`)
+      || String(operation.where ?? "").includes(`appid=${appIdText}`)
+    )
+  );
 }
 
 async function loadWriteContext(
@@ -795,6 +844,11 @@ function expandRawOperations(
       continue;
     }
 
+    if (action === "delete" && target === "app") {
+      expanded.push(...buildDeleteAppCascadeOperations(context, rawOperation, warnings));
+      continue;
+    }
+
     if (action === "create" && target === "tab" && wantsAutoCreateFields(rawOperation)) {
       expanded.push(...buildCreateTabWithFieldsOperations(context, rawOperation, warnings));
       continue;
@@ -956,6 +1010,73 @@ function buildDeleteWindowCascadeOperations(
   return operations;
 }
 
+function buildDeleteAppCascadeOperations(
+  context: WriteContext,
+  rawOperation: Record<string, unknown>,
+  warnings: string[]
+): Record<string, unknown>[] {
+  const appId = getDeleteIdValue(rawOperation, "appid");
+  if (appId === undefined || appId === null || appId === "") {
+    throw new Error("delete_app thieu appid/id_value.");
+  }
+
+  const appIdText = String(appId);
+  const appWhere = buildIdWhere("appid", appId);
+  const windowSubquery = `SELECT windowid FROM n_window WHERE ${appWhere}`;
+  const tabSubquery = `SELECT tabid FROM n_tab WHERE windowid IN (${windowSubquery})`;
+  const menuLinkColumns = getMenuWindowLinkColumns(context);
+  const menuClauses = [`appid=${formatSqlValue(appId)}`];
+  for (const linkColumn of menuLinkColumns) {
+    menuClauses.push(`${linkColumn} IN (${windowSubquery})`);
+  }
+
+  const windows = (context.recordsByCollection.windows ?? [])
+    .filter(window => sameId(ci(window, "appid"), appIdText));
+  const windowIds = new Set(windows.map(window => String(ci(window, "windowid") ?? "")).filter(Boolean));
+  const tabs = (context.recordsByCollection.tabs ?? [])
+    .filter(tab => windowIds.has(String(ci(tab, "windowid") ?? "")));
+  const tabIds = new Set(tabs.map(tab => String(ci(tab, "tabid") ?? "")).filter(Boolean));
+  const fields = (context.recordsByCollection.fields ?? [])
+    .filter(field => tabIds.has(String(ci(field, "tabid") ?? "")));
+  const menus = (context.recordsByCollection.menus ?? [])
+    .filter(menu =>
+      sameId(ci(menu, "appid"), appIdText)
+      || windowIds.has(String(ci(menu, "linkwindowid") ?? ci(menu, "windowid") ?? ""))
+    );
+
+  warnings.push(
+    `delete_app cascade appid=${appIdText}: se xoa UI metadata lien quan truoc app (${fields.length} field, ${tabs.length} tab, ${menus.length} menu, ${windows.length} window da doc duoc). Khong xoa table/column/du lieu that.`
+  );
+
+  return [
+    {
+      id: `delete_app_${appIdText}_fields`,
+      op: "delete_field",
+      where: `tabid IN (${tabSubquery})`
+    },
+    {
+      id: `delete_app_${appIdText}_tabs`,
+      op: "delete_tab",
+      where: `windowid IN (${windowSubquery})`
+    },
+    {
+      id: `delete_app_${appIdText}_menus`,
+      op: "delete_menu",
+      where: menuClauses.join(" OR ")
+    },
+    {
+      id: `delete_app_${appIdText}_windows`,
+      op: "delete_window",
+      where: appWhere
+    },
+    {
+      id: `delete_app_${appIdText}`,
+      op: "delete_app",
+      id_value: appId
+    }
+  ];
+}
+
 function dedupeRawOperations(operations: Record<string, unknown>[]): Record<string, unknown>[] {
   const seen = new Set<string>();
   const output: Record<string, unknown>[] = [];
@@ -985,17 +1106,71 @@ function dedupeRawOperations(operations: Record<string, unknown>[]): Record<stri
 }
 
 function getDeleteIdValue(record: Record<string, unknown>, fallbackIdField: string): unknown {
+  const explicitRecord = asRecord(record.record);
+  const whereRecord = asRecord(record.where);
   return record.id_value
     ?? record.entity_id
-    ?? record.id
     ?? record[fallbackIdField]
+    ?? record.record_id
+    ?? explicitRecord?.id_value
+    ?? explicitRecord?.entity_id
+    ?? explicitRecord?.record_id
+    ?? explicitRecord?.id
+    ?? explicitRecord?.[fallbackIdField]
+    ?? explicitRecord?.appid
+    ?? explicitRecord?.app_id
+    ?? explicitRecord?.application_id
+    ?? explicitRecord?.windowid
+    ?? explicitRecord?.window_id
+    ?? explicitRecord?.tabid
+    ?? explicitRecord?.tab_id
+    ?? explicitRecord?.fieldid
+    ?? explicitRecord?.field_id
+    ?? explicitRecord?.menuid
+    ?? explicitRecord?.menu_id
+    ?? explicitRecord?.tableid
+    ?? explicitRecord?.table_id
+    ?? explicitRecord?.columnid
+    ?? explicitRecord?.column_id
+    ?? explicitRecord?.domainid
+    ?? explicitRecord?.domain_id
+    ?? record.appid
+    ?? record.app_id
+    ?? record.application_id
     ?? record.windowid
+    ?? record.window_id
     ?? record.tabid
+    ?? record.tab_id
     ?? record.fieldid
+    ?? record.field_id
     ?? record.menuid
+    ?? record.menu_id
     ?? record.tableid
+    ?? record.table_id
     ?? record.columnid
-    ?? record.domainid;
+    ?? record.column_id
+    ?? record.domainid
+    ?? record.domain_id
+    ?? whereRecord?.id_value
+    ?? whereRecord?.entity_id
+    ?? whereRecord?.id
+    ?? whereRecord?.[fallbackIdField]
+    ?? whereRecord?.appid
+    ?? whereRecord?.app_id
+    ?? whereRecord?.application_id
+    ?? whereRecord?.windowid
+    ?? whereRecord?.window_id
+    ?? whereRecord?.tabid
+    ?? whereRecord?.tab_id
+    ?? whereRecord?.fieldid
+    ?? whereRecord?.field_id
+    ?? whereRecord?.menuid
+    ?? whereRecord?.menu_id
+    ?? whereRecord?.tableid
+    ?? whereRecord?.table_id
+    ?? whereRecord?.columnid
+    ?? whereRecord?.column_id
+    ?? whereRecord?.domainid;
 }
 
 function sameId(left: unknown, right: unknown): boolean {
@@ -2025,10 +2200,14 @@ function buildIdWhere(idField: string, idValue: unknown): string {
   if (idValue === undefined || idValue === null || idValue === "") {
     throw new Error("Delete thieu id_value.");
   }
-  if (typeof idValue === "number" || /^\d+$/.test(String(idValue))) {
-    return `${idField}=${idValue}`;
+  return `${idField}=${formatSqlValue(idValue)}`;
+}
+
+function formatSqlValue(value: unknown): string {
+  if (typeof value === "number" || typeof value === "boolean" || /^\d+$/.test(String(value))) {
+    return String(value);
   }
-  return `${idField}=N'${String(idValue).replace(/'/g, "''")}'`;
+  return `N'${String(value).replace(/'/g, "''")}'`;
 }
 
 function buildWhereFromRecord(
@@ -2041,10 +2220,7 @@ function buildWhereFromRecord(
   const clauses = Object.entries(filtered)
     .filter(([, value]) => value !== undefined && value !== null && value !== "")
     .map(([key, value]) => {
-      if (typeof value === "number" || typeof value === "boolean" || /^\d+$/.test(String(value))) {
-        return `${key}=${value}`;
-      }
-      return `${key}=N'${String(value).replace(/'/g, "''")}'`;
+      return `${key}=${formatSqlValue(value)}`;
     });
   return clauses.join(" AND ");
 }
