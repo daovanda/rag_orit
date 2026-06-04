@@ -367,13 +367,10 @@ function isPlanConfirmation(message: string): boolean {
     && /(thuc hien|tien hanh|ke hoach|apply|chay|tao|sua|xoa|cap nhat)/.test(text);
 }
 
-function findLatestPlanId(chatHistory: AIMessage[]): string | null {
-  for (let i = chatHistory.length - 1; i >= 0; i--) {
-    const content = chatHistory[i].content ?? "";
-    const match = content.match(/Plan ID:\s*([0-9a-fA-F-]{16,})/);
-    if (match) return match[1];
-  }
-  return null;
+function findImmediatePreviousPlanId(chatHistory: AIMessage[]): string | null {
+  const previous = [...chatHistory].reverse().find(message => message.role === "assistant" && (message.content ?? "").trim());
+  const match = previous?.content?.match(/Plan ID:\s*([0-9a-fA-F-]{16,})/);
+  return match?.[1] ?? null;
 }
 
 function normalizeVietnameseText(value: string): string {
@@ -628,7 +625,11 @@ function extractCreateWindowRequest(message: string): {
   const tableName = tableMatch?.[1]?.trim();
   const explicitWindowMatch = message.match(/(?:window|cửa sổ|cua so)\s+["“]?([^"”\n,.;]+?)(?:["”]|\s+(?:cho|của|cua|từ|tu|với|voi|bảng|bang|table)\b|[,.;]|$)/i)
     ?? message.match(/(?:tên|ten|name)\s+["“]?([^"”\n.,;]+)["”]?/i);
-  const windowName = explicitWindowMatch?.[1]?.trim()
+  let explicitWindowName = explicitWindowMatch?.[1]?.trim();
+  if (explicitWindowName) {
+    explicitWindowName = explicitWindowName.replace(/\s+(?:vào|vao)\s+app\b.*$/i, "").trim();
+  }
+  const windowName = explicitWindowName
     || (tableName ? `${tableName} Management` : (/m[aã]u/i.test(message) || normalized.includes("mau") ? "Cua so mau" : "Window moi"));
   const tabName = tableName ? tableName : undefined;
   const menuName = windowName;
@@ -643,6 +644,14 @@ function extractRenameWindowRequest(message: string): { currentName: string; new
   const wantsRename = /(doi ten|sua ten|rename|cap nhat ten|sua)/.test(normalized);
   const mentionsWindow = /(window|cua so)/.test(normalized);
   if (!wantsRename || !mentionsWindow) return null;
+
+  const idMatch = message.match(/(?:window|cửa sổ|cua so)\s+(?:id\s*)?(\d+).*?(?:thành|thanh|sang|to)\s+["“]?([^"”.;,]+)["”]?/i);
+  if (idMatch?.[1] && idMatch?.[2]) {
+    return {
+      currentName: idMatch[1].trim(),
+      newName: idMatch[2].trim()
+    };
+  }
 
   const patterns = [
     /(?:cửa sổ|cua so|window)\s+["“]?([^"”]+?)["”]?\s+(?:thành|thanh|sang|to)\s+["“]?([^\s"”.,;]+)["”]?/i,
@@ -820,7 +829,8 @@ export async function runAgenticLoop(
     tools: TOOLS.map(tool => tool.name)
   });
 
-  const confirmedPlanId = isPlanConfirmation(userMessage) ? findLatestPlanId(chatHistory) : null;
+  const isConfirmation = isPlanConfirmation(userMessage);
+  const confirmedPlanId = isConfirmation ? findImmediatePreviousPlanId(chatHistory) : null;
   if (confirmedPlanId && zilcodeSession) {
     addDebugStep(debugSteps, "agent.confirmation_auto_apply", "start", "User xac nhan pending App Builder plan, tu goi apply_change.", {
       plan_id: confirmedPlanId
@@ -878,7 +888,7 @@ export async function runAgenticLoop(
   }
 
   const renameWindowRequest = extractRenameWindowRequest(userMessage)
-    ?? (normalizeVietnameseText(userMessage).includes("doi ten") ? findLatestRenameWindowRequest(chatHistory) : null);
+    ?? ((normalizeVietnameseText(userMessage).includes("doi ten") || isConfirmation) ? findLatestRenameWindowRequest(chatHistory) : null);
   if (renameWindowRequest && zilcodeSession) {
     const appName = extractAppNameFromText(userMessage) ?? findLatestAppName(chatHistory);
     addDebugStep(debugSteps, "agent.rename_window_prepare", "start", "Phat hien intent doi ten window, tu tao pending update_window plan.", {

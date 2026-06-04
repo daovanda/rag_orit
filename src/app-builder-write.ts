@@ -344,11 +344,7 @@ function prepareOperation(
   if (!collection) throw new Error(`Target khong ho tro: ${target}`);
   if (!context.collections[collection]) throw new Error(`Khong tim thay collection metadata: ${collection}`);
 
-  const record = normalizeRecordAliases(
-    target,
-    asRecord(rawOperation.record) ?? stripOperationFields(rawOperation),
-    warnings
-  );
+  const record = getOperationRecordPayload(target, rawOperation, warnings);
   const preparedRecord = action === "create"
     ? materializeCreateRecord(context, collection, record, warnings)
     : action === "update"
@@ -362,12 +358,22 @@ function prepareOperation(
     throw new Error("Update operation khong con field hop le sau khi loc metadata.");
   }
 
+  const idField = TARGET_ID_FIELD[collection];
+  const whereRecord = asRecord(rawOperation.where)
+    ? normalizeRecordAliases(target, asRecord(rawOperation.where) as Record<string, unknown>, warnings)
+    : undefined;
   const idValue = rawOperation.id_value
     ?? rawOperation.entity_id
-    ?? rawOperation[`${TARGET_ID_FIELD[collection]}`]
+    ?? rawOperation.record_id
+    ?? rawOperation[idField]
+    ?? record[idField]
+    ?? record.id
+    ?? whereRecord?.[idField]
+    ?? whereRecord?.id
     ?? resolveTargetIdValue(context, collection, rawOperation)
-    ?? rawOperation.id;
-  const where = getStringFromUnknown(rawOperation.where);
+    ?? resolveTargetIdValue(context, collection, { ...rawOperation, ...record });
+  const where = getStringFromUnknown(rawOperation.where)
+    || (whereRecord && idValue === undefined ? buildWhereFromRecord(context, collection, whereRecord, warnings) : "");
 
   if ((action === "update" || action === "delete") && (idValue === undefined || idValue === null || idValue === "") && !where) {
     throw new Error("Update/delete can id_value hoac where.");
@@ -614,8 +620,9 @@ function normalizeRawOperations(
     referenceAliases[oldImplicitId] = canonicalId;
     if (originalId) referenceAliases[originalId] = canonicalId;
 
-    const record = asRecord(rawOperation.record)
-      ? normalizeRecordAliases(target, asRecord(rawOperation.record) as Record<string, unknown>, warnings)
+    const explicitRecord = asRecord(rawOperation.record) ?? asRecord(rawOperation.fields) ?? asRecord(rawOperation.updates);
+    const record = explicitRecord
+      ? normalizeRecordAliases(target, explicitRecord as Record<string, unknown>, warnings)
       : undefined;
 
     return {
@@ -649,6 +656,19 @@ function normalizeRecordAliases(
     output[normalizeRecordKey(target, rawKey, warnings)] = value;
   }
   return output;
+}
+
+function getOperationRecordPayload(
+  target: string,
+  rawOperation: Record<string, unknown>,
+  warnings: string[]
+): Record<string, unknown> {
+  const explicitRecord = asRecord(rawOperation.record) ?? asRecord(rawOperation.fields) ?? asRecord(rawOperation.updates);
+  return normalizeRecordAliases(
+    target,
+    explicitRecord ?? stripOperationFields(rawOperation),
+    warnings
+  );
 }
 
 function normalizeRecordKey(target: string, key: string, warnings: string[]): string {
@@ -1219,8 +1239,14 @@ function getAction(op: string): "create" | "update" | "delete" {
 
 function getTarget(op: string, rawOperation: Record<string, unknown>): string {
   const explicit = getStringFromUnknown(rawOperation.target ?? rawOperation.entity_type ?? rawOperation.target_type);
-  if (explicit) return normalizeTarget(explicit);
-  return normalizeTarget(op.replace(/^(create|add|update|edit|rename|delete|remove)_/, ""));
+  const target = explicit
+    ? normalizeTarget(explicit)
+    : normalizeTarget(op.replace(/^(create|add|update|edit|rename|delete|remove)_/, ""));
+  if (target === "node") {
+    const nodeType = getStringFromUnknown(rawOperation.node_id).split(":").filter(Boolean)[0];
+    if (nodeType) return normalizeTarget(nodeType);
+  }
+  return target;
 }
 
 function normalizeTarget(value: string): string {
@@ -1240,8 +1266,13 @@ function stripOperationFields(record: Record<string, unknown>): Record<string, u
       "target",
       "id",
       "id_value",
+      "entity_id",
+      "record_id",
+      "node_id",
       "where",
       "record",
+      "fields",
+      "updates",
       "after",
       "creates_node",
       "cascade",
@@ -1998,6 +2029,24 @@ function buildIdWhere(idField: string, idValue: unknown): string {
     return `${idField}=${idValue}`;
   }
   return `${idField}=N'${String(idValue).replace(/'/g, "''")}'`;
+}
+
+function buildWhereFromRecord(
+  context: WriteContext,
+  collection: string,
+  record: Record<string, unknown>,
+  warnings: string[]
+): string {
+  const filtered = filterRecordByAllowedColumns(context, collection, record, warnings);
+  const clauses = Object.entries(filtered)
+    .filter(([, value]) => value !== undefined && value !== null && value !== "")
+    .map(([key, value]) => {
+      if (typeof value === "number" || typeof value === "boolean" || /^\d+$/.test(String(value))) {
+        return `${key}=${value}`;
+      }
+      return `${key}=N'${String(value).replace(/'/g, "''")}'`;
+    });
+  return clauses.join(" AND ");
 }
 
 function addQuery(pathOrUrl: string, params: Record<string, string | number | boolean | undefined>): string {
