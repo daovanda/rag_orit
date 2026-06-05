@@ -354,7 +354,7 @@ function createDeterministicChangeAnswer(toolResults: ToolResultRecord[]): strin
   return null;
 }
 
-function createDeterministicGraphAnswer(userMessage: string, toolResults: ToolResultRecord[]): string | null {
+export function createDeterministicGraphAnswer(userMessage: string, toolResults: ToolResultRecord[]): string | null {
   const last = [...toolResults].reverse().find(result =>
     isAppBuilderGraphTool(result.name) && result.name !== "app_builder_creation_schema"
   );
@@ -418,16 +418,28 @@ function formatGraphSearchAnswer(data: Record<string, unknown>): string {
 function formatGraphSubgraphAnswer(userMessage: string, data: Record<string, unknown>): string {
   const graph = asRecord(data.graph) ?? {};
   const nodes = recordArray(graph.nodes);
+  const edges = recordArray(graph.edges);
+  const startNodeIds = new Set(toArrayValues(data.start_node_ids).map(item => String(item)));
   const appNode = nodes.find(node => String(node.type ?? "") === "app");
   const text = normalizeVietnameseText(userMessage);
   const typeGroups = ["table", "window", "menu", "tab", "field", "service", "cache", "roleapp", "rolemenu", "access"]
     .map(type => ({ type, nodes: nodes.filter(node => String(node.type ?? "") === type) }))
     .filter(group => group.nodes.length);
 
+  if (/(quan he|lien ket|ket noi|dung bang|bang nao|window|cua so|man hinh|tab)/.test(text)
+    && /(bang|table|window|cua so|man hinh|tab)/.test(text)) {
+    const flowAnswer = formatWindowTableFlowAnswer(nodes, edges, appNode, {
+      startNodeIds,
+      includeFieldExamples: wantsDetailedFlowAnswer(text),
+      listOnly: wantsListOnlyAnswer(text)
+    });
+    if (flowAnswer) return flowAnswer;
+  }
+
   if (appNode && /(bang|table|tables)/.test(text)) {
-    const tables = nodes.filter(node => String(node.type ?? "") === "table");
+    const tables = outgoingNodes(appNode, edges, nodes, "app_has_table", "table");
     return [
-      `${formatAppNodeLabel(appNode)} có ${tables.length} bảng trong subgraph đang mở:`,
+      `${formatAppNodeLabel(appNode)} có ${tables.length} bảng:`,
       "",
       ...tables.slice(0, 20).map((table, index) => `${index + 1}. ${formatNodeLabel(table)}`)
     ].join("\n").trim();
@@ -573,6 +585,150 @@ function formatWindowSummary(windowRecord: Record<string, unknown>): string {
     windowRecord.fields_count !== undefined ? `${String(windowRecord.fields_count)} field` : ""
   ].filter(Boolean).join(", ");
   return `${String(name)}${details ? ` (${details})` : ""}`;
+}
+
+function wantsListOnlyAnswer(normalizedText: string): boolean {
+  return /(chi liet ke|liet ke|danh sach|ngan gon|tom tat nhanh|chi can biet)/.test(normalizedText)
+    && !/(giai thich|dien giai|chi tiet|luong|lookup|domain|field|truong|cot|column)/.test(normalizedText);
+}
+
+function wantsDetailedFlowAnswer(normalizedText: string): boolean {
+  if (wantsListOnlyAnswer(normalizedText)) return false;
+  return /(giai thich|dien giai|chi tiet|luong|quan he chi tiet|lookup|domain|field|truong|cot|column)/.test(normalizedText);
+}
+
+function formatWindowTableFlowAnswer(
+  nodes: Record<string, unknown>[],
+  edges: Record<string, unknown>[],
+  appNode?: Record<string, unknown>,
+  options: {
+    startNodeIds?: Set<string>;
+    includeFieldExamples?: boolean;
+    listOnly?: boolean;
+  } = {}
+): string | null {
+  const startedWindows = nodes.filter(node =>
+    String(node.type ?? "") === "window"
+    && options.startNodeIds?.has(String(node.id ?? ""))
+  );
+  const windowsFromApp = appNode ? outgoingNodes(appNode, edges, nodes, "app_has_window", "window") : [];
+  const windows = startedWindows.length
+    ? startedWindows
+    : windowsFromApp.length
+      ? windowsFromApp
+      : nodes.filter(node => String(node.type ?? "") === "window");
+  if (!windows.length) return null;
+
+  const intro = appNode
+    ? `Luồng window/tab/bảng của ${formatAppNodeName(appNode)}:`
+    : windows.length === 1
+      ? `Window ${formatSimpleNodeName(windows[0])} đang nối tới các bảng sau:`
+      : "Luồng window/tab/bảng trong vùng đang xem:";
+
+  const lines: string[] = [intro, ""];
+  for (const windowNode of windows.slice(0, 12)) {
+    const tabs = outgoingNodes(windowNode, edges, nodes, "window_has_tab", "tab");
+    if (!tabs.length) {
+      lines.push(`- ${formatSimpleNodeName(windowNode)}: chưa thấy tab trong graph đang mở.`);
+      continue;
+    }
+
+    lines.push(`- ${formatSimpleNodeName(windowNode)}:`);
+    for (const tab of tabs.slice(0, 12)) {
+      const tables = outgoingNodes(tab, edges, nodes, "tab_uses_table", "table");
+      const relationTables = outgoingNodes(tab, edges, nodes, "tab_uses_relation_table", "table");
+      const fields = outgoingNodes(tab, edges, nodes, "tab_has_field", "field");
+      const tableText = tables.length
+        ? tables.map(formatSimpleNodeName).join(", ")
+        : "chưa thấy bảng chính";
+      const relationText = relationTables.length
+        ? `; bảng quan hệ: ${relationTables.map(formatSimpleNodeName).join(", ")}`
+        : "";
+      const fieldText = fields.length
+        ? `; ${fields.length} field`
+        : "";
+
+      lines.push(`  - Tab ${formatSimpleNodeName(tab)} -> bảng chính: ${tableText}${relationText}${fieldText}.`);
+
+      if (options.listOnly || !options.includeFieldExamples) continue;
+
+      const fieldExamples = fields.slice(0, 4)
+        .map(field => {
+          const columns = outgoingNodes(field, edges, nodes, "field_maps_column", "column");
+          const domains = outgoingNodes(field, edges, nodes, "field_uses_domain", "domain");
+          const linkedTables = outgoingNodes(field, edges, nodes, "field_links_table", "table");
+          const columnText = columns.length ? ` -> cột ${columns.map(formatSimpleNodeName).join(", ")}` : "";
+          const domainText = domains.length ? `; domain ${domains.map(formatSimpleNodeName).join(", ")}` : "";
+          const lookupText = linkedTables.length ? `; lookup sang ${linkedTables.map(formatSimpleNodeName).join(", ")}` : "";
+          return `    - Field ${formatSimpleNodeName(field)}${columnText}${domainText}${lookupText}`;
+        });
+      lines.push(...fieldExamples);
+      if (fields.length > fieldExamples.length) {
+        lines.push(`    - ... còn ${fields.length - fieldExamples.length} field khác.`);
+      }
+    }
+  }
+
+  if (!options.listOnly) {
+    lines.push("");
+    lines.push("Cách hiểu nhanh: menu mở window; window chứa tab; tab quyết định bảng dữ liệu chính; field trên tab hiển thị hoặc nhập dữ liệu từ column của bảng đó. Lookup/domain thường nằm ở column, field chỉ map tới column.");
+  }
+  return lines.join("\n").trim();
+}
+
+function outgoingNodes(
+  node: Record<string, unknown>,
+  edges: Record<string, unknown>[],
+  nodes: Record<string, unknown>[],
+  edgeType: string,
+  targetType?: string
+): Record<string, unknown>[] {
+  const nodeId = String(node.id ?? "");
+  const targetIds = new Set(
+    edges
+      .filter(edge => String(edge.from ?? "") === nodeId && String(edge.type ?? "") === edgeType)
+      .map(edge => String(edge.to ?? ""))
+      .filter(Boolean)
+  );
+  return nodes.filter(candidate =>
+    targetIds.has(String(candidate.id ?? ""))
+    && (!targetType || String(candidate.type ?? "") === targetType)
+  );
+}
+
+function formatSimpleNodeName(node: Record<string, unknown>): string {
+  const summary = asRecord(node.summary) ?? {};
+  const name = node.label
+    ?? summary.appname
+    ?? summary.windowname
+    ?? summary.tabname
+    ?? summary.alias
+    ?? summary.tablename
+    ?? summary.columnname
+    ?? summary.fieldname
+    ?? summary.domainname
+    ?? node.id;
+  const id = primaryNodeId(node);
+  return `${String(name)}${id ? ` (${id})` : ""}`;
+}
+
+function primaryNodeId(node: Record<string, unknown>): string {
+  const summary = asRecord(node.summary) ?? {};
+  const type = String(node.type ?? "");
+  const candidates: Record<string, string> = {
+    app: "appid",
+    table: "tableid",
+    column: "columnid",
+    window: "windowid",
+    tab: "tabid",
+    field: "fieldid",
+    menu: "menuid",
+    domain: "domainid",
+    service: "serviceid"
+  };
+  const key = candidates[type];
+  const value = key ? summary[key] : undefined;
+  return value === undefined || value === null || value === "" ? "" : `${key}=${String(value)}`;
 }
 
 function formatRecordLines(record: Record<string, unknown>): string[] {
@@ -1126,6 +1282,7 @@ Hãy trả lời theo đúng ý định của user, không kể lại toàn bộ
 Chỉ nêu những thông tin liên quan trực tiếp tới câu hỏi. Nếu câu hỏi rộng, tóm tắt ngắn gọn theo nhóm.
 Nếu người dùng hỏi về hệ thống, trả lời theo cấu trúc: đăng nhập/role, các app chính, mỗi app có gì đáng chú ý, và gợi ý đào sâu. Không liệt kê tất cả node/edge.
 Nếu người dùng hỏi về một app/table/window/tab/field cụ thể, tập trung vào node đó và quan hệ trực tiếp. Không liệt kê các phần không liên quan.
+Nếu người dùng hỏi về luồng hoặc liên kết trong App Builder, hãy diễn giải theo chuỗi dễ hiểu: menu mở window; window chứa tab; tab dùng bảng; field map tới column; domain/lookup thường nằm ở column. Chỉ nhắc node_id/id khi cần đối chiếu.
 Nếu người dùng yêu cầu tạo/sửa/xóa, trả lời theo kiểu IDE agent: hiểu yêu cầu, những gì sẽ thay đổi, các bước plan, rủi ro/thiếu thông tin, và yêu cầu xác nhận trước khi ghi.
 Dùng đúng tên metadata Zilcode hiện tại: n_window, n_tab, n_field, n_menu hoặc window/tab/field/menu. Không tự đổi sang AD_Window/AD_Tab/AD_Field nếu tool không trả về các tên đó.
 Nếu đã có kết quả app_builder_prepare_change, chỉ tóm tắt plan id và các bước; không mở rộng thành hướng dẫn dài.
@@ -1432,6 +1589,8 @@ Graph-first workflow:
 4. Nếu cần lập plan chính xác hoặc trả lời chi tiết, gọi app_builder_node_detail.
 5. Nếu user muốn tạo/sửa/xóa, gọi app_builder_creation_schema và app_builder_prepare_change để tạo pending plan.
 6. Chỉ gọi app_builder_apply_change khi user vừa xác nhận rõ ràng và có plan_id hợp lệ trong lịch sử hội thoại.
+Nếu user hỏi tiếp bằng các từ như "đó", "kia", "vừa rồi", "các window đó", hãy dùng đối tượng/app/window đã được nhắc trong lịch sử gần nhất; không quay lại overview trừ khi thật sự mất ngữ cảnh.
+Nếu user hỏi window/tab dùng bảng nào hoặc kết nối bảng nào, ưu tiên app_builder_graph_subgraph quanh window/app liên quan với depth đủ sâu, không dùng app_builder_graph_overview.
 Nếu user yêu cầu xóa window theo id, không hỏi lặp lại qua nhiều vòng. Hãy tạo pending plan delete_window cascade bằng app_builder_prepare_change; apply chỉ sau khi user xác nhận plan id.
 
 Dùng rag_search khi cần tài liệu hướng dẫn/API contract, nhất là khi không chắc quy tắc tạo/sửa.
