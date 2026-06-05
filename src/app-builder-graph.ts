@@ -849,15 +849,15 @@ function buildCreationSchema(args: Record<string, unknown>): Record<string, unkn
         column: ["tableid or table reference", "columnname", "datatype/columntype", "domainid/linktableid/linkcolumn when needed", "primary/display/search flags when needed"],
         window: ["appid", "windowname"],
         tab: ["windowid", "tableid", "tabname", "seqno"],
-        field: ["tabid", "columnid or columnname", "fieldname/label", "seqno", "domainid/linktableid/linkcolumn for select/lookup fields when needed", "controltype/datatype when needed"],
+        field: ["tabid", "columnid or columnname", "fieldname/label", "seqno", "controltype/datatype when needed"],
         menu: ["appid", "menuname", "linkwindowid", "seqno"],
         role_access: ["roleapp for app access", "rolemenu for menu access", "access for table permissions when needed"],
         cache: ["delete n_cache rows for changed app/window after UI metadata changes"]
       },
       domain_lookup: {
-        domain: ["create_domain or resolve existing domainid before using it on field/column"],
-        field_domain_edge: "NField.domainid -> NDomain.domainid",
-        field_lookup_edge: "NField.linktableid/linkcolumn -> NTable/NColumn",
+        domain: ["create_domain or resolve existing domainid before using it on column"],
+        field_domain_edge: "NField.columnid -> NColumn.domainid -> NDomain.domainid",
+        field_lookup_edge: "NField.columnid -> NColumn.linktableid/linkcolumn -> NTable/NColumn",
         column_lookup_edge: "NColumn.linktableid/linkcolumn -> NTable/NColumn",
         tab_relation_edge: "NTab.relatetableid + relatechildfield/relateparentfield -> related table"
       },
@@ -966,7 +966,8 @@ function buildNodeDetail(context: GraphContext, nodeId: string, includeFields: b
         columns_count: columns.length,
         columns: columns.map(column => compactRecord(column, [
           "columnid", "columnname", "tablename", "tableid", "columntype", "datatype",
-          "isprimarykey", "isrequire", "isreadonly", "seqno", "description"
+          "length", "isprimarykey", "isrequire", "isreadonly", "domainid", "linktableid",
+          "linkcolumn", "mapcolumn", "seqno", "description"
         ]))
       };
     }

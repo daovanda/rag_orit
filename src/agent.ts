@@ -364,7 +364,7 @@ export function createDeterministicGraphAnswer(userMessage: string, toolResults:
     const data = JSON.parse(last.content) as Record<string, unknown>;
     const mode = String(data.mode ?? "");
     if (mode === "overview") return formatGraphOverviewAnswer(userMessage, data);
-    if (mode === "search") return formatGraphSearchAnswer(data);
+    if (mode === "search") return formatGraphSearchAnswer(userMessage, data);
     if (mode === "subgraph") return formatGraphSubgraphAnswer(userMessage, data);
     if (mode === "detail") return formatGraphDetailAnswer(userMessage, data);
   } catch {
@@ -378,6 +378,19 @@ function formatGraphOverviewAnswer(userMessage: string, data: Record<string, unk
   const apps = extractGraphApps(data);
   const text = normalizeVietnameseText(userMessage);
   const wantsList = /(liet ke|danh sach|nhung ung dung|cac ung dung|app nao|ung dung nao)/.test(text);
+  const mentionedApp = findMentionedAppNode(text, apps);
+
+  if (mentionedApp && /(window|cua so|man hinh)/.test(text)) {
+    return formatAppCountAnswer(mentionedApp, "windows", "window", text);
+  }
+
+  if (mentionedApp && /(bang|table)/.test(text)) {
+    return formatAppCountAnswer(mentionedApp, "tables", "bảng", text);
+  }
+
+  if (mentionedApp && /\bmenu\b/.test(text)) {
+    return formatAppCountAnswer(mentionedApp, "menus", "menu", text);
+  }
 
   if (!wantsList && /(bao nhieu|so luong|count)/.test(text)) {
     return `Hệ thống hiện có ${String(data.apps_count ?? apps.length)} ứng dụng.`;
@@ -386,16 +399,28 @@ function formatGraphOverviewAnswer(userMessage: string, data: Record<string, unk
   return [
     `Hệ thống hiện có ${String(data.apps_count ?? apps.length)} ứng dụng:`,
     "",
-    ...apps.map((app, index) => `${index + 1}. ${formatAppNodeLabel(app)}`),
-    "",
-    "Bạn có thể hỏi tiếp theo tên app hoặc số thứ tự, ví dụ: \"ứng dụng số 4 có những bảng gì\"."
+    ...apps.map((app, index) => `${index + 1}. ${formatAppNodeLabel(app)}`)
   ].join("\n").trim();
 }
 
-function formatGraphSearchAnswer(data: Record<string, unknown>): string {
+function formatGraphSearchAnswer(userMessage: string, data: Record<string, unknown>): string {
   const matches = recordArray(data.matches);
+  const text = normalizeVietnameseText(userMessage);
   if (!matches.length) {
     return "Tôi chưa tìm thấy node phù hợp trong App Builder graph. Hãy thử dùng tên hoặc id cụ thể hơn.";
+  }
+
+  const top = matches[0];
+  if (isStrongSearchMatch(top)) {
+    if (String(top.type ?? "") === "app" && /(window|cua so|man hinh)/.test(text)) {
+      return formatAppCountAnswer(top, "windows", "window", text);
+    }
+    if (String(top.type ?? "") === "app" && /(bang|table)/.test(text)) {
+      return formatAppCountAnswer(top, "tables", "bảng", text);
+    }
+    if (String(top.type ?? "") === "app" && /\bmenu\b/.test(text)) {
+      return formatAppCountAnswer(top, "menus", "menu", text);
+    }
   }
 
   if (matches.length === 1) {
@@ -474,6 +499,7 @@ function formatGraphDetailAnswer(userMessage: string, data: Record<string, unkno
   const node = asRecord(data.node) ?? {};
   const detail = asRecord(data.detail) ?? {};
   if (String(node.type ?? "") === "app") return formatAppDetailAnswer(userMessage, node, detail);
+  if (String(node.type ?? "") === "table") return formatTableDetailAnswer(node, detail, asRecord(data.neighbors));
 
   return [
     `Chi tiết ${formatNodeLabel(node)}:`,
@@ -534,11 +560,126 @@ function formatAppDetailAnswer(userMessage: string, node: Record<string, unknown
   ].filter(Boolean).join("\n");
 }
 
+function formatTableDetailAnswer(
+  node: Record<string, unknown>,
+  detail: Record<string, unknown>,
+  neighbors: Record<string, unknown> | null
+): string {
+  const record = asRecord(detail.record) ?? {};
+  const columns = recordArray(detail.columns);
+  const inbound = recordArray(neighbors?.inbound);
+  const tabsUsingTable = inbound
+    .filter(item => ["tab_uses_table", "tab_uses_relation_table"].includes(String(item.type ?? "")))
+    .map(item => asRecord(item.node))
+    .filter((item): item is Record<string, unknown> => Boolean(item));
+  const appNodes = inbound
+    .filter(item => String(item.type ?? "") === "app_has_table")
+    .map(item => asRecord(item.node))
+    .filter((item): item is Record<string, unknown> => Boolean(item));
+  const accessNodes = inbound
+    .filter(item => String(item.type ?? "") === "access_controls_table")
+    .map(item => asRecord(item.node))
+    .filter((item): item is Record<string, unknown> => Boolean(item));
+
+  return [
+    `Chi tiết bảng ${formatSimpleNodeName(node)}:`,
+    "",
+    `- Tên kỹ thuật: ${String(record.tablename ?? "")}`,
+    record.alias ? `- Tên hiển thị: ${String(record.alias)}` : "",
+    record.serviceid !== undefined ? `- Service: serviceid=${String(record.serviceid)}` : "",
+    `- Số cột: ${String(detail.columns_count ?? columns.length)}`,
+    columns.length ? "" : "",
+    columns.length ? "Các cột:" : "",
+    ...columns.map((column, index) => `${index + 1}. ${formatColumnSummary(column)}`),
+    tabsUsingTable.length ? "" : "",
+    tabsUsingTable.length ? "Đang được dùng trong tab/window:" : "",
+    ...tabsUsingTable.slice(0, 10).map(tab => `- ${formatSimpleNodeName(tab)}`),
+    appNodes.length ? "" : "",
+    appNodes.length ? `Thuộc app: ${appNodes.map(formatSimpleNodeName).join(", ")}` : "",
+    accessNodes.length ? `Quyền truy cập bảng: ${accessNodes.length} access record.` : "",
+    "",
+    "Cách hiểu nhanh: bảng lưu metadata/dữ liệu của service; column định nghĩa trường dữ liệu thật; tab/window chỉ là lớp giao diện dùng bảng đó để hiển thị hoặc nhập dữ liệu."
+  ].filter(Boolean).join("\n");
+}
+
 function extractGraphApps(data: Record<string, unknown>): Record<string, unknown>[] {
   const directApps = recordArray(data.apps);
   if (directApps.length) return directApps;
   const graph = asRecord(data.graph) ?? {};
   return recordArray(graph.nodes).filter(node => String(node.type ?? "") === "app");
+}
+
+function findMentionedAppNode(normalizedText: string, apps: Record<string, unknown>[]): Record<string, unknown> | null {
+  const ordinal = extractAppOrdinalFromNormalizedText(normalizedText);
+  if (ordinal && apps[ordinal - 1]) return apps[ordinal - 1];
+
+  let best: { app: Record<string, unknown>; score: number } | null = null;
+  for (const app of apps) {
+    const names = appNameCandidates(app)
+      .map(name => normalizeVietnameseText(name))
+      .filter(Boolean);
+    const score = Math.max(0, ...names.map(name => scoreMentionedName(normalizedText, name)));
+    if (!best || score > best.score) best = { app, score };
+  }
+  return best && best.score >= 0.62 ? best.app : null;
+}
+
+function extractAppOrdinalFromNormalizedText(normalizedText: string): number | null {
+  const match = normalizedText.match(/(?:ung dung|app)\s*(?:so|thu)?\s*(\d+)/)
+    ?? normalizedText.match(/^so\s*(\d+)\b/);
+  if (!match) return null;
+  const value = Number(match[1]);
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function appNameCandidates(app: Record<string, unknown>): string[] {
+  const summary = asRecord(app.summary) ?? {};
+  return [
+    String(app.label ?? ""),
+    String(summary.appname ?? ""),
+    String(summary.app_name ?? ""),
+    String(summary.appcode ?? "")
+  ].filter(Boolean);
+}
+
+function scoreMentionedName(normalizedText: string, normalizedName: string): number {
+  if (!normalizedName) return 0;
+  if (normalizedText.includes(normalizedName)) return 1;
+  const textCompact = normalizedText.replace(/[^a-z0-9]+/g, "");
+  const nameCompact = normalizedName.replace(/[^a-z0-9]+/g, "");
+  if (nameCompact && textCompact.includes(nameCompact)) return 1;
+
+  const stopWords = new Set(["app", "ung", "dung", "quan", "ly"]);
+  const nameTokens = normalizedName
+    .split(/\s+/)
+    .map(token => token.replace(/[^a-z0-9]+/g, ""))
+    .filter(token => token.length >= 3 && !stopWords.has(token));
+  if (!nameTokens.length) return 0;
+  const matched = nameTokens.filter(token => normalizedText.includes(token)).length;
+  return matched / nameTokens.length;
+}
+
+function formatAppCountAnswer(
+  app: Record<string, unknown>,
+  countKey: "tables" | "windows" | "menus",
+  unit: string,
+  normalizedText: string
+): string {
+  const counts = asRecord(app.counts) ?? {};
+  const count = Number(counts[countKey] ?? 0);
+  const alternatives = [...normalizedText.matchAll(/\b\d+\b/g)]
+    .map(match => Number(match[0]))
+    .filter(value => Number.isFinite(value) && value !== count);
+  const correction = alternatives.length
+    ? `, không phải ${alternatives[0]}`
+    : "";
+  return `${formatAppNodeName(app)} hiện có ${count} ${unit}${correction}.`;
+}
+
+function isStrongSearchMatch(match: Record<string, unknown> | undefined): boolean {
+  if (!match) return false;
+  const score = Number(match.score ?? 0);
+  return Number.isFinite(score) && score >= 70;
 }
 
 function formatAppNodeLabel(node: Record<string, unknown>): string {
@@ -573,6 +714,20 @@ function formatTableSummary(table: Record<string, unknown>): string {
     table.tableid !== undefined ? `tableid=${String(table.tableid)}` : "",
     table.columns_count !== undefined ? `${String(table.columns_count)} cột` : "",
     table.serviceid !== undefined ? `serviceid=${String(table.serviceid)}` : ""
+  ].filter(Boolean).join(", ");
+  return `${String(name)}${details ? ` (${details})` : ""}`;
+}
+
+function formatColumnSummary(column: Record<string, unknown>): string {
+  const name = column.columnname ?? column.alias ?? column.columnid ?? "column";
+  const details = [
+    column.columnid !== undefined ? `columnid=${String(column.columnid)}` : "",
+    column.datatype !== undefined ? `datatype=${String(column.datatype)}` : "",
+    column.columntype !== undefined && column.columntype !== column.datatype ? `columntype=${String(column.columntype)}` : "",
+    column.length !== undefined ? `length=${String(column.length)}` : "",
+    column.domainid !== undefined ? `domainid=${String(column.domainid)}` : "",
+    column.linktableid !== undefined ? `lookup tableid=${String(column.linktableid)}` : "",
+    column.linkcolumn !== undefined ? `lookup column=${String(column.linkcolumn)}` : ""
   ].filter(Boolean).join(", ");
   return `${String(name)}${details ? ` (${details})` : ""}`;
 }
@@ -790,7 +945,10 @@ function shouldContinueAfterToolResult(toolName: string, toolResult: string, use
 
   try {
     const data = JSON.parse(toolResult) as Record<string, unknown>;
-    return String(data.mode ?? "") === "search" && Number(data.matches_count ?? 0) === 1;
+    if (String(data.mode ?? "") !== "search") return false;
+    if (Number(data.matches_count ?? 0) === 1) return true;
+    const matches = recordArray(data.matches);
+    return isStrongSearchMatch(matches[0]);
   } catch {
     return false;
   }
@@ -817,6 +975,8 @@ function normalizeVietnameseText(value: string): string {
   return value
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
+    .replace(/đ/g, "d")
+    .replace(/Đ/g, "d")
     .toLowerCase()
     .trim();
 }
