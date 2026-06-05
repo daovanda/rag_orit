@@ -17,7 +17,7 @@ export const TOOLS = [
   {
     name: "rag_search",
     description:
-      "Tim trong Vector DB/KV docs cac tai lieu Zilcode, App Builder guide, API contract, domain model, window/tab/field config va playbook tao/sua app.",
+      "Tìm trong Vector DB/KV docs các tài liệu Zilcode, App Builder guide, API contract, domain model, window/tab/field config và playbook tạo/sửa app.",
     parameters: {
       type: "object",
       properties: {
@@ -177,7 +177,7 @@ export const TOOLS = [
         },
         operations: {
           type: "array",
-          description: "Danh sach operation. Moi operation co op/action va record/id_value/where. Co the dung reference nhu $create_app_1.appid de noi output buoc truoc.",
+          description: "Danh sách operation. Mỗi operation có op/action và record/id_value/where. Có thể dùng reference như $create_app_1.appid để nối output bước trước.",
           items: {
             type: "object",
             additionalProperties: true

@@ -171,11 +171,13 @@ function buildGraphFromBlueprint(blueprint: Record<string, unknown>): GraphConte
   const serviceById = new Map<string, string>();
   const columnById = new Map<string, string>();
   const columnByTableAndName = new Map<string, string>();
+  const columnRecordByNodeId = new Map<string, Record<string, unknown>>();
   const windowById = new Map<string, string>();
   const tabById = new Map<string, string>();
   const menuById = new Map<string, string>();
   const domainById = new Map<string, string>();
   const pendingTabParents: Array<{ child: string; parenttabid: unknown }> = [];
+  const pendingColumnLinks: Array<{ columnNodeId: string; domainid?: unknown; linktableid?: unknown; linkcolumn?: unknown }> = [];
 
   const addNode = (node: AppBuilderNode, source?: SourceRecord): void => {
     if (!nodes.has(node.id)) nodes.set(node.id, node);
@@ -308,15 +310,23 @@ function buildGraphFromBlueprint(blueprint: Record<string, unknown>): GraphConte
           label: labelOf(column, ["columnname", "name", "description"], columnNodeId),
           summary: compactRecord(column, [
             "columnid", "columnname", "tablename", "tableid", "columntype", "datatype",
-            "length", "isprimarykey", "isrequire", "isreadonly", "seqno", "description"
+            "length", "isprimarykey", "isrequire", "isreadonly", "domainid", "linktableid",
+            "linkcolumn", "mapcolumn", "seqno", "description"
           ]),
           has_detail: true
         }, { type: "column", record: column, parent: table });
         addEdge({ from: tableNodeId, to: columnNodeId, type: "table_has_column" });
+        pendingColumnLinks.push({
+          columnNodeId,
+          domainid: ci(column, "domainid"),
+          linktableid: ci(column, "linktableid"),
+          linkcolumn: ci(column, "linkcolumn") ?? ci(column, "mapcolumn")
+        });
 
         const columnId = stringValue(ci(column, "columnid"));
         if (columnId) columnById.set(columnId, columnNodeId);
         if (columnName) columnByTableAndName.set(`${tableNodeId}:${normalizeKey(columnName)}`, columnNodeId);
+        columnRecordByNodeId.set(columnNodeId, column);
       }
     }
   }
@@ -362,6 +372,25 @@ function buildGraphFromBlueprint(blueprint: Record<string, unknown>): GraphConte
     }
   }
 
+  for (const pending of pendingColumnLinks) {
+    const domainid = stringValue(pending.domainid);
+    const domainNodeId = domainid ? domainById.get(domainid) : undefined;
+    if (domainNodeId) {
+      addEdge({ from: pending.columnNodeId, to: domainNodeId, type: "column_uses_domain" });
+    }
+
+    const linkTableId = stringValue(pending.linktableid);
+    const linkTableNodeId = linkTableId ? tableById.get(linkTableId) : undefined;
+    if (linkTableNodeId) {
+      addEdge({ from: pending.columnNodeId, to: linkTableNodeId, type: "column_links_table" });
+      const linkColumn = stringValue(pending.linkcolumn);
+      const linkColumnNodeId = linkColumn ? columnByTableAndName.get(`${linkTableNodeId}:${normalizeKey(linkColumn)}`) : undefined;
+      if (linkColumnNodeId) {
+        addEdge({ from: pending.columnNodeId, to: linkColumnNodeId, type: "column_links_column" });
+      }
+    }
+  }
+
   for (const app of apps) {
     const appid = stringValue(ci(app, "appid") ?? fallbackId(app, "app"));
     const appNodeId = `app:${idPart(appid)}`;
@@ -370,6 +399,14 @@ function buildGraphFromBlueprint(blueprint: Record<string, unknown>): GraphConte
       const windowid = stringValue(ci(windowRecord, "windowid") ?? fallbackId(windowRecord, "window"));
       const windowNodeId = `window:${idPart(windowid)}`;
       const tabs = toRecords(windowRecord.tabs);
+      const windowFieldsByTab = new Map<string, Record<string, unknown>[]>();
+      for (const field of toRecords(windowRecord.fields)) {
+        const fieldTabId = stringValue(ci(field, "tabid"));
+        if (!fieldTabId) continue;
+        const bucket = windowFieldsByTab.get(fieldTabId) ?? [];
+        bucket.push(field);
+        windowFieldsByTab.set(fieldTabId, bucket);
+      }
 
       addNode({
         id: windowNodeId,
@@ -387,7 +424,11 @@ function buildGraphFromBlueprint(blueprint: Record<string, unknown>): GraphConte
       for (const tab of tabs) {
         const tabid = stringValue(ci(tab, "tabid") ?? fallbackId(tab, "tab"));
         const tabNodeId = `tab:${idPart(windowid)}:${idPart(tabid)}`;
-        const fields = toRecords(tab.fields);
+        const fields = mergeRecordsById(
+          toRecords(tab.fields),
+          windowFieldsByTab.get(tabid) ?? [],
+          ["fieldid", "columnid", "fieldname", "columnname"]
+        );
         const tableNodeId = resolveTableNode(tab, appid, tableById, tableByAppAndName);
 
         addNode({
@@ -432,6 +473,7 @@ function buildGraphFromBlueprint(blueprint: Record<string, unknown>): GraphConte
           const fieldid = stringValue(ci(field, "fieldid") ?? ci(field, "fieldname") ?? ci(field, "columnname") ?? fallbackId(field, "field"));
           const fieldNodeId = `field:${idPart(windowid)}:${idPart(tabid)}:${idPart(fieldid)}`;
           const fieldColumnNodeId = resolveColumnNode(field, tableNodeId, columnById, columnByTableAndName);
+          const mappedColumn = fieldColumnNodeId ? columnRecordByNodeId.get(fieldColumnNodeId) : undefined;
 
           addNode({
             id: fieldNodeId,
@@ -440,7 +482,8 @@ function buildGraphFromBlueprint(blueprint: Record<string, unknown>): GraphConte
             summary: compactRecord(field, [
               "fieldid", "fieldname", "columnname", "tableid", "tabid", "caption", "label",
               "datatype", "controltype", "fieldtype", "domainid", "defaultvalue", "isrequire",
-              "isreadonly", "isvisible", "isprimarykey", "seqno"
+              "linktableid", "linkcolumn", "mapcolumn", "whereclause", "isreadonly", "isvisible",
+              "isprimarykey", "seqno"
             ]),
             has_detail: true
           }, { type: "field", record: field, parent: tab });
@@ -450,16 +493,25 @@ function buildGraphFromBlueprint(blueprint: Record<string, unknown>): GraphConte
             addEdge({ from: fieldNodeId, to: fieldColumnNodeId, type: "field_maps_column" });
           }
 
-          const domainid = stringValue(ci(field, "domainid"));
+          const domainid = stringValue(ci(field, "domainid") ?? (mappedColumn ? ci(mappedColumn, "domainid") : undefined));
           const domainNodeId = domainid ? domainById.get(domainid) : undefined;
           if (domainNodeId) {
             addEdge({ from: fieldNodeId, to: domainNodeId, type: "field_uses_domain" });
           }
 
-          const linkTableId = stringValue(ci(field, "linktableid"));
+          const linkTableId = stringValue(ci(field, "linktableid") ?? (mappedColumn ? ci(mappedColumn, "linktableid") : undefined));
           const linkTableNodeId = linkTableId ? tableById.get(linkTableId) : undefined;
           if (linkTableNodeId) {
             addEdge({ from: fieldNodeId, to: linkTableNodeId, type: "field_links_table" });
+            const linkColumn = stringValue(
+              ci(field, "linkcolumn")
+                ?? ci(field, "mapcolumn")
+                ?? (mappedColumn ? ci(mappedColumn, "linkcolumn") ?? ci(mappedColumn, "mapcolumn") : undefined)
+            );
+            const linkColumnNodeId = linkColumn ? columnByTableAndName.get(`${linkTableNodeId}:${normalizeKey(linkColumn)}`) : undefined;
+            if (linkColumnNodeId) {
+              addEdge({ from: fieldNodeId, to: linkColumnNodeId, type: "field_links_column" });
+            }
           }
         }
       }
@@ -781,21 +833,45 @@ function buildCreationSchema(args: Record<string, unknown>): Record<string, unkn
         "tab -> table",
         "tab -> field",
         "field -> column",
+        "field -> domain when domainid is used",
+        "field -> linked table/column when lookup is used",
         "app -> menu",
-        "menu -> window"
+        "menu -> window",
+        "app -> roleapp <- role",
+        "role -> rolemenu -> menu",
+        "role -> access -> table"
       ],
       required_information: {
         app: ["appname", "seqno", "apptype", "optional description"],
         service: ["serviceid của service hiện có hoặc create service trước"],
         appservice: ["appid", "serviceid"],
         table: ["serviceid", "tablename", "alias", "tabletype"],
-        column: ["tableid or table reference", "columnname", "datatype/columntype", "primary/display/search flags when needed"],
+        column: ["tableid or table reference", "columnname", "datatype/columntype", "domainid/linktableid/linkcolumn when needed", "primary/display/search flags when needed"],
         window: ["appid", "windowname"],
         tab: ["windowid", "tableid", "tabname", "seqno"],
-        field: ["tabid", "columnid or columnname", "fieldname/label", "seqno", "controltype/datatype when needed"],
+        field: ["tabid", "columnid or columnname", "fieldname/label", "seqno", "domainid/linktableid/linkcolumn for select/lookup fields when needed", "controltype/datatype when needed"],
         menu: ["appid", "menuname", "linkwindowid", "seqno"],
         role_access: ["roleapp for app access", "rolemenu for menu access", "access for table permissions when needed"],
         cache: ["delete n_cache rows for changed app/window after UI metadata changes"]
+      },
+      domain_lookup: {
+        domain: ["create_domain or resolve existing domainid before using it on field/column"],
+        field_domain_edge: "NField.domainid -> NDomain.domainid",
+        field_lookup_edge: "NField.linktableid/linkcolumn -> NTable/NColumn",
+        column_lookup_edge: "NColumn.linktableid/linkcolumn -> NTable/NColumn",
+        tab_relation_edge: "NTab.relatetableid + relatechildfield/relateparentfield -> related table"
+      },
+      role_access: {
+        roleapp: ["roleid", "appid", "siteid"],
+        rolemenu: ["roleid", "menuid", "siteid", "optional whereclause"],
+        access: ["roleid", "tableid", "siteid", "noinsert/noupdate/nodelete/noselect/noexport flags"],
+        edges: ["role -> roleapp -> app", "role -> rolemenu -> menu", "role -> access -> table"]
+      },
+      service_binding: {
+        service: ["serviceid", "servicename", "url", "servicetype"],
+        appservice: ["appid", "serviceid"],
+        table: ["serviceid"],
+        edges: ["app -> appservice -> service", "service -> table"]
       }
     },
     edit_existing_branch: {
@@ -808,7 +884,7 @@ function buildCreationSchema(args: Record<string, unknown>): Record<string, unkn
     },
     proposed_plan_format: {
       intent: "create_app | add_table | add_window | add_tab | add_field | update_node",
-      target_node_ids: ["node id neu sua node hien co"],
+      target_node_ids: ["node id nếu sửa node hiện có"],
       operations: [
         {
           id: "create_app_1",
@@ -829,7 +905,7 @@ function buildCreationSchema(args: Record<string, unknown>): Record<string, unkn
           record: { tableid: "$create_table_1.tableid", columnname: "...", datatype: "text" }
         }
       ],
-      reference_rule: "Co the dung $operation_id.field de noi output cua buoc truoc vao buoc sau, vi du $create_app_1.appid.",
+      reference_rule: "Có thể dùng $operation_id.field để nối output của bước trước vào bước sau, ví dụ $create_app_1.appid.",
       delete_rule: "Xóa node chỉ khi user nói rõ. Dùng delete_app/delete_window cascade khi xóa app/window; cascade phải dọn field, tab, menu, cache và role/menu access trước.",
       validation: ["duplicate check", "required ids", "edge completeness", "payload fields filtered by actual App Builder metadata"]
     }
@@ -1105,6 +1181,45 @@ function graphContextCacheKey(session: ZilcodeSession, args: Record<string, unkn
     getNumberArg(args, "max_records_per_table", 500, 1, 5000),
     getNumberArg(args, "max_windows_per_app", 50, 1, 300)
   ].join("|");
+}
+
+function mergeRecordsById(
+  primary: Record<string, unknown>[],
+  secondary: Record<string, unknown>[],
+  keys: string[]
+): Record<string, unknown>[] {
+  const merged: Record<string, unknown>[] = [];
+  const indexByKey = new Map<string, number>();
+  const remember = (record: Record<string, unknown>, index: number): void => {
+    for (const key of keys) {
+      const value = stringValue(ci(record, key));
+      if (value) indexByKey.set(`${key}:${normalizeKey(value)}`, index);
+    }
+  };
+
+  for (const record of primary) {
+    merged.push({ ...record });
+    remember(record, merged.length - 1);
+  }
+
+  for (const record of secondary) {
+    let existingIndex: number | undefined;
+    for (const key of keys) {
+      const value = stringValue(ci(record, key));
+      if (!value) continue;
+      existingIndex = indexByKey.get(`${key}:${normalizeKey(value)}`);
+      if (existingIndex !== undefined) break;
+    }
+    if (existingIndex === undefined) {
+      merged.push({ ...record });
+      remember(record, merged.length - 1);
+    } else {
+      merged[existingIndex] = { ...merged[existingIndex], ...record };
+      remember(merged[existingIndex], existingIndex);
+    }
+  }
+
+  return merged;
 }
 
 function resolveTableNode(

@@ -317,17 +317,34 @@ function createDeterministicChangeAnswer(toolResults: ToolResultRecord[]): strin
       const results = Array.isArray(data.results)
         ? data.results.filter((result): result is Record<string, unknown> => Boolean(result) && typeof result === "object")
         : [];
-      const failed = results.find(result => result.ok === false);
+      const failedOperation = data.failed_operation && typeof data.failed_operation === "object" && !Array.isArray(data.failed_operation)
+        ? data.failed_operation as Record<string, unknown>
+        : undefined;
+      const failed = failedOperation ?? results.find(result => result.ok === false);
+      const appliedOperations = Array.isArray(data.applied_operations)
+        ? data.applied_operations.filter((operation): operation is Record<string, unknown> => Boolean(operation) && typeof operation === "object")
+        : [];
+      const skippedOperations = Array.isArray(data.skipped_operations)
+        ? data.skipped_operations.filter((operation): operation is Record<string, unknown> => Boolean(operation) && typeof operation === "object")
+        : [];
 
       return [
         "Kế hoạch chưa được thực hiện thành công.",
         `Đã ghi được: ${String(data.applied_count ?? 0)} bước.`,
         `Số bước lỗi: ${String(data.failed_count ?? 0)}.`,
+        `Số bước bị bỏ qua: ${String(data.skipped_count ?? skippedOperations.length)}.`,
         failed ? `Dừng tại: ${String(failed.operation_id ?? "")}.` : "",
         "",
         failed ? `Lỗi chính: ${String(failed.error ?? data.error ?? "Không rõ lỗi.")}` : `Lỗi chính: ${String(data.error ?? "Không rõ lỗi.")}`,
+        appliedOperations.length ? "" : "",
+        appliedOperations.length ? "Các bước đã ghi cần kiểm tra/cleanup nếu sửa plan:" : "",
+        ...appliedOperations.slice(0, 8).map(operation => `- ${String(operation.label ?? operation.operation_id ?? "")}`),
+        skippedOperations.length ? "" : "",
+        skippedOperations.length ? "Các bước chưa chạy:" : "",
+        ...skippedOperations.slice(0, 8).map(operation => `- ${String(operation.label ?? operation.operation_id ?? "")}`),
         "",
-        "Tôi chưa coi thay đổi này là hoàn tất. Cần sửa lại plan theo lỗi trên rồi chuẩn bị kế hoạch mới."
+        data.pending_plan_deleted === true ? "Plan cũ đã được vô hiệu hóa để tránh apply lặp gây tạo trùng." : "",
+        "Tôi chưa coi thay đổi này là hoàn tất. Cần đọc lại graph, sửa plan theo lỗi trên rồi chuẩn bị kế hoạch mới."
       ].filter(Boolean).join("\n");
     }
   } catch {

@@ -68,7 +68,7 @@ const CREATE_REQUIRED_FIELDS: Record<string, string[]> = {
   columns: ["tableid", "columnname", "seqno", "siteid"],
   windows: ["appid", "windowname", "windowtype", "siteid"],
   tabs: ["windowid", "tableid", "tabname", "seqno", "siteid"],
-  fields: ["tabid", "columnid", "fieldname", "seqno", "siteid"],
+  fields: ["tabid", "columnid", "fieldname", "fieldtype", "seqno", "siteid"],
   menus: ["appid", "menuname", "seqno", "siteid", "menutype"],
   domains: ["domainname"],
   caches: ["appid", "siteid"],
@@ -77,17 +77,18 @@ const CREATE_REQUIRED_FIELDS: Record<string, string[]> = {
   accesses: ["roleid", "tableid", "siteid"]
 };
 
-const LEVEL3_COLLECTIONS = new Set(["windows", "tabs", "fields", "menus"]);
+const LEVEL3_COLLECTIONS = new Set(["applications", "tables", "columns", "windows", "tabs", "fields", "menus"]);
 
 const IMPLICIT_ALLOWED_FIELDS: Record<string, string[]> = {
   services: ["siteid"],
   appservices: ["siteid"],
   tables: ["siteid", "serviceid"],
-  columns: ["siteid"],
+  columns: ["siteid", "domainid", "linktableid", "linkcolumn", "mapcolumn"],
   windows: ["siteid"],
   tabs: ["siteid"],
   fields: ["siteid"],
   menus: ["siteid", "menutype"],
+  domains: ["appid", "siteid", "domainjson", "domaintype"],
   caches: ["siteid"],
   roleapps: ["siteid"],
   rolemenus: ["siteid"],
@@ -258,10 +259,17 @@ async function applyChange(
   const results: Record<string, unknown>[] = [];
   const state: ApplyState = { refs: {} };
   let failed = false;
+  let firstFailedOperation: Record<string, unknown> | undefined;
 
   for (const operation of operationsToApply) {
     if (failed) {
-      results.push({ operation_id: operation.id, skipped: true });
+      results.push({
+        operation_id: operation.id,
+        label: operation.label,
+        skipped: true,
+        reason: "previous_operation_failed",
+        blocked_by: firstFailedOperation?.operation_id
+      });
       continue;
     }
 
@@ -278,12 +286,15 @@ async function applyChange(
       results.push({ operation_id: operation.id, ok: true, request, result, reference });
     } catch (error) {
       failed = true;
-      results.push({
+      const failure = {
         operation_id: operation.id,
+        label: operation.label,
         ok: false,
         request,
         error: truncateDebugText(error)
-      });
+      };
+      firstFailedOperation = failure;
+      results.push(failure);
     }
   }
 
@@ -303,24 +314,58 @@ async function applyChange(
     }
   }
 
-  if (!failed) {
+  let pendingPlanDeleted = false;
+  try {
     await env.CHUNKS.delete(`${PENDING_CHANGE_PREFIX}${planId}`);
+    pendingPlanDeleted = true;
+  } catch {
+    pendingPlanDeleted = false;
   }
 
   if (results.some(result => result.ok === true)) {
     invalidateAppBuilderGraphCache(session);
   }
 
+  const appliedOperations = results
+    .filter(result => result.ok === true)
+    .map(result => ({
+      operation_id: result.operation_id,
+      label: result.label,
+      reference: result.reference
+    }));
+  const skippedOperations = results
+    .filter(result => result.skipped === true)
+    .map(result => ({
+      operation_id: result.operation_id,
+      label: result.label,
+      reason: result.reason,
+      blocked_by: result.blocked_by
+    }));
+
   return {
     mode: "apply_change",
     ok: !failed,
     status: failed ? "partial_success" : "success",
     plan_id: planId,
+    operation_count: operationsToApply.length,
     applied_count: results.filter(result => result.ok).length,
     failed_count: results.filter(result => result.ok === false).length,
+    skipped_count: results.filter(result => result.skipped === true).length,
+    applied_operations: appliedOperations,
+    failed_operation: firstFailedOperation
+      ? {
+        operation_id: firstFailedOperation.operation_id,
+        label: firstFailedOperation.label,
+        error: firstFailedOperation.error,
+        request: firstFailedOperation.request
+      }
+      : undefined,
+    skipped_operations: skippedOperations,
+    pending_plan_deleted: pendingPlanDeleted,
+    can_reapply_same_plan: false,
     results,
     next_step: failed
-      ? "Sua lai plan dua tren loi va prepare_change lai. Cac buoc sau loi da bi skip."
+      ? "Sửa lại plan dựa trên lỗi, đọc lại graph để xem các bước đã ghi, rồi gọi prepare_change mới. Không apply lại plan cũ."
       : "Gọi app_builder_graph_overview/search/detail để verify cấu hình sau khi ghi."
   };
 }
@@ -1385,6 +1430,21 @@ function expandRawOperations(
       continue;
     }
 
+    if (action === "delete" && target === "tab" && cascade) {
+      expanded.push(...buildDeleteTabCascadeOperations(context, rawOperation, warnings));
+      continue;
+    }
+
+    if (action === "delete" && target === "column" && cascade) {
+      expanded.push(...buildDeleteColumnCascadeOperations(context, rawOperation, warnings));
+      continue;
+    }
+
+    if (action === "delete" && target === "table" && cascade) {
+      expanded.push(...buildDeleteTableCascadeOperations(context, rawOperation, warnings));
+      continue;
+    }
+
     if (action === "delete" && target === "app") {
       expanded.push(...buildDeleteAppCascadeOperations(context, rawOperation, warnings));
       continue;
@@ -1445,7 +1505,7 @@ function buildCreateTabWithFieldsOperations(
   ];
 
   if (isReferenceValue(tableid)) {
-    warnings.push(`${tabOperationId}: tableid la reference nen chua the tu bung field theo column hien co.`);
+    warnings.push(`${tabOperationId}: tableid là reference nên chưa thể tự bung field theo column hiện có.`);
     return operations;
   }
 
@@ -1454,7 +1514,7 @@ function buildCreateTabWithFieldsOperations(
     .sort((left, right) => Number(ci(left, "seqno") ?? 0) - Number(ci(right, "seqno") ?? 0));
 
   if (!columns.length) {
-    warnings.push(`${tabOperationId}: table ${String(tableid)} chua co column nao de tu tao field.`);
+    warnings.push(`${tabOperationId}: table ${String(tableid)} chưa có column nào để tự tạo field.`);
     return operations;
   }
 
@@ -1574,6 +1634,188 @@ function buildDeleteWindowCascadeOperations(
   }
 
   return operations;
+}
+
+function buildDeleteTabCascadeOperations(
+  context: WriteContext,
+  rawOperation: Record<string, unknown>,
+  warnings: string[]
+): Record<string, unknown>[] {
+  const tabId = getDeleteIdValue(rawOperation, "tabid");
+  if (tabId === undefined || tabId === null || tabId === "") {
+    throw new Error("delete_tab cascade thiếu tabid/id_value.");
+  }
+
+  const tabIdText = String(tabId);
+  const fields = (context.recordsByCollection.fields ?? [])
+    .filter(field => sameId(ci(field, "tabid"), tabIdText));
+
+  warnings.push(
+    `delete_tab cascade tabid=${tabIdText}: sẽ xóa ${fields.length} field liên kết trước khi xóa tab. Không xóa table/column/dữ liệu thật.`
+  );
+
+  const operations: Record<string, unknown>[] = [];
+  for (const field of fields) {
+    const fieldId = ci(field, "fieldid");
+    if (fieldId === undefined || fieldId === null || fieldId === "") continue;
+    operations.push({
+      id: `delete_tab_${tabIdText}_field_${String(fieldId)}`,
+      op: "delete_field",
+      id_value: fieldId
+    });
+  }
+
+  operations.push({
+    id: `delete_tab_${tabIdText}`,
+    op: "delete_tab",
+    id_value: tabId
+  });
+
+  return operations;
+}
+
+function buildDeleteColumnCascadeOperations(
+  context: WriteContext,
+  rawOperation: Record<string, unknown>,
+  warnings: string[]
+): Record<string, unknown>[] {
+  const columnId = getDeleteIdValue(rawOperation, "columnid");
+  if (columnId === undefined || columnId === null || columnId === "") {
+    throw new Error("delete_column cascade thieu columnid/id_value.");
+  }
+
+  const columnIdText = String(columnId);
+  const fields = (context.recordsByCollection.fields ?? [])
+    .filter(field => sameId(ci(field, "columnid"), columnIdText));
+
+  warnings.push(
+    `delete_column cascade columnid=${columnIdText}: se xoa ${fields.length} field dang dung column truoc khi xoa column. Khong xoa table/du lieu that.`
+  );
+
+  const operations: Record<string, unknown>[] = [];
+  if (isColumnAllowed(context, "fields", "columnid")) {
+    operations.push({
+      id: `delete_column_${columnIdText}_fields`,
+      op: "delete_field",
+      where: buildIdWhere("columnid", columnId)
+    });
+  }
+
+  operations.push({
+    id: `delete_column_${columnIdText}`,
+    op: "delete_column",
+    id_value: columnId
+  });
+
+  return operations;
+}
+
+function buildDeleteTableCascadeOperations(
+  context: WriteContext,
+  rawOperation: Record<string, unknown>,
+  warnings: string[]
+): Record<string, unknown>[] {
+  const tableId = getDeleteIdValue(rawOperation, "tableid");
+  if (tableId === undefined || tableId === null || tableId === "") {
+    throw new Error("delete_table cascade thieu tableid/id_value.");
+  }
+
+  const tableIdText = String(tableId);
+  const tableWhere = buildIdWhere("tableid", tableId);
+  const tabClauses = buildAllowedIdClauses(context, "tabs", ["tableid", "linktableid", "relatetableid"], tableId);
+  const tabWhere = tabClauses.join(" OR ");
+  const tabSubquery = tabWhere ? `SELECT tabid FROM n_tab WHERE ${tabWhere}` : "";
+  const columnSubquery = `SELECT columnid FROM n_column WHERE ${tableWhere}`;
+
+  const columns = (context.recordsByCollection.columns ?? [])
+    .filter(column => sameId(ci(column, "tableid"), tableIdText));
+  const columnIds = new Set(columns.map(column => String(ci(column, "columnid") ?? "")).filter(Boolean));
+  const tabs = (context.recordsByCollection.tabs ?? [])
+    .filter(tab => tabClauses.some(clause => {
+      const [columnName] = clause.split("=");
+      return sameId(ci(tab, columnName.trim()), tableIdText);
+    }));
+  const tabIds = new Set(tabs.map(tab => String(ci(tab, "tabid") ?? "")).filter(Boolean));
+  const fields = (context.recordsByCollection.fields ?? [])
+    .filter(field =>
+      columnIds.has(String(ci(field, "columnid") ?? ""))
+      || tabIds.has(String(ci(field, "tabid") ?? ""))
+    );
+  const accesses = (context.recordsByCollection.accesses ?? [])
+    .filter(access => sameId(ci(access, "tableid"), tableIdText));
+  const archives = (context.recordsByCollection.archives ?? [])
+    .filter(archive => sameId(ci(archive, "tableid"), tableIdText));
+
+  warnings.push(
+    `delete_table cascade tableid=${tableIdText}: se xoa metadata lien quan (${fields.length} field, ${tabs.length} tab, ${accesses.length} access, ${archives.length} archive, ${columns.length} column) truoc khi xoa table. Khong xoa du lieu vat ly.`
+  );
+
+  const operations: Record<string, unknown>[] = [];
+  const fieldClauses: string[] = [];
+  if (isColumnAllowed(context, "fields", "tabid") && tabSubquery) {
+    fieldClauses.push(`tabid IN (${tabSubquery})`);
+  }
+  if (isColumnAllowed(context, "fields", "columnid")) {
+    fieldClauses.push(`columnid IN (${columnSubquery})`);
+  }
+  if (fieldClauses.length) {
+    operations.push({
+      id: `delete_table_${tableIdText}_fields`,
+      op: "delete_field",
+      where: fieldClauses.join(" OR ")
+    });
+  }
+
+  if (tabWhere) {
+    operations.push({
+      id: `delete_table_${tableIdText}_tabs`,
+      op: "delete_tab",
+      where: tabWhere
+    });
+  }
+
+  if (context.collections.accesses && isColumnAllowed(context, "accesses", "tableid")) {
+    operations.push({
+      id: `delete_table_${tableIdText}_accesses`,
+      op: "delete_access",
+      where: tableWhere
+    });
+  }
+
+  if (context.collections.archives && isColumnAllowed(context, "archives", "tableid")) {
+    operations.push({
+      id: `delete_table_${tableIdText}_archives`,
+      op: "delete_archive",
+      where: tableWhere
+    });
+  }
+
+  if (isColumnAllowed(context, "columns", "tableid")) {
+    operations.push({
+      id: `delete_table_${tableIdText}_columns`,
+      op: "delete_column",
+      where: tableWhere
+    });
+  }
+
+  operations.push({
+    id: `delete_table_${tableIdText}`,
+    op: "delete_table",
+    id_value: tableId
+  });
+
+  return operations;
+}
+
+function buildAllowedIdClauses(
+  context: WriteContext,
+  collection: string,
+  columns: string[],
+  idValue: unknown
+): string[] {
+  return columns
+    .filter(column => isColumnAllowed(context, collection, column))
+    .map(column => `${column}=${formatSqlValue(idValue)}`);
 }
 
 function buildDeleteAppCascadeOperations(
@@ -2043,8 +2285,48 @@ function getTarget(op: string, rawOperation: Record<string, unknown>): string {
 }
 
 function normalizeTarget(value: string): string {
-  const text = value.trim().toLowerCase();
-  if (text === "application") return "app";
+  const text = value.trim().toLowerCase().replace(/[\s-]+/g, "_");
+  const aliases: Record<string, string> = {
+    app: "app",
+    apps: "app",
+    application: "app",
+    applications: "app",
+    table: "table",
+    tables: "table",
+    column: "column",
+    columns: "column",
+    window: "window",
+    windows: "window",
+    tab: "tab",
+    tabs: "tab",
+    field: "field",
+    fields: "field",
+    menu: "menu",
+    menus: "menu",
+    domain: "domain",
+    domains: "domain",
+    service: "service",
+    services: "service",
+    appservice: "appservice",
+    appservices: "appservice",
+    app_service: "appservice",
+    app_services: "appservice",
+    cache: "cache",
+    caches: "cache",
+    roleapp: "roleapp",
+    roleapps: "roleapp",
+    role_app: "roleapp",
+    role_apps: "roleapp",
+    rolemenu: "rolemenu",
+    rolemenus: "rolemenu",
+    role_menu: "rolemenu",
+    role_menus: "rolemenu",
+    access: "access",
+    accesses: "access",
+    archive: "archive",
+    archives: "archive"
+  };
+  if (aliases[text]) return aliases[text];
   if (text.endsWith("s")) return text.slice(0, -1);
   return text;
 }
@@ -2203,13 +2485,23 @@ function materializeCreateRecord(
   if (collection === "fields") {
     resolveTabReference(context, record, warnings);
     resolveColumnReference(context, record, warnings);
+    const column = record.columnid ? findRecordById(context, "columns", record.columnid) : undefined;
     if (!record.fieldname && record.name) record.fieldname = record.name;
     if (!record.fieldname && record.columnname) record.fieldname = record.columnname;
     if (!record.fieldname && record.columnid) {
-      const column = findRecordById(context, "columns", record.columnid);
       const columnName = column ? ci(column, "columnname") : undefined;
       if (columnName) record.fieldname = columnName;
     }
+    applyDefaultIfAllowed(
+      context,
+      collection,
+      record,
+      "fieldtype",
+      record.columntype
+        ?? record.datatype
+        ?? (column ? ci(column, "columntype") ?? ci(column, "datatype") : undefined)
+        ?? "text"
+    );
     applyDefaultIfAllowed(
       context,
       collection,
@@ -2247,6 +2539,8 @@ function materializeCreateRecord(
     if (!record.domainname && record.name) record.domainname = record.name;
     if (!record.domainname) throw new Error("create_domain thiếu domainname.");
     if (record.values && !record.domainjson) record.domainjson = JSON.stringify(record.values);
+    applyDefaultIfAllowed(context, collection, record, "domainjson", "[]");
+    applyDefaultIfAllowed(context, collection, record, "domaintype", "list");
     applyDefaultIfAllowed(
       context,
       collection,
