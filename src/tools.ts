@@ -17,13 +17,13 @@ export const TOOLS = [
   {
     name: "rag_search",
     description:
-      "Tìm trong Vector DB/KV docs các tài liệu Zilcode, App Builder guide, API contract, domain model, window/tab/field config và playbook tạo/sửa app.",
+      "Tìm trong Vector DB/KV docs các tài liệu Zilcode, App Builder guide, API contract, domain model và playbook tạo/sửa app. Dùng khi cần quy tắc hoặc thông tin tài liệu ngoài graph hiện tại.",
     parameters: {
       type: "object",
       properties: {
         query: {
           type: "string",
-          description: "Cau truy van tai lieu. Nen giu thuat ngu Zilcode/App Builder quan trong."
+          description: "Câu truy vấn tài liệu. Giữ các thuật ngữ Zilcode/App Builder quan trọng."
         }
       },
       required: ["query"]
@@ -32,25 +32,25 @@ export const TOOLS = [
   {
     name: "app_builder_graph_overview",
     description:
-      "Đọc App Builder thật và trả skeleton graph toàn hệ thống: root, apps, services/appservices, tables, columns, windows, tabs, fields, menus, domains, caches, role/app/menu/table access và edges liên kết. Dùng đầu tiên khi hỏi về App Builder hoặc cần tạo/sửa cấu hình.",
+      "Trả tổng quan App Builder thật ở dạng skeleton graph: root, app, service/appservice, table, column, window, tab, field, menu, domain, cache, role/access và các cạnh liên kết. Dùng khi user hỏi toàn hệ thống, danh sách app, số lượng hoặc cần bản đồ ban đầu.",
     parameters: {
       type: "object",
       properties: {
         app_builder_appid: {
           type: "string",
-          description: "Optional appid cua App Builder, mac dinh 1."
+          description: "Optional appid của App Builder, mặc định 1."
         },
         max_nodes: {
           type: "string",
-          description: "So node skeleton toi da tra ve, mac dinh 250."
+          description: "Số node skeleton tối đa trả về, mặc định 250."
         },
         max_edges: {
           type: "string",
-          description: "So edge skeleton toi da tra ve, mac dinh 500."
+          description: "Số edge skeleton tối đa trả về, mặc định 500."
         },
         max_records_per_table: {
           type: "string",
-          description: "So record toi da doc tu moi bang App Builder metadata, mac dinh 500."
+          description: "Số record tối đa đọc từ mỗi bảng App Builder metadata, mặc định 500."
         }
       }
     }
@@ -58,25 +58,25 @@ export const TOOLS = [
   {
     name: "app_builder_graph_search",
     description:
-      "Tìm node trong App Builder graph theo tên/id/summary. Dùng để resolve appid, serviceid, tableid, windowid, tabid, fieldid, menuid, domainid, cacheid hoặc role/access node trước khi mở subgraph/detail.",
+      "Tìm node trong App Builder graph theo tên, id hoặc summary. Dùng để resolve appid/serviceid/tableid/windowid/tabid/fieldid/menuid/domainid/cacheid/role/access trước khi mở subgraph hoặc detail. Nếu user đã đưa node_id chính xác, có thể dùng subgraph/detail trực tiếp.",
     parameters: {
       type: "object",
       properties: {
         query: {
           type: "string",
-          description: "Ten/id can tim, vi du Order Management, n_table, Customer, window Role."
+          description: "Tên hoặc id cần tìm, ví dụ Order Management, n_table, Customer, window Role."
         },
         types: {
           type: "string",
-          description: "Optional danh sach type loc bang dau phay: app,table,column,window,tab,field,menu,domain."
+          description: "Optional danh sách type lọc bằng dấu phẩy: app,table,column,window,tab,field,menu,domain."
         },
         limit: {
           type: "string",
-          description: "So ket qua toi da, mac dinh 12."
+          description: "Số kết quả tối đa, mặc định 12."
         },
         max_records_per_table: {
           type: "string",
-          description: "So record toi da doc tu moi bang App Builder metadata, mac dinh 500."
+          description: "Số record tối đa đọc từ mỗi bảng App Builder metadata, mặc định 500."
         }
       },
       required: ["query"]
@@ -85,7 +85,7 @@ export const TOOLS = [
   {
     name: "app_builder_graph_subgraph",
     description:
-      "Mở vùng graph liên quan quanh một hoặc nhiều node_id. Dùng sau overview/search khi cần xem quan hệ lân cận của app/table/window/tab/field.",
+      "Mở vùng graph liên quan quanh một hoặc nhiều node_id. Dùng khi user hỏi đi sâu, phân tích, cấu trúc, luồng hoặc liên kết quanh app/table/window/tab/field. Tool cũng nhận query nếu chưa biết node_id.",
     parameters: {
       type: "object",
       properties: {
@@ -95,7 +95,7 @@ export const TOOLS = [
         },
         node_ids: {
           type: "string",
-          description: "Nhieu node id phan tach bang dau phay."
+          description: "Nhiều node id phân tách bằng dấu phẩy."
         },
         query: {
           type: "string",
@@ -103,15 +103,15 @@ export const TOOLS = [
         },
         depth: {
           type: "string",
-          description: "Do sau mo rong graph, mac dinh 1, toi da 5."
+          description: "Độ sâu mở rộng graph, mặc định 1, tối đa 5."
         },
         max_nodes: {
           type: "string",
-          description: "So node toi da trong subgraph, mac dinh 120."
+          description: "Số node tối đa trong subgraph, mặc định 120."
         },
         max_records_per_table: {
           type: "string",
-          description: "So record toi da doc tu moi bang App Builder metadata, mac dinh 500."
+          description: "Số record tối đa đọc từ mỗi bảng App Builder metadata, mặc định 500."
         }
       }
     }
@@ -119,13 +119,13 @@ export const TOOLS = [
   {
     name: "app_builder_node_detail",
     description:
-      "Lấy detail của một node cụ thể trong App Builder graph: app/table/column/window/tab/field/menu/domain. Dùng khi subgraph chưa đủ để trả lời hoặc cần lập plan tạo/sửa.",
+      "Lấy detail của một node cụ thể trong App Builder graph: app/table/column/window/tab/field/menu/domain. Dùng khi cần record chi tiết, columns/fields/neighbors hoặc khi subgraph chưa đủ để trả lời hoặc lập plan.",
     parameters: {
       type: "object",
       properties: {
         node_id: {
           type: "string",
-          description: "Node id can lay detail."
+          description: "Node id cần lấy detail."
         },
         query: {
           type: "string",
@@ -133,15 +133,15 @@ export const TOOLS = [
         },
         include_neighbors: {
           type: "string",
-          description: "true/false. Mac dinh true de tra inbound/outbound edges quanh node."
+          description: "true/false. Mặc định true để trả inbound/outbound edges quanh node."
         },
         include_fields: {
           type: "string",
-          description: "true/false. Mac dinh true khi detail window/tab/table."
+          description: "true/false. Mặc định true khi detail window/tab/table."
         },
         max_records_per_table: {
           type: "string",
-          description: "So record toi da doc tu moi bang App Builder metadata, mac dinh 500."
+          description: "Số record tối đa đọc từ mỗi bảng App Builder metadata, mặc định 500."
         }
       }
     }
@@ -149,7 +149,7 @@ export const TOOLS = [
   {
     name: "app_builder_creation_schema",
     description:
-      "Trả quy tắc tạo/sửa App Builder ở dạng planning schema: app -> appservice/service -> table -> column và app -> window -> tab -> field/menu/domain/cache/role access. Tool này không ghi dữ liệu.",
+      "Trả quy tắc tạo/sửa App Builder ở dạng planning schema: app -> service/appservice -> table -> column và app -> window -> tab -> field/menu/domain/cache/role access. Tool này không ghi dữ liệu.",
     parameters: {
       type: "object",
       properties: {
@@ -163,7 +163,7 @@ export const TOOLS = [
   {
     name: "app_builder_prepare_change",
     description:
-      "Chuẩn bị kế hoạch tạo/sửa/xóa App Builder để user xác nhận. Tool validate, lọc field không tồn tại theo metadata thật, resolve structured plan thành operations và lưu pending plan. Xóa app/window phải dùng cascade để dọn field/tab/menu/cache/role access trước. Chưa ghi dữ liệu.",
+      "Chuẩn bị kế hoạch tạo/sửa/xóa App Builder để user xác nhận. Tool validate, lọc field không tồn tại theo metadata thật, resolve structured plan thành operations và lưu pending plan. Xóa app/window nên dùng cascade để dọn field/tab/menu/cache/role access trước. Chưa ghi dữ liệu.",
     parameters: {
       type: "object",
       properties: {
@@ -185,7 +185,7 @@ export const TOOLS = [
         },
         max_records_per_table: {
           type: "string",
-          description: "So record toi da doc tu moi bang App Builder metadata, mac dinh 1000."
+          description: "Số record tối đa đọc từ mỗi bảng App Builder metadata, mặc định 1000."
         }
       },
       required: ["operations"]
@@ -194,13 +194,13 @@ export const TOOLS = [
   {
     name: "app_builder_apply_change",
     description:
-      "Sau khi user xác nhận rõ ràng, thực thi pending plan đã tạo bởi app_builder_prepare_change. Ghi vào Zilcode qua REST API và dừng ở bước lỗi đầu tiên.",
+      "Thực thi pending plan đã tạo bởi app_builder_prepare_change. Chỉ dùng sau khi user xác nhận rõ ràng và có plan_id hợp lệ. Ghi vào Zilcode qua REST API và dừng ở bước lỗi đầu tiên.",
     parameters: {
       type: "object",
       properties: {
         plan_id: {
           type: "string",
-          description: "Plan ID tu app_builder_prepare_change."
+          description: "Plan ID từ app_builder_prepare_change."
         }
       },
       required: ["plan_id"]

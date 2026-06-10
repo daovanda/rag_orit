@@ -354,556 +354,10 @@ function createDeterministicChangeAnswer(toolResults: ToolResultRecord[]): strin
   return null;
 }
 
-export function createDeterministicGraphAnswer(userMessage: string, toolResults: ToolResultRecord[]): string | null {
-  const last = [...toolResults].reverse().find(result =>
-    isAppBuilderGraphTool(result.name) && result.name !== "app_builder_creation_schema"
-  );
-  if (!last) return null;
-
-  try {
-    const data = JSON.parse(last.content) as Record<string, unknown>;
-    const mode = String(data.mode ?? "");
-    if (mode === "overview") return formatGraphOverviewAnswer(userMessage, data);
-    if (mode === "search") return formatGraphSearchAnswer(userMessage, data);
-    if (mode === "subgraph") return formatGraphSubgraphAnswer(userMessage, data);
-    if (mode === "detail") return formatGraphDetailAnswer(userMessage, data);
-  } catch {
-    return null;
-  }
-
-  return null;
-}
-
-function formatGraphOverviewAnswer(userMessage: string, data: Record<string, unknown>): string {
-  const apps = extractGraphApps(data);
-  const text = normalizeVietnameseText(userMessage);
-  const wantsList = /(liet ke|danh sach|nhung ung dung|cac ung dung|app nao|ung dung nao)/.test(text);
-  const mentionedApp = findMentionedAppNode(text, apps);
-
-  if (mentionedApp && /(window|cua so|man hinh)/.test(text)) {
-    return formatAppCountAnswer(mentionedApp, "windows", "window", text);
-  }
-
-  if (mentionedApp && /(bang|table)/.test(text)) {
-    return formatAppCountAnswer(mentionedApp, "tables", "bảng", text);
-  }
-
-  if (mentionedApp && /\bmenu\b/.test(text)) {
-    return formatAppCountAnswer(mentionedApp, "menus", "menu", text);
-  }
-
-  if (!wantsList && /(bao nhieu|so luong|count)/.test(text)) {
-    return `Hệ thống hiện có ${String(data.apps_count ?? apps.length)} ứng dụng.`;
-  }
-
-  return [
-    `Hệ thống hiện có ${String(data.apps_count ?? apps.length)} ứng dụng:`,
-    "",
-    ...apps.map((app, index) => `${index + 1}. ${formatAppNodeLabel(app)}`)
-  ].join("\n").trim();
-}
-
-function formatGraphSearchAnswer(userMessage: string, data: Record<string, unknown>): string {
-  const matches = recordArray(data.matches);
-  const text = normalizeVietnameseText(userMessage);
-  if (!matches.length) {
-    return "Tôi chưa tìm thấy node phù hợp trong App Builder graph. Hãy thử dùng tên hoặc id cụ thể hơn.";
-  }
-
-  const top = matches[0];
-  if (isStrongSearchMatch(top)) {
-    if (String(top.type ?? "") === "app" && /(window|cua so|man hinh)/.test(text)) {
-      return formatAppCountAnswer(top, "windows", "window", text);
-    }
-    if (String(top.type ?? "") === "app" && /(bang|table)/.test(text)) {
-      return formatAppCountAnswer(top, "tables", "bảng", text);
-    }
-    if (String(top.type ?? "") === "app" && /\bmenu\b/.test(text)) {
-      return formatAppCountAnswer(top, "menus", "menu", text);
-    }
-  }
-
-  if (matches.length === 1) {
-    const match = matches[0];
-    return [
-      "Tôi tìm thấy một kết quả phù hợp:",
-      `- ${formatNodeLabel(match)}`,
-      "",
-      "Nếu cần chi tiết, hãy hỏi rõ phần muốn xem như bảng, window, menu, tab hoặc field."
-    ].join("\n");
-  }
-
-  return [
-    "Tôi tìm thấy nhiều kết quả phù hợp, cần chọn đúng node trước khi đi sâu:",
-    "",
-    ...matches.slice(0, 10).map((match, index) => `${index + 1}. ${formatNodeLabel(match)}`)
-  ].join("\n");
-}
-
-function formatGraphSubgraphAnswer(userMessage: string, data: Record<string, unknown>): string {
-  const graph = asRecord(data.graph) ?? {};
-  const nodes = recordArray(graph.nodes);
-  const edges = recordArray(graph.edges);
-  const startNodeIds = new Set(toArrayValues(data.start_node_ids).map(item => String(item)));
-  const appNode = nodes.find(node => String(node.type ?? "") === "app");
-  const text = normalizeVietnameseText(userMessage);
-  const typeGroups = ["table", "window", "menu", "tab", "field", "service", "cache", "roleapp", "rolemenu", "access"]
-    .map(type => ({ type, nodes: nodes.filter(node => String(node.type ?? "") === type) }))
-    .filter(group => group.nodes.length);
-
-  if (/(quan he|lien ket|ket noi|dung bang|bang nao|window|cua so|man hinh|tab)/.test(text)
-    && /(bang|table|window|cua so|man hinh|tab)/.test(text)) {
-    const flowAnswer = formatWindowTableFlowAnswer(nodes, edges, appNode, {
-      startNodeIds,
-      includeFieldExamples: wantsDetailedFlowAnswer(text),
-      listOnly: wantsListOnlyAnswer(text)
-    });
-    if (flowAnswer) return flowAnswer;
-  }
-
-  if (appNode && /(bang|table|tables)/.test(text)) {
-    const tables = outgoingNodes(appNode, edges, nodes, "app_has_table", "table");
-    return [
-      `${formatAppNodeLabel(appNode)} có ${tables.length} bảng:`,
-      "",
-      ...tables.slice(0, 20).map((table, index) => `${index + 1}. ${formatNodeLabel(table)}`)
-    ].join("\n").trim();
-  }
-
-  return [
-    appNode ? `Tóm tắt vùng liên quan của ${formatAppNodeLabel(appNode)}:` : "Tóm tắt vùng graph liên quan:",
-    "",
-    ...typeGroups.map(group => `- ${labelNodeType(group.type)}: ${group.nodes.length}`),
-    "",
-    ...typeGroups.slice(0, 4).flatMap(group => [
-      `${labelNodeType(group.type)} tiêu biểu:`,
-      ...group.nodes.slice(0, 8).map(node => `- ${formatNodeLabel(node)}`)
-    ])
-  ].join("\n").trim();
-}
-
-function formatGraphDetailAnswer(userMessage: string, data: Record<string, unknown>): string {
-  const error = getStringArg(data, "error");
-  const candidates = recordArray(data.candidates);
-  if (error) {
-    if (candidates.length) {
-      return [
-        "Node được yêu cầu không khớp trực tiếp, nhưng tôi tìm thấy các node gần đúng:",
-        "",
-        ...candidates.slice(0, 8).map((candidate, index) => `${index + 1}. ${formatNodeLabel(candidate)}`)
-      ].join("\n");
-    }
-    return error;
-  }
-
-  const node = asRecord(data.node) ?? {};
-  const detail = asRecord(data.detail) ?? {};
-  if (String(node.type ?? "") === "app") return formatAppDetailAnswer(userMessage, node, detail);
-  if (String(node.type ?? "") === "table") return formatTableDetailAnswer(node, detail, asRecord(data.neighbors));
-
-  return [
-    `Chi tiết ${formatNodeLabel(node)}:`,
-    "",
-    ...formatRecordLines(asRecord(detail.record) ?? detail).slice(0, 20)
-  ].join("\n").trim();
-}
-
-function formatAppDetailAnswer(userMessage: string, node: Record<string, unknown>, detail: Record<string, unknown>): string {
-  const text = normalizeVietnameseText(userMessage);
-  const counts = asRecord(detail.counts) ?? {};
-  const tables = recordArray(detail.tables);
-  const windows = recordArray(detail.windows);
-  const menus = recordArray(detail.menus);
-  const services = recordArray(detail.services);
-  const caches = recordArray(detail.caches);
-  const roleapps = recordArray(detail.roleapps);
-  const accesses = recordArray(detail.accesses);
-
-  if (/(bang|table|tables)/.test(text)) {
-    return [
-      `Ứng dụng ${formatAppNodeName(node)} có ${tables.length} bảng:`,
-      "",
-      ...tables.slice(0, 30).map((table, index) => `${index + 1}. ${formatTableSummary(table)}`)
-    ].join("\n").trim();
-  }
-
-  if (/(window|cua so|màn hình|man hinh)/.test(text)) {
-    return [
-      `Ứng dụng ${formatAppNodeName(node)} có ${windows.length} window:`,
-      "",
-      ...windows.slice(0, 30).map((windowRecord, index) => `${index + 1}. ${formatWindowSummary(windowRecord)}`)
-    ].join("\n").trim();
-  }
-
-  return [
-    `Chi tiết ${formatAppNodeLabel(node)}:`,
-    "",
-    `- Bảng: ${String(counts.tables ?? tables.length)}`,
-    `- Window: ${String(counts.windows ?? windows.length)}`,
-    `- Menu: ${String(counts.menus ?? menus.length)}`,
-    `- Service: ${String(counts.services ?? services.length)}`,
-    `- Cache window: ${String(counts.caches ?? caches.length)}`,
-    `- Role app: ${String(counts.roleapps ?? roleapps.length)}`,
-    `- Quyền bảng: ${String(counts.accesses ?? accesses.length)}`,
-    "",
-    tables.length ? "Bảng tiêu biểu:" : "",
-    ...tables.slice(0, 10).map(table => `- ${formatTableSummary(table)}`),
-    windows.length ? "" : "",
-    windows.length ? "Window tiêu biểu:" : "",
-    ...windows.slice(0, 10).map(windowRecord => `- ${formatWindowSummary(windowRecord)}`),
-    menus.length ? "" : "",
-    menus.length ? "Menu tiêu biểu:" : "",
-    ...menus.slice(0, 10).map(menu => `- ${String(menu.translate ?? menu.menuname ?? menu.menuid ?? "menu")}`),
-    accesses.length ? "" : "",
-    accesses.length ? "Quyền bảng hiện có:" : "",
-    ...accesses.slice(0, 8).map(access => `- roleid=${String(access.roleid ?? "")}, tableid=${String(access.tableid ?? "")}`)
-  ].filter(Boolean).join("\n");
-}
-
-function formatTableDetailAnswer(
-  node: Record<string, unknown>,
-  detail: Record<string, unknown>,
-  neighbors: Record<string, unknown> | null
-): string {
-  const record = asRecord(detail.record) ?? {};
-  const columns = recordArray(detail.columns);
-  const inbound = recordArray(neighbors?.inbound);
-  const tabsUsingTable = inbound
-    .filter(item => ["tab_uses_table", "tab_uses_relation_table"].includes(String(item.type ?? "")))
-    .map(item => asRecord(item.node))
-    .filter((item): item is Record<string, unknown> => Boolean(item));
-  const appNodes = inbound
-    .filter(item => String(item.type ?? "") === "app_has_table")
-    .map(item => asRecord(item.node))
-    .filter((item): item is Record<string, unknown> => Boolean(item));
-  const accessNodes = inbound
-    .filter(item => String(item.type ?? "") === "access_controls_table")
-    .map(item => asRecord(item.node))
-    .filter((item): item is Record<string, unknown> => Boolean(item));
-
-  return [
-    `Chi tiết bảng ${formatSimpleNodeName(node)}:`,
-    "",
-    `- Tên kỹ thuật: ${String(record.tablename ?? "")}`,
-    record.alias ? `- Tên hiển thị: ${String(record.alias)}` : "",
-    record.serviceid !== undefined ? `- Service: serviceid=${String(record.serviceid)}` : "",
-    `- Số cột: ${String(detail.columns_count ?? columns.length)}`,
-    columns.length ? "" : "",
-    columns.length ? "Các cột:" : "",
-    ...columns.map((column, index) => `${index + 1}. ${formatColumnSummary(column)}`),
-    tabsUsingTable.length ? "" : "",
-    tabsUsingTable.length ? "Đang được dùng trong tab/window:" : "",
-    ...tabsUsingTable.slice(0, 10).map(tab => `- ${formatSimpleNodeName(tab)}`),
-    appNodes.length ? "" : "",
-    appNodes.length ? `Thuộc app: ${appNodes.map(formatSimpleNodeName).join(", ")}` : "",
-    accessNodes.length ? `Quyền truy cập bảng: ${accessNodes.length} access record.` : "",
-    "",
-    "Cách hiểu nhanh: bảng lưu metadata/dữ liệu của service; column định nghĩa trường dữ liệu thật; tab/window chỉ là lớp giao diện dùng bảng đó để hiển thị hoặc nhập dữ liệu."
-  ].filter(Boolean).join("\n");
-}
-
-function extractGraphApps(data: Record<string, unknown>): Record<string, unknown>[] {
-  const directApps = recordArray(data.apps);
-  if (directApps.length) return directApps;
-  const graph = asRecord(data.graph) ?? {};
-  return recordArray(graph.nodes).filter(node => String(node.type ?? "") === "app");
-}
-
-function findMentionedAppNode(normalizedText: string, apps: Record<string, unknown>[]): Record<string, unknown> | null {
-  const ordinal = extractAppOrdinalFromNormalizedText(normalizedText);
-  if (ordinal && apps[ordinal - 1]) return apps[ordinal - 1];
-
-  let best: { app: Record<string, unknown>; score: number } | null = null;
-  for (const app of apps) {
-    const names = appNameCandidates(app)
-      .map(name => normalizeVietnameseText(name))
-      .filter(Boolean);
-    const score = Math.max(0, ...names.map(name => scoreMentionedName(normalizedText, name)));
-    if (!best || score > best.score) best = { app, score };
-  }
-  return best && best.score >= 0.62 ? best.app : null;
-}
-
-function extractAppOrdinalFromNormalizedText(normalizedText: string): number | null {
-  const match = normalizedText.match(/(?:ung dung|app)\s*(?:so|thu)?\s*(\d+)/)
-    ?? normalizedText.match(/^so\s*(\d+)\b/);
-  if (!match) return null;
-  const value = Number(match[1]);
-  return Number.isFinite(value) && value > 0 ? value : null;
-}
-
-function appNameCandidates(app: Record<string, unknown>): string[] {
-  const summary = asRecord(app.summary) ?? {};
-  return [
-    String(app.label ?? ""),
-    String(summary.appname ?? ""),
-    String(summary.app_name ?? ""),
-    String(summary.appcode ?? "")
-  ].filter(Boolean);
-}
-
-function scoreMentionedName(normalizedText: string, normalizedName: string): number {
-  if (!normalizedName) return 0;
-  if (normalizedText.includes(normalizedName)) return 1;
-  const textCompact = normalizedText.replace(/[^a-z0-9]+/g, "");
-  const nameCompact = normalizedName.replace(/[^a-z0-9]+/g, "");
-  if (nameCompact && textCompact.includes(nameCompact)) return 1;
-
-  const stopWords = new Set(["app", "ung", "dung", "quan", "ly"]);
-  const nameTokens = normalizedName
-    .split(/\s+/)
-    .map(token => token.replace(/[^a-z0-9]+/g, ""))
-    .filter(token => token.length >= 3 && !stopWords.has(token));
-  if (!nameTokens.length) return 0;
-  const matched = nameTokens.filter(token => normalizedText.includes(token)).length;
-  return matched / nameTokens.length;
-}
-
-function formatAppCountAnswer(
-  app: Record<string, unknown>,
-  countKey: "tables" | "windows" | "menus",
-  unit: string,
-  normalizedText: string
-): string {
-  const counts = asRecord(app.counts) ?? {};
-  const count = Number(counts[countKey] ?? 0);
-  const alternatives = [...normalizedText.matchAll(/\b\d+\b/g)]
-    .map(match => Number(match[0]))
-    .filter(value => Number.isFinite(value) && value !== count);
-  const correction = alternatives.length
-    ? `, không phải ${alternatives[0]}`
-    : "";
-  return `${formatAppNodeName(app)} hiện có ${count} ${unit}${correction}.`;
-}
-
 function isStrongSearchMatch(match: Record<string, unknown> | undefined): boolean {
   if (!match) return false;
   const score = Number(match.score ?? 0);
   return Number.isFinite(score) && score >= 70;
-}
-
-function formatAppNodeLabel(node: Record<string, unknown>): string {
-  const name = formatAppNodeName(node);
-  const counts = asRecord(node.counts) ?? {};
-  const countParts = [
-    counts.tables !== undefined ? `${String(counts.tables)} bảng` : "",
-    counts.windows !== undefined ? `${String(counts.windows)} window` : "",
-    counts.menus !== undefined ? `${String(counts.menus)} menu` : ""
-  ].filter(Boolean).join(", ");
-  return `${name}${countParts ? ` - ${countParts}` : ""}`;
-}
-
-function formatAppNodeName(node: Record<string, unknown>): string {
-  const summary = asRecord(node.summary) ?? {};
-  const appid = summary.appid ?? extractIdSuffix(node.id);
-  const label = node.label ?? summary.appname ?? summary.app_name ?? summary.appcode ?? appid;
-  return `${String(label)} (appid=${String(appid)})`;
-}
-
-function formatNodeLabel(node: Record<string, unknown>): string {
-  const summary = asRecord(node.summary) ?? {};
-  const id = String(node.id ?? "");
-  const label = String(node.label ?? summary.name ?? summary.appname ?? summary.tablename ?? summary.windowname ?? id);
-  const type = String(node.type ?? "node");
-  return `${label} (${type}, node_id=${id})`;
-}
-
-function formatTableSummary(table: Record<string, unknown>): string {
-  const name = table.alias ?? table.tablename ?? table.tableid ?? "table";
-  const details = [
-    table.tableid !== undefined ? `tableid=${String(table.tableid)}` : "",
-    table.columns_count !== undefined ? `${String(table.columns_count)} cột` : "",
-    table.serviceid !== undefined ? `serviceid=${String(table.serviceid)}` : ""
-  ].filter(Boolean).join(", ");
-  return `${String(name)}${details ? ` (${details})` : ""}`;
-}
-
-function formatColumnSummary(column: Record<string, unknown>): string {
-  const name = column.columnname ?? column.alias ?? column.columnid ?? "column";
-  const details = [
-    column.columnid !== undefined ? `columnid=${String(column.columnid)}` : "",
-    column.datatype !== undefined ? `datatype=${String(column.datatype)}` : "",
-    column.columntype !== undefined && column.columntype !== column.datatype ? `columntype=${String(column.columntype)}` : "",
-    column.length !== undefined ? `length=${String(column.length)}` : "",
-    column.domainid !== undefined ? `domainid=${String(column.domainid)}` : "",
-    column.linktableid !== undefined ? `lookup tableid=${String(column.linktableid)}` : "",
-    column.linkcolumn !== undefined ? `lookup column=${String(column.linkcolumn)}` : ""
-  ].filter(Boolean).join(", ");
-  return `${String(name)}${details ? ` (${details})` : ""}`;
-}
-
-function formatWindowSummary(windowRecord: Record<string, unknown>): string {
-  const name = windowRecord.windowname ?? windowRecord.translate ?? windowRecord.windowid ?? "window";
-  const details = [
-    windowRecord.windowid !== undefined ? `windowid=${String(windowRecord.windowid)}` : "",
-    windowRecord.tabs_count !== undefined ? `${String(windowRecord.tabs_count)} tab` : "",
-    windowRecord.fields_count !== undefined ? `${String(windowRecord.fields_count)} field` : ""
-  ].filter(Boolean).join(", ");
-  return `${String(name)}${details ? ` (${details})` : ""}`;
-}
-
-function wantsListOnlyAnswer(normalizedText: string): boolean {
-  return /(chi liet ke|liet ke|danh sach|ngan gon|tom tat nhanh|chi can biet)/.test(normalizedText)
-    && !/(giai thich|dien giai|chi tiet|luong|lookup|domain|field|truong|cot|column)/.test(normalizedText);
-}
-
-function wantsDetailedFlowAnswer(normalizedText: string): boolean {
-  if (wantsListOnlyAnswer(normalizedText)) return false;
-  return /(giai thich|dien giai|chi tiet|luong|quan he chi tiet|lookup|domain|field|truong|cot|column)/.test(normalizedText);
-}
-
-function formatWindowTableFlowAnswer(
-  nodes: Record<string, unknown>[],
-  edges: Record<string, unknown>[],
-  appNode?: Record<string, unknown>,
-  options: {
-    startNodeIds?: Set<string>;
-    includeFieldExamples?: boolean;
-    listOnly?: boolean;
-  } = {}
-): string | null {
-  const startedWindows = nodes.filter(node =>
-    String(node.type ?? "") === "window"
-    && options.startNodeIds?.has(String(node.id ?? ""))
-  );
-  const windowsFromApp = appNode ? outgoingNodes(appNode, edges, nodes, "app_has_window", "window") : [];
-  const windows = startedWindows.length
-    ? startedWindows
-    : windowsFromApp.length
-      ? windowsFromApp
-      : nodes.filter(node => String(node.type ?? "") === "window");
-  if (!windows.length) return null;
-
-  const intro = appNode
-    ? `Luồng window/tab/bảng của ${formatAppNodeName(appNode)}:`
-    : windows.length === 1
-      ? `Window ${formatSimpleNodeName(windows[0])} đang nối tới các bảng sau:`
-      : "Luồng window/tab/bảng trong vùng đang xem:";
-
-  const lines: string[] = [intro, ""];
-  for (const windowNode of windows.slice(0, 12)) {
-    const tabs = outgoingNodes(windowNode, edges, nodes, "window_has_tab", "tab");
-    if (!tabs.length) {
-      lines.push(`- ${formatSimpleNodeName(windowNode)}: chưa thấy tab trong graph đang mở.`);
-      continue;
-    }
-
-    lines.push(`- ${formatSimpleNodeName(windowNode)}:`);
-    for (const tab of tabs.slice(0, 12)) {
-      const tables = outgoingNodes(tab, edges, nodes, "tab_uses_table", "table");
-      const relationTables = outgoingNodes(tab, edges, nodes, "tab_uses_relation_table", "table");
-      const fields = outgoingNodes(tab, edges, nodes, "tab_has_field", "field");
-      const tableText = tables.length
-        ? tables.map(formatSimpleNodeName).join(", ")
-        : "chưa thấy bảng chính";
-      const relationText = relationTables.length
-        ? `; bảng quan hệ: ${relationTables.map(formatSimpleNodeName).join(", ")}`
-        : "";
-      const fieldText = fields.length
-        ? `; ${fields.length} field`
-        : "";
-
-      lines.push(`  - Tab ${formatSimpleNodeName(tab)} -> bảng chính: ${tableText}${relationText}${fieldText}.`);
-
-      if (options.listOnly || !options.includeFieldExamples) continue;
-
-      const fieldExamples = fields.slice(0, 4)
-        .map(field => {
-          const columns = outgoingNodes(field, edges, nodes, "field_maps_column", "column");
-          const domains = outgoingNodes(field, edges, nodes, "field_uses_domain", "domain");
-          const linkedTables = outgoingNodes(field, edges, nodes, "field_links_table", "table");
-          const columnText = columns.length ? ` -> cột ${columns.map(formatSimpleNodeName).join(", ")}` : "";
-          const domainText = domains.length ? `; domain ${domains.map(formatSimpleNodeName).join(", ")}` : "";
-          const lookupText = linkedTables.length ? `; lookup sang ${linkedTables.map(formatSimpleNodeName).join(", ")}` : "";
-          return `    - Field ${formatSimpleNodeName(field)}${columnText}${domainText}${lookupText}`;
-        });
-      lines.push(...fieldExamples);
-      if (fields.length > fieldExamples.length) {
-        lines.push(`    - ... còn ${fields.length - fieldExamples.length} field khác.`);
-      }
-    }
-  }
-
-  if (!options.listOnly) {
-    lines.push("");
-    lines.push("Cách hiểu nhanh: menu mở window; window chứa tab; tab quyết định bảng dữ liệu chính; field trên tab hiển thị hoặc nhập dữ liệu từ column của bảng đó. Lookup/domain thường nằm ở column, field chỉ map tới column.");
-  }
-  return lines.join("\n").trim();
-}
-
-function outgoingNodes(
-  node: Record<string, unknown>,
-  edges: Record<string, unknown>[],
-  nodes: Record<string, unknown>[],
-  edgeType: string,
-  targetType?: string
-): Record<string, unknown>[] {
-  const nodeId = String(node.id ?? "");
-  const targetIds = new Set(
-    edges
-      .filter(edge => String(edge.from ?? "") === nodeId && String(edge.type ?? "") === edgeType)
-      .map(edge => String(edge.to ?? ""))
-      .filter(Boolean)
-  );
-  return nodes.filter(candidate =>
-    targetIds.has(String(candidate.id ?? ""))
-    && (!targetType || String(candidate.type ?? "") === targetType)
-  );
-}
-
-function formatSimpleNodeName(node: Record<string, unknown>): string {
-  const summary = asRecord(node.summary) ?? {};
-  const name = node.label
-    ?? summary.appname
-    ?? summary.windowname
-    ?? summary.tabname
-    ?? summary.alias
-    ?? summary.tablename
-    ?? summary.columnname
-    ?? summary.fieldname
-    ?? summary.domainname
-    ?? node.id;
-  const id = primaryNodeId(node);
-  return `${String(name)}${id ? ` (${id})` : ""}`;
-}
-
-function primaryNodeId(node: Record<string, unknown>): string {
-  const summary = asRecord(node.summary) ?? {};
-  const type = String(node.type ?? "");
-  const candidates: Record<string, string> = {
-    app: "appid",
-    table: "tableid",
-    column: "columnid",
-    window: "windowid",
-    tab: "tabid",
-    field: "fieldid",
-    menu: "menuid",
-    domain: "domainid",
-    service: "serviceid"
-  };
-  const key = candidates[type];
-  const value = key ? summary[key] : undefined;
-  return value === undefined || value === null || value === "" ? "" : `${key}=${String(value)}`;
-}
-
-function formatRecordLines(record: Record<string, unknown>): string[] {
-  return Object.entries(record).map(([key, value]) => `- ${key}: ${String(value)}`);
-}
-
-function labelNodeType(type: string): string {
-  const labels: Record<string, string> = {
-    table: "Bảng",
-    window: "Window",
-    menu: "Menu",
-    tab: "Tab",
-    field: "Field",
-    service: "Service",
-    cache: "Cache",
-    roleapp: "Role app",
-    rolemenu: "Role menu",
-    access: "Quyền bảng"
-  };
-  return labels[type] ?? type;
 }
 
 function recordArray(value: unknown): Record<string, unknown>[] {
@@ -936,12 +390,11 @@ function cleanMarkdownArtifacts(answer: string): string {
     .trim();
 }
 
-function shouldContinueAfterToolResult(toolName: string, toolResult: string, userMessage: string): boolean {
+export function shouldContinueAfterToolResult(toolName: string, toolResult: string, userMessage: string): boolean {
   if (!GRAPH_CONTINUE_TOOLS.has(toolName)) return false;
 
-  const text = normalizeVietnameseText(userMessage);
-  const wantsDetail = /(co gi|chi tiet|bang|table|window|cua so|menu|tab|field|truong|cot|cache|quyen|role)/.test(text);
-  if (!wantsDetail) return false;
+  const intent = inferGraphQuestionIntent(userMessage);
+  if (!["deep_dive", "relationship", "detail", "count", "overview"].includes(intent)) return false;
 
   try {
     const data = JSON.parse(toolResult) as Record<string, unknown>;
@@ -979,6 +432,28 @@ function normalizeVietnameseText(value: string): string {
     .replace(/Đ/g, "d")
     .toLowerCase()
     .trim();
+}
+
+type GraphQuestionIntent =
+  | "overview"
+  | "search_only"
+  | "deep_dive"
+  | "relationship"
+  | "detail"
+  | "count"
+  | "unknown";
+
+export function inferGraphQuestionIntent(message: string): GraphQuestionIntent {
+  const text = normalizeVietnameseText(message);
+
+  if (/(bao nhieu|so luong|count|co may)/.test(text)) return "count";
+  if (/(luong|flow|lien ket|ket noi|quan he|dung bang|bang nao|map|lookup|domain)/.test(text)) return "relationship";
+  if (/(\bdi sau\b|phan tich|xem ky|xem sau|noi ro|giai thich|mo ta|cau truc|tong quan chi tiet)/.test(text)) return "deep_dive";
+  if (/(chi tiet|field|truong|cot|column|tab|menu|cache|quyen|role|access)/.test(text)) return "detail";
+  if (/(he thong|tong quan|dang co nhung gi|co nhung gi|danh sach app|cac app|nhung app|ung dung nao|app nao)/.test(text)) return "overview";
+  if (/(tim|search|node|id)/.test(text)) return "search_only";
+
+  return "unknown";
 }
 
 function extractWindowDeleteIdFromText(value: string): string | null {
@@ -1413,14 +888,6 @@ async function createFinalAnswerFromToolResults(
     return deterministicAnswer;
   }
 
-  const deterministicGraphAnswer = createDeterministicGraphAnswer(userMessage, toolResults);
-  if (deterministicGraphAnswer) {
-    addDebugStep(debugSteps, "tools.final_answer", "ok", "Đã tạo câu trả lời deterministic cho App Builder graph.", {
-      answer_chars: deterministicGraphAnswer.length
-    });
-    return deterministicGraphAnswer;
-  }
-
   const toolContext = truncateToolContext(formatToolResultsForFinalAnswer(toolResults));
 
   addDebugStep(debugSteps, "tools.final_answer", "start", "Tạo câu trả lời cuối từ kết quả tool.", {
@@ -1440,9 +907,11 @@ Trả lời bằng cùng ngôn ngữ với người hỏi.
 Nếu người hỏi dùng tiếng Việt, toàn bộ câu trả lời phải là tiếng Việt. Không dùng heading/cụm từ tiếng Anh như "Proposed Change Plan", "Next steps", "Please confirm".
 Hãy trả lời theo đúng ý định của user, không kể lại toàn bộ JSON.
 Chỉ nêu những thông tin liên quan trực tiếp tới câu hỏi. Nếu câu hỏi rộng, tóm tắt ngắn gọn theo nhóm.
-Nếu người dùng hỏi về hệ thống, trả lời theo cấu trúc: đăng nhập/role, các app chính, mỗi app có gì đáng chú ý, và gợi ý đào sâu. Không liệt kê tất cả node/edge.
-Nếu người dùng hỏi về một app/table/window/tab/field cụ thể, tập trung vào node đó và quan hệ trực tiếp. Không liệt kê các phần không liên quan.
-Nếu người dùng hỏi về luồng hoặc liên kết trong App Builder, hãy diễn giải theo chuỗi dễ hiểu: menu mở window; window chứa tab; tab dùng bảng; field map tới column; domain/lookup thường nằm ở column. Chỉ nhắc node_id/id khi cần đối chiếu.
+Khi nhận kết quả graph tool, hãy tự đọc nodes/edges/detail và diễn giải theo ý định của user; không render theo template cứng.
+Nếu người dùng hỏi về hệ thống, tóm tắt theo nhóm: session/role nếu có, các app chính, mỗi app có số bảng/window/menu và điểm đáng chú ý. Không liệt kê node/edge thô.
+Nếu người dùng hỏi "đi sâu", "phân tích", "xem kỹ" một app/table/window, hãy mô tả cấu trúc và các liên kết quan trọng, không chỉ liệt kê kết quả tìm kiếm.
+Nếu người dùng hỏi về một app/table/window/tab/field cụ thể, tập trung vào node đó và quan hệ trực tiếp. Nếu top search match rõ, coi đó là đối tượng người dùng muốn nói tới và diễn giải tiếp.
+Nếu người dùng hỏi về luồng hoặc liên kết trong App Builder, hãy diễn giải theo chuỗi dễ hiểu: app -> menu -> window -> tab -> table -> field -> column -> domain/lookup. Chỉ nhắc node_id/id khi cần đối chiếu.
 Nếu người dùng yêu cầu tạo/sửa/xóa, trả lời theo kiểu IDE agent: hiểu yêu cầu, những gì sẽ thay đổi, các bước plan, rủi ro/thiếu thông tin, và yêu cầu xác nhận trước khi ghi.
 Dùng đúng tên metadata Zilcode hiện tại: n_window, n_tab, n_field, n_menu hoặc window/tab/field/menu. Không tự đổi sang AD_Window/AD_Tab/AD_Field nếu tool không trả về các tên đó.
 Nếu đã có kết quả app_builder_prepare_change, chỉ tóm tắt plan id và các bước; không mở rộng thành hướng dẫn dài.
@@ -1742,13 +1211,14 @@ Tools:
 - app_builder_prepare_change: chuẩn bị plan tạo/sửa/xóa, validate, lọc payload theo metadata thật, lưu pending plan. Chưa ghi.
 - app_builder_apply_change: chỉ gọi sau khi user xác nhận rõ ràng và có plan_id từ prepare_change.
 
-Graph-first workflow:
-1. Nếu câu hỏi liên quan App Builder/Zilcode hiện tại, gọi app_builder_graph_overview trước.
-2. Nếu cần tìm một đối tượng, gọi app_builder_graph_search.
-3. Nếu cần hiểu quan hệ quanh đối tượng, gọi app_builder_graph_subgraph.
-4. Nếu cần lập plan chính xác hoặc trả lời chi tiết, gọi app_builder_node_detail.
-5. Nếu user muốn tạo/sửa/xóa, gọi app_builder_creation_schema và app_builder_prepare_change để tạo pending plan.
-6. Chỉ gọi app_builder_apply_change khi user vừa xác nhận rõ ràng và có plan_id hợp lệ trong lịch sử hội thoại.
+Graph/tool policy:
+- Nếu user hỏi tổng quan toàn hệ thống, gọi app_builder_graph_overview.
+- Nếu user nêu tên/id một app/table/window/tab/field/menu/domain cụ thể, gọi app_builder_graph_search hoặc node_detail trực tiếp; không cần overview nếu đã đủ mục tiêu.
+- Nếu user hỏi "đi sâu", "phân tích", "xem kỹ", "cấu trúc", "luồng", "liên kết" quanh một đối tượng, resolve đối tượng rồi gọi app_builder_graph_subgraph với depth phù hợp; nếu subgraph chưa đủ mới gọi node_detail.
+- Nếu search trả top match rõ theo đúng type/ý định, hãy dùng top match đó để gọi tiếp subgraph/detail thay vì hỏi user chọn.
+- Chỉ hỏi lại khi nhiều kết quả gần nhau và không có top match rõ.
+- Nếu user muốn tạo/sửa/xóa, gọi app_builder_creation_schema khi cần quy tắc, rồi app_builder_prepare_change để tạo pending plan.
+- Chỉ gọi app_builder_apply_change khi user vừa xác nhận rõ ràng và có plan_id hợp lệ trong lịch sử hội thoại.
 Nếu user hỏi tiếp bằng các từ như "đó", "kia", "vừa rồi", "các window đó", hãy dùng đối tượng/app/window đã được nhắc trong lịch sử gần nhất; không quay lại overview trừ khi thật sự mất ngữ cảnh.
 Nếu user hỏi window/tab dùng bảng nào hoặc kết nối bảng nào, ưu tiên app_builder_graph_subgraph quanh window/app liên quan với depth đủ sâu, không dùng app_builder_graph_overview.
 Nếu user yêu cầu xóa window theo id, không hỏi lặp lại qua nhiều vòng. Hãy tạo pending plan delete_window cascade bằng app_builder_prepare_change; apply chỉ sau khi user xác nhận plan id.
