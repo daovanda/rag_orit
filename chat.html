@@ -39,6 +39,18 @@
   header h1 { font-size: 15px; font-weight: 500; }
   header span { font-size: 13px; color: #888; margin-left: 4px; }
 
+  .app-status {
+    align-self: center;
+    max-width: min(100%, 520px);
+    font-size: 12px;
+    color: #666;
+    line-height: 1.4;
+  }
+
+  .app-status:empty {
+    display: none;
+  }
+
   .worker-url {
     margin-left: auto;
     display: flex;
@@ -56,12 +68,48 @@
     color: #1a1a1a;
   }
 
+  .screen[hidden] {
+    display: none;
+  }
+
+  .auth-screen {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+
+  .login-card {
+    width: min(100%, 420px);
+    border: 0.5px solid #e0e0dc;
+    border-radius: 10px;
+    background: #fff;
+    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.06);
+    padding: 22px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .login-card h2 {
+    font-size: 18px;
+    font-weight: 600;
+  }
+
+  .login-card p {
+    color: #777;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
   .auth-panel {
     display: flex;
     flex-direction: column;
     align-items: stretch;
     gap: 4px;
-    margin-left: 8px;
+    margin-left: 0;
     min-width: 0;
   }
 
@@ -93,6 +141,20 @@
 
   .auth-panel input#zilBase {
     width: 165px;
+  }
+
+  .login-card .auth-controls,
+  .login-card .role-org-picker {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .login-card .auth-panel input,
+  .login-card .auth-panel select,
+  .login-card .auth-panel input[type="password"],
+  .login-card .auth-panel input#zilBase,
+  .login-card .role-org-picker select {
+    width: 100%;
   }
 
   #authStatus {
@@ -133,8 +195,8 @@
   .chat-shell {
     flex: 1;
     min-height: 0;
-    display: grid;
-    grid-template-columns: 280px minmax(0, 1fr);
+    display: flex;
+    flex-direction: column;
   }
 
   .chat-shell[hidden] {
@@ -149,6 +211,35 @@
     flex-direction: column;
   }
 
+  .conversation-screen {
+    flex: 1;
+    min-height: 0;
+    background: #f5f5f3;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .conversation-screen[hidden] {
+    display: none;
+  }
+
+  .conversation-screen .conversation-sidebar {
+    flex: 1;
+    border-right: none;
+    background: transparent;
+  }
+
+  .conversation-screen .conversation-list {
+    width: min(100%, 820px);
+    margin: 0 auto;
+    padding: 16px;
+  }
+
+  .conversation-screen .conversation-item {
+    background: #fff;
+    border-color: #e0e0dc;
+  }
+
   .conversation-header {
     min-height: 52px;
     border-bottom: 0.5px solid #e0e0dc;
@@ -157,6 +248,35 @@
     align-items: center;
     justify-content: space-between;
     gap: 10px;
+  }
+
+  .conversation-header-main {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .conversation-header-main p {
+    color: #888;
+    font-size: 12px;
+    margin-top: 3px;
+  }
+
+  .chat-view-header {
+    min-height: 52px;
+    border-bottom: 0.5px solid #e0e0dc;
+    background: #fff;
+    padding: 10px 16px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .chat-view-header strong {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 14px;
   }
 
   .conversation-header strong {
@@ -635,15 +755,8 @@
       margin-left: 0;
     }
 
-    .chat-shell {
-      grid-template-columns: 1fr;
-      grid-template-rows: auto minmax(0, 1fr);
-    }
-
-    .conversation-sidebar {
-      max-height: 190px;
-      border-right: none;
-      border-bottom: 0.5px solid #e0e0dc;
+    .auth-screen {
+      align-items: flex-start;
     }
   }
 </style>
@@ -659,39 +772,59 @@
     <input type="text" id="workerUrl" value="https://ragorit.daovanda2405.workers.dev" placeholder="Worker URL..." />
     <button class="suggestion-btn" onclick="checkHealth()">Ping</button>
   </div>
-  <div class="auth-panel" id="authPanel">
-    <div class="auth-controls" id="loginControls">
-      <input type="text" id="zilBase" placeholder="Zilcode Base" value="https://demo.zilcode.com" autocomplete="url" />
-      <input type="text" id="zilLoginUsername" placeholder="Username" autocomplete="username" />
-      <input type="text" id="zilLoginSitecode" placeholder="SiteCode" autocomplete="organization" />
-      <input type="password" id="zilLoginPassword" placeholder="Password" autocomplete="current-password" />
-      <button class="suggestion-btn" id="zilLoginBtn" onclick="loginZilcodeForDev()">Đăng nhập</button>
-    </div>
-    <div class="role-org-picker" id="roleOrgPanel" hidden>
-      <select id="zilRoleSelect" aria-label="Chọn role Zilcode"></select>
-      <select id="zilOrgSelect" aria-label="Chọn organization Zilcode"></select>
-      <button class="suggestion-btn" id="zilUseRoleBtn" onclick="confirmRoleOrgSelection()" disabled>Bắt đầu</button>
-    </div>
-    <div class="auth-hidden-context" aria-hidden="true">
-      <input type="hidden" id="zilToken" autocomplete="off" />
-      <input type="hidden" id="zilUserId" autocomplete="off" />
-      <input type="hidden" id="zilUsername" autocomplete="username" />
-      <input type="hidden" id="zilSitecode" autocomplete="organization" />
-      <input type="hidden" id="zilRoleId" autocomplete="off" />
-      <input type="hidden" id="zilOrgId" value="0" autocomplete="off" />
-    </div>
-    <span id="authStatus">Đăng nhập Zilcode để tải các đoạn chat của bạn.</span>
-  </div>
+  <span id="appStatus" class="app-status"></span>
 </header>
 
-<main class="chat-shell" id="chatShell" hidden>
-  <aside class="conversation-sidebar">
+<section class="screen auth-screen" id="authScreen">
+  <div class="login-card">
+    <div>
+      <h2>Đăng nhập Zilcode</h2>
+      <p>Đăng nhập, chọn role/tổ chức, rồi bắt đầu làm việc với các đoạn chat được lưu trên server.</p>
+    </div>
+    <div class="auth-panel" id="authPanel">
+      <div class="auth-controls" id="loginControls">
+        <input type="text" id="zilBase" placeholder="Zilcode Base" value="https://demo.zilcode.com" autocomplete="url" />
+        <input type="text" id="zilLoginUsername" placeholder="Username" autocomplete="username" />
+        <input type="text" id="zilLoginSitecode" placeholder="SiteCode" autocomplete="organization" />
+        <input type="password" id="zilLoginPassword" placeholder="Password" autocomplete="current-password" />
+        <button class="suggestion-btn" id="zilLoginBtn" onclick="loginZilcodeForDev()">Đăng nhập</button>
+      </div>
+      <div class="role-org-picker" id="roleOrgPanel" hidden>
+        <select id="zilRoleSelect" aria-label="Chọn role Zilcode"></select>
+        <select id="zilOrgSelect" aria-label="Chọn organization Zilcode"></select>
+        <button class="suggestion-btn" id="zilUseRoleBtn" onclick="confirmRoleOrgSelection()" disabled>Bắt đầu</button>
+      </div>
+      <div class="auth-hidden-context" aria-hidden="true">
+        <input type="hidden" id="zilToken" autocomplete="off" />
+        <input type="hidden" id="zilUserId" autocomplete="off" />
+        <input type="hidden" id="zilUsername" autocomplete="username" />
+        <input type="hidden" id="zilSitecode" autocomplete="organization" />
+        <input type="hidden" id="zilRoleId" autocomplete="off" />
+        <input type="hidden" id="zilOrgId" value="0" autocomplete="off" />
+      </div>
+      <span id="authStatus">Đăng nhập Zilcode để tải các đoạn chat của bạn.</span>
+    </div>
+  </div>
+</section>
+
+<main class="screen conversation-screen" id="conversationScreen" hidden>
+  <div class="conversation-sidebar">
     <div class="conversation-header">
-      <strong>Đoạn chat</strong>
+      <div class="conversation-header-main">
+        <strong>Đoạn chat</strong>
+        <p>Chọn một đoạn chat để mở, hoặc tạo đoạn chat mới.</p>
+      </div>
       <button class="icon-btn" type="button" onclick="createNewConversation()" title="Tạo đoạn chat mới" aria-label="Tạo đoạn chat mới">+</button>
     </div>
     <div class="conversation-list" id="conversationList"></div>
-  </aside>
+  </div>
+</main>
+
+<main class="screen chat-shell" id="chatShell" hidden>
+  <div class="chat-view-header">
+    <button class="icon-btn" type="button" onclick="showConversationListScreen()" title="Quay lại danh sách" aria-label="Quay lại danh sách">&larr;</button>
+    <strong id="chatTitle">Đoạn chat</strong>
+  </div>
   <section class="chat-main">
     <div id="messages">
       <div class="empty-state" id="emptyState">
@@ -774,11 +907,14 @@
   }
 
   function setAuthStatus(text, ok = false) {
-    const el = document.getElementById('authStatus');
     const safeText = repairMojibakeText(String(text));
-    el.textContent = safeText;
-    el.title = safeText;
-    el.style.color = ok ? '#166534' : '#666';
+    [document.getElementById('authStatus'), document.getElementById('appStatus')]
+      .filter(Boolean)
+      .forEach(el => {
+        el.textContent = safeText;
+        el.title = safeText;
+        el.style.color = ok ? '#166534' : '#666';
+      });
   }
 
   function asList(value) {
@@ -849,7 +985,22 @@
     document.getElementById('zilUseRoleBtn').disabled = roles.length === 0;
   }
 
+  function showAuthScreen() {
+    document.getElementById('authScreen').hidden = false;
+    document.getElementById('conversationScreen').hidden = true;
+    document.getElementById('chatShell').hidden = true;
+  }
+
+  function showConversationListScreen() {
+    document.getElementById('authScreen').hidden = true;
+    document.getElementById('conversationScreen').hidden = false;
+    document.getElementById('chatShell').hidden = true;
+    renderConversationList();
+  }
+
   function showChatShell() {
+    document.getElementById('authScreen').hidden = true;
+    document.getElementById('conversationScreen').hidden = true;
     document.getElementById('chatShell').hidden = false;
   }
 
@@ -857,13 +1008,11 @@
     chatReady = true;
     document.getElementById('loginControls').hidden = true;
     document.getElementById('roleOrgPanel').hidden = true;
-    showChatShell();
+    showConversationListScreen();
     const items = await loadConversationList();
-    if (items[0]?.conversation_id) {
-      await selectConversation(items[0].conversation_id);
-    } else {
+    if (!items[0]?.conversation_id) {
       currentConversationId = '';
-      resetMessages('Chưa có đoạn chat. Bấm + để tạo đoạn chat mới.', false);
+      setAuthStatus('Chưa có đoạn chat. Bấm + để tạo đoạn chat mới.', true);
     }
   }
 
@@ -913,6 +1062,7 @@
       prepareRoleOrgPicker(data);
 
       if (data.needs_role_org) {
+        document.getElementById('loginControls').hidden = true;
         setAuthStatus('Đã đăng nhập. Hãy chọn role/org rồi bấm Dùng role/org.', true);
       } else {
         setAuthStatus('Đã đăng nhập. Đang tải các đoạn chat...', true);
@@ -1113,17 +1263,25 @@
       setAuthStatus('Hãy đăng nhập và chọn role/org trước khi tạo đoạn chat.');
       return '';
     }
+
+    const title = window.prompt('Nhập tên đoạn chat mới:', 'Đoạn chat mới');
+    if (title === null) return '';
+    const cleanTitle = title.trim();
+    if (!cleanTitle) {
+      setAuthStatus('Tên đoạn chat không được để trống.');
+      return '';
+    }
+
     chatReady = true;
-    showChatShell();
+    showConversationListScreen();
     const data = await apiFetch('/conversations', {
       method: 'POST',
-      body: JSON.stringify({ title: 'Đoạn chat mới' })
+      body: JSON.stringify({ title: cleanTitle })
     });
-    currentConversationId = data.conversation.conversation_id;
+    currentConversationId = '';
     await loadConversationList();
-    await selectConversation(currentConversationId);
-    setAuthStatus(`Đã tạo đoạn chat ${currentConversationId}.`, true);
-    return currentConversationId;
+    setAuthStatus(`Đã tạo đoạn chat "${cleanTitle}". Bấm vào đoạn chat để mở.`, true);
+    return data.conversation.conversation_id;
   }
 
   async function ensureConversation() {
@@ -1137,6 +1295,9 @@
     openConversationMenuId = '';
     renderConversationList();
     const data = await apiFetch(`/conversations/${encodeURIComponent(conversationId)}`, { method: 'GET' });
+    const title = data.conversation.title || conversationId;
+    document.getElementById('chatTitle').textContent = title;
+    showChatShell();
     resetMessages();
     (data.conversation.messages || []).forEach(message => {
       appendMessage(
@@ -1151,7 +1312,7 @@
       );
     });
     renderConversationList();
-    setAuthStatus(`Đã mở đoạn chat ${data.conversation.title || conversationId}.`, true);
+    setAuthStatus(`Đã mở đoạn chat ${title}.`, true);
   }
 
   async function deleteConversation(event, conversationId) {
@@ -1168,12 +1329,9 @@
     if (currentConversationId === conversationId) currentConversationId = '';
     openConversationMenuId = '';
     const items = await loadConversationList();
-    if (items[0]?.conversation_id) {
-      await selectConversation(items[0].conversation_id);
-    } else {
-      resetMessages('Chưa có đoạn chat. Bấm + để tạo đoạn chat mới.', false);
-    }
-    setAuthStatus(`Đã xóa đoạn chat ${conversationId}.`, true);
+    showConversationListScreen();
+    const suffix = items[0]?.conversation_id ? '' : ' Hiện chưa có đoạn chat nào.';
+    setAuthStatus(`Đã xóa đoạn chat ${conversationId}.${suffix}`, true);
   }
 
   async function deleteCurrentConversation() {
