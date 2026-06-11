@@ -26,6 +26,7 @@ import {
   type ZilcodeSessionState
 } from "./zilcode";
 import type {
+  AgentActionState,
   AgenticLoopResult,
   AIMessage,
   ChatHistoryMessage,
@@ -352,6 +353,49 @@ function createDeterministicChangeAnswer(toolResults: ToolResultRecord[]): strin
   }
 
   return null;
+}
+
+function extractActionStateFromToolResults(toolResults: ToolResultRecord[]): AgentActionState | undefined {
+  const last = [...toolResults].reverse().find(result => isAppBuilderWriteTool(result.name));
+  if (!last) return undefined;
+
+  try {
+    const data = JSON.parse(last.content) as Record<string, unknown>;
+    const planId = typeof data.plan_id === "string" ? data.plan_id : undefined;
+    const base: AgentActionState = {
+      kind: last.name === "app_builder_apply_change" ? "apply_change" : "prepare_change",
+      plan_id: planId,
+      status: typeof data.status === "string" ? data.status : undefined,
+      updated_at: new Date().toISOString()
+    };
+
+    if (last.name === "app_builder_prepare_change") {
+      return {
+        ...base,
+        valid: typeof data.valid === "boolean" ? data.valid : undefined,
+        requires_confirmation: typeof data.requires_confirmation === "boolean" ? data.requires_confirmation : undefined,
+        summary: data.summary,
+        operations: data.operations,
+        error: typeof data.error === "string" ? data.error : undefined
+      };
+    }
+
+    return {
+      ...base,
+      ok: typeof data.ok === "boolean" ? data.ok : undefined,
+      applied_count: typeof data.applied_count === "number" ? data.applied_count : undefined,
+      failed_count: typeof data.failed_count === "number" ? data.failed_count : undefined,
+      skipped_count: typeof data.skipped_count === "number" ? data.skipped_count : undefined,
+      error: typeof data.error === "string" ? data.error : undefined
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function withActionState(result: AgenticLoopResult, toolResults: ToolResultRecord[]): AgenticLoopResult {
+  const actionState = extractActionStateFromToolResults(toolResults);
+  return actionState ? { ...result, action_state: actionState } : result;
 }
 
 function isStrongSearchMatch(match: Record<string, unknown> | undefined): boolean {
@@ -965,10 +1009,10 @@ export async function runAgenticLoop(
     const toolResults = [{ name: "app_builder_apply_change", content: toolExecution.content }];
     const answer = await createFinalAnswerFromToolResults(userMessage, toolResults, env, chatHistory, debugSteps);
 
-    return {
+    return withActionState({
       answer,
       toolsCalled: ["app_builder_apply_change"]
-    };
+    }, toolResults);
   }
 
   const appOrdinal = extractAppOrdinalReference(userMessage);
@@ -1032,10 +1076,10 @@ export async function runAgenticLoop(
     const toolResults = [{ name: "app_builder_prepare_change", content: toolExecution.content }];
     const answer = await createFinalAnswerFromToolResults(userMessage, toolResults, env, chatHistory, debugSteps);
 
-    return {
+    return withActionState({
       answer,
       toolsCalled: ["app_builder_prepare_change"]
-    };
+    }, toolResults);
   }
 
   const renameWindowRequest = extractRenameWindowRequest(userMessage)
@@ -1076,10 +1120,10 @@ export async function runAgenticLoop(
     const toolResults = [{ name: "app_builder_prepare_change", content: toolExecution.content }];
     const answer = await createFinalAnswerFromToolResults(userMessage, toolResults, env, chatHistory, debugSteps);
 
-    return {
+    return withActionState({
       answer,
       toolsCalled: ["app_builder_prepare_change"]
-    };
+    }, toolResults);
   }
 
   const deleteWindowId = isDeleteWindowIntent(userMessage)
@@ -1117,10 +1161,10 @@ export async function runAgenticLoop(
     const toolResults = [{ name: "app_builder_prepare_change", content: toolExecution.content }];
     const answer = await createFinalAnswerFromToolResults(userMessage, toolResults, env, chatHistory, debugSteps);
 
-    return {
+    return withActionState({
       answer,
       toolsCalled: ["app_builder_prepare_change"]
-    };
+    }, toolResults);
   }
 
   const createWindowRequest = extractCreateWindowRequest(userMessage);
@@ -1187,10 +1231,10 @@ export async function runAgenticLoop(
     const toolResults = [{ name: "app_builder_prepare_change", content: toolExecution.content }];
     const answer = await createFinalAnswerFromToolResults(userMessage, toolResults, env, chatHistory, debugSteps);
 
-    return {
+    return withActionState({
       answer,
       toolsCalled: ["app_builder_prepare_change"]
-    };
+    }, toolResults);
   }
 
   const messages: AIMessage[] = [
@@ -1275,13 +1319,13 @@ Khi trả lời từ graph, không đọc lại JSON. Hãy tóm tắt đúng ph�
           debugSteps
         );
 
-        return {
+        return withActionState({
           answer: finalAnswer,
           toolsCalled,
           sources: ragSources,
           embedding_debug: embeddingDebug,
           rag_query_debug: ragQueryDebug
-        };
+        }, toolResults);
       }
 
       return {
@@ -1387,13 +1431,13 @@ Khi trả lời từ graph, không đọc lại JSON. Hãy tóm tắt đúng ph�
         debugSteps
       );
 
-      return {
+      return withActionState({
         answer: finalAnswer,
         toolsCalled,
         sources: ragSources,
         embedding_debug: embeddingDebug,
         rag_query_debug: ragQueryDebug
-      };
+      }, toolResults);
     }
 
     if (generalChatResult) {
@@ -1419,13 +1463,13 @@ Khi trả lời từ graph, không đọc lại JSON. Hãy tóm tắt đúng ph�
         debugSteps
       );
 
-      return {
+      return withActionState({
         answer: finalAnswer,
         toolsCalled,
         sources: ragSources,
         embedding_debug: embeddingDebug,
         rag_query_debug: ragQueryDebug
-      };
+      }, toolResults);
     }
   }
 
@@ -1442,13 +1486,13 @@ Khi trả lời từ graph, không đọc lại JSON. Hãy tóm tắt đúng ph�
       debugSteps
     );
 
-    return {
+    return withActionState({
       answer: finalAnswer,
       toolsCalled,
       sources: ragSources,
       embedding_debug: embeddingDebug,
       rag_query_debug: ragQueryDebug
-    };
+    }, toolResults);
   }
 
   return {

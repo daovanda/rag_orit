@@ -121,6 +121,54 @@ export async function loadZilcodeSession(
   return { id: sessionId, session };
 }
 
+function getBearerTokenFromRequest(request: Request): string {
+  const authorization = request.headers.get("Authorization") ?? "";
+  const match = authorization.match(/^Bearer\s+(.+)$/i);
+  if (match?.[1]?.trim()) return match[1].trim();
+  return request.headers.get("X-Zilcode-Token")?.trim() ?? "";
+}
+
+function getHeaderValue(request: Request, name: string): string | undefined {
+  const value = request.headers.get(name)?.trim();
+  return value || undefined;
+}
+
+export function loadZilcodeSessionFromRequestHeaders(
+  request: Request,
+  env: Env
+): ZilcodeSessionState | null {
+  const token = getBearerTokenFromRequest(request);
+  if (!token) return null;
+
+  const baseUrl = getZilcodeBase(env, getHeaderValue(request, "X-Zilcode-Base"));
+  const userid = getHeaderValue(request, "X-Zilcode-UserId");
+  const username = getHeaderValue(request, "X-Zilcode-Username");
+  const sitecode = getHeaderValue(request, "X-Zilcode-SiteCode");
+  const roleid = getHeaderValue(request, "X-Zilcode-RoleId");
+  const orgid = getHeaderValue(request, "X-Zilcode-OrgId") ?? "0";
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + DEFAULT_SESSION_TTL_SECONDS * 1000);
+
+  const user: Record<string, unknown> = {};
+  if (userid) user.userid = userid;
+  if (username) user.username = username;
+  if (sitecode) user.sitecode = sitecode;
+
+  return {
+    id: `request:${sitecode || "unknown"}:${userid || "unknown"}`,
+    session: {
+      token,
+      base_url: baseUrl,
+      user,
+      roleid,
+      orgid,
+      created_at: now.toISOString(),
+      updated_at: now.toISOString(),
+      expires_at: expiresAt.toISOString()
+    }
+  };
+}
+
 async function saveZilcodeSession(
   env: Env,
   sessionId: string,
@@ -2143,6 +2191,7 @@ export async function handleZilcodeLogin(request: Request, env: Env): Promise<Re
     {
       success: true,
       ...publicSessionPayload(state),
+      dev_token: session.token,
       needs_role_org: !session.roleid
     },
     { headers: CORS }
@@ -2174,7 +2223,7 @@ export async function handleZilcodeSelectRoleOrg(request: Request, env: Env): Pr
   await saveZilcodeSession(env, state.id, state.session);
 
   return Response.json(
-    { success: true, ...publicSessionPayload(state), needs_role_org: false },
+    { success: true, ...publicSessionPayload(state), dev_token: state.session.token, needs_role_org: false },
     { headers: CORS }
   );
 }

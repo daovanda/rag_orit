@@ -72,6 +72,10 @@
     flex-wrap: wrap;
   }
 
+  .auth-controls[hidden] {
+    display: none;
+  }
+
   .auth-panel input,
   .auth-panel select {
     font-size: 12px;
@@ -120,6 +124,187 @@
   .role-org-picker select {
     width: 180px;
     background: #fff;
+  }
+
+  .auth-hidden-context {
+    display: none;
+  }
+
+  .chat-shell {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: 280px minmax(0, 1fr);
+  }
+
+  .chat-shell[hidden] {
+    display: none;
+  }
+
+  .conversation-sidebar {
+    min-height: 0;
+    background: #fff;
+    border-right: 0.5px solid #e0e0dc;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .conversation-header {
+    min-height: 52px;
+    border-bottom: 0.5px solid #e0e0dc;
+    padding: 10px 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .conversation-header strong {
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  .icon-btn {
+    width: 30px;
+    height: 30px;
+    border: 0.5px solid #ddd;
+    border-radius: 8px;
+    background: #fafaf8;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: #1a1a1a;
+    font-size: 18px;
+    line-height: 1;
+  }
+
+  .icon-btn:hover {
+    background: #f0f0ec;
+  }
+
+  .conversation-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .conversation-empty {
+    color: #888;
+    font-size: 13px;
+    line-height: 1.5;
+    padding: 12px 10px;
+  }
+
+  .conversation-item {
+    position: relative;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 30px;
+    align-items: center;
+    gap: 4px;
+    border: 0.5px solid transparent;
+    border-radius: 8px;
+    background: transparent;
+  }
+
+  .conversation-item.active {
+    background: #f5f5f3;
+    border-color: #e0e0dc;
+  }
+
+  .conversation-open {
+    min-width: 0;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    padding: 9px 10px;
+    text-align: left;
+    color: #1a1a1a;
+  }
+
+  .conversation-title {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 13px;
+    font-weight: 500;
+  }
+
+  .conversation-meta {
+    display: block;
+    margin-top: 3px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+    color: #888;
+  }
+
+  .conversation-menu {
+    position: relative;
+    padding-right: 4px;
+  }
+
+  .conversation-menu-button {
+    width: 26px;
+    height: 26px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    cursor: pointer;
+    color: #666;
+    font-size: 16px;
+    line-height: 1;
+  }
+
+  .conversation-menu-button:hover {
+    background: #ecece8;
+    color: #1a1a1a;
+  }
+
+  .conversation-menu-popover {
+    position: absolute;
+    right: 4px;
+    top: 30px;
+    z-index: 5;
+    min-width: 104px;
+    border: 0.5px solid #ddd;
+    border-radius: 8px;
+    background: #fff;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+    padding: 4px;
+  }
+
+  .conversation-menu-popover[hidden] {
+    display: none;
+  }
+
+  .conversation-menu-popover button {
+    width: 100%;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    cursor: pointer;
+    padding: 7px 8px;
+    text-align: left;
+    font-size: 12px;
+    color: #b91c1c;
+  }
+
+  .conversation-menu-popover button:hover {
+    background: #fef2f2;
+  }
+
+  .chat-main {
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
   }
 
   .dot {
@@ -430,6 +615,37 @@
     margin-top: 4px;
     padding: 0 2px;
   }
+
+  @media (max-width: 760px) {
+    header {
+      align-items: stretch;
+    }
+
+    .worker-url {
+      width: 100%;
+      margin-left: 0;
+    }
+
+    .worker-url input {
+      width: min(100%, 320px);
+    }
+
+    .auth-panel {
+      width: 100%;
+      margin-left: 0;
+    }
+
+    .chat-shell {
+      grid-template-columns: 1fr;
+      grid-template-rows: auto minmax(0, 1fr);
+    }
+
+    .conversation-sidebar {
+      max-height: 190px;
+      border-right: none;
+      border-bottom: 0.5px solid #e0e0dc;
+    }
+  }
 </style>
 </head>
 <body>
@@ -443,149 +659,107 @@
     <input type="text" id="workerUrl" value="https://ragorit.daovanda2405.workers.dev" placeholder="Worker URL..." />
     <button class="suggestion-btn" onclick="checkHealth()">Ping</button>
   </div>
-  <div class="auth-panel">
-    <div class="auth-controls">
-    <input type="text" id="zilBase" placeholder="Zilcode Base" value="https://demo.zilcode.com" autocomplete="url" />
-    <input type="text" id="zilUsername" placeholder="Username" autocomplete="username" />
-    <input type="text" id="zilSitecode" placeholder="SiteCode" autocomplete="organization" />
-    <input type="password" id="zilPassword" placeholder="Password" autocomplete="current-password" />
-    <button class="suggestion-btn" id="zilLoginBtn" onclick="loginZilcode()">Login</button>
-    <button class="suggestion-btn" id="zilLogoutBtn" onclick="logoutZilcode()">Logout</button>
+  <div class="auth-panel" id="authPanel">
+    <div class="auth-controls" id="loginControls">
+      <input type="text" id="zilBase" placeholder="Zilcode Base" value="https://demo.zilcode.com" autocomplete="url" />
+      <input type="text" id="zilLoginUsername" placeholder="Username" autocomplete="username" />
+      <input type="text" id="zilLoginSitecode" placeholder="SiteCode" autocomplete="organization" />
+      <input type="password" id="zilLoginPassword" placeholder="Password" autocomplete="current-password" />
+      <button class="suggestion-btn" id="zilLoginBtn" onclick="loginZilcodeForDev()">Đăng nhập</button>
     </div>
-    <span id="authStatus">Chưa đăng nhập Zilcode</span>
-    <div id="roleOrgPicker" class="role-org-picker" hidden>
+    <div class="role-org-picker" id="roleOrgPanel" hidden>
       <select id="zilRoleSelect" aria-label="Chọn role Zilcode"></select>
       <select id="zilOrgSelect" aria-label="Chọn organization Zilcode"></select>
-      <button class="suggestion-btn" onclick="confirmRoleOrgSelection()">Dùng role/org</button>
+      <button class="suggestion-btn" id="zilUseRoleBtn" onclick="confirmRoleOrgSelection()" disabled>Bắt đầu</button>
     </div>
+    <div class="auth-hidden-context" aria-hidden="true">
+      <input type="hidden" id="zilToken" autocomplete="off" />
+      <input type="hidden" id="zilUserId" autocomplete="off" />
+      <input type="hidden" id="zilUsername" autocomplete="username" />
+      <input type="hidden" id="zilSitecode" autocomplete="organization" />
+      <input type="hidden" id="zilRoleId" autocomplete="off" />
+      <input type="hidden" id="zilOrgId" value="0" autocomplete="off" />
+    </div>
+    <span id="authStatus">Đăng nhập Zilcode để tải các đoạn chat của bạn.</span>
   </div>
 </header>
 
-<div id="messages">
-  <div class="empty-state" id="emptyState">
-    <div class="big">⚡</div>
-    <p>Hỏi bất kỳ điều gì về Zilcode</p>
-    <div class="suggestions">
-      <button class="suggestion-btn" onclick="send('Zilcode là gì?')">Zilcode là gì?</button>
-      <button class="suggestion-btn" onclick="send('z-Flow hoạt động như thế nào?')">z-Flow hoạt động thế nào?</button>
-      <button class="suggestion-btn" onclick="send('Tài khoản role system của tôi đang có những app, window, tab, bảng nào?')">System blueprint</button>
-      <button class="suggestion-btn" onclick="send('Tính năng z-Admin gồm những gì?')">Tính năng z-Admin</button>
+<main class="chat-shell" id="chatShell" hidden>
+  <aside class="conversation-sidebar">
+    <div class="conversation-header">
+      <strong>Đoạn chat</strong>
+      <button class="icon-btn" type="button" onclick="createNewConversation()" title="Tạo đoạn chat mới" aria-label="Tạo đoạn chat mới">+</button>
     </div>
-  </div>
-</div>
+    <div class="conversation-list" id="conversationList"></div>
+  </aside>
+  <section class="chat-main">
+    <div id="messages">
+      <div class="empty-state" id="emptyState">
+        <div class="big">⚡</div>
+        <p>Chọn hoặc tạo một đoạn chat để bắt đầu.</p>
+      </div>
+    </div>
 
-<div class="input-area">
-  <div class="input-row">
-    <textarea id="userInput" rows="1" placeholder="Nhập câu hỏi..." onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
-    <button id="sendBtn" onclick="sendMessage()" title="Gửi">
-      <svg viewBox="0 0 24 24"><path d="M2 21l21-9L2 3v7l15 2-15 2v7z"/></svg>
-    </button>
-  </div>
-</div>
+    <div class="input-area">
+      <div class="input-row">
+        <textarea id="userInput" rows="1" placeholder="Nhập câu hỏi..." onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
+        <button id="sendBtn" onclick="sendMessage()" title="Gửi">
+          <svg viewBox="0 0 24 24"><path d="M2 21l21-9L2 3v7l15 2-15 2v7z"/></svg>
+        </button>
+      </div>
+    </div>
+  </section>
+</main>
 
 <script>
   const TOOL_META = {
     general_chat: { label: 'general_chat', icon: '💬', cls: 'general_chat' },
     rag_search: { label: 'rag_search', icon: '🔍', cls: 'rag_search' },
-    draw_chart: { label: 'draw_chart', icon: '📊', cls: 'draw_chart' },
-    zilcode_get_app_builder_blueprint: { label: 'AppBuilderBlueprint', icon: 'Z', cls: 'zilcode_app_builder_blueprint' },
-    app_builder_prepare_plan: { label: 'prepare_plan', icon: 'P', cls: 'app_builder_prepare' },
-    app_builder_apply_plan: { label: 'apply_plan', icon: '▶', cls: 'app_builder_apply' },
-    app_builder_validate_plan: { label: 'validate_plan', icon: '✓', cls: 'app_builder_validate' },
-    app_builder_create_app: { label: 'create_app', icon: '+', cls: 'app_builder_write' },
-    app_builder_update_app: { label: 'update_app', icon: '↻', cls: 'app_builder_write' },
-    app_builder_create_table: { label: 'create_table', icon: '+', cls: 'app_builder_write' },
-    app_builder_update_table: { label: 'update_table', icon: '↻', cls: 'app_builder_write' },
-    app_builder_create_column: { label: 'create_column', icon: '+', cls: 'app_builder_write' },
-    app_builder_update_column: { label: 'update_column', icon: '↻', cls: 'app_builder_write' },
-    app_builder_create_window: { label: 'create_window', icon: '+', cls: 'app_builder_write' },
-    app_builder_update_window: { label: 'update_window', icon: '↻', cls: 'app_builder_write' },
-    app_builder_create_tab: { label: 'create_tab', icon: '+', cls: 'app_builder_write' },
-    app_builder_update_tab: { label: 'update_tab', icon: '↻', cls: 'app_builder_write' },
-    app_builder_create_field: { label: 'create_field', icon: '+', cls: 'app_builder_write' },
-    app_builder_update_field: { label: 'update_field', icon: '↻', cls: 'app_builder_write' },
-    app_builder_create_menu: { label: 'create_menu', icon: '+', cls: 'app_builder_write' },
-    app_builder_update_menu: { label: 'update_menu', icon: '↻', cls: 'app_builder_write' },
-    app_builder_create_domain: { label: 'create_domain', icon: '+', cls: 'app_builder_write' },
-    app_builder_update_domain: { label: 'update_domain', icon: '↻', cls: 'app_builder_write' },
+    app_builder_graph_overview: { label: 'graph_overview', icon: 'G', cls: 'zilcode_app_builder_blueprint' },
+    app_builder_graph_search: { label: 'graph_search', icon: 'S', cls: 'zilcode_app_builder_blueprint' },
+    app_builder_graph_subgraph: { label: 'subgraph', icon: 'N', cls: 'zilcode_app_builder_blueprint' },
+    app_builder_node_detail: { label: 'node_detail', icon: 'D', cls: 'zilcode_app_builder_blueprint' },
+    app_builder_creation_schema: { label: 'creation_schema', icon: 'C', cls: 'app_builder_validate' },
+    app_builder_prepare_change: { label: 'prepare_change', icon: 'P', cls: 'app_builder_prepare' },
+    app_builder_apply_change: { label: 'apply_change', icon: '▶', cls: 'app_builder_apply' },
   };
 
-  const CHAT_HISTORY_STORAGE_KEY = 'zilcode_chat_history_v1';
-  const ZILCODE_SESSION_STORAGE_KEY = 'zilcode_api_session_v1';
-  const MAX_HISTORY_MESSAGES = 6;
-  const MAX_HISTORY_CONTENT_CHARS = 1200;
+  let currentConversationId = '';
+  let conversations = [];
+  let chatReady = false;
+  let openConversationMenuId = '';
+  let devZilcodeSessionId = '';
+  let pendingDevAuth = null;
   const ROLE_ID_KEYS = ['id', 'roleid', 'role_id'];
   const ORG_ID_KEYS = ['id', 'orgid', 'org_id', 'organizationid', 'organization_id'];
   const ROLE_LABEL_KEYS = ['rolename', 'role_name', 'name', 'text', 'label', 'displayname', 'description', 'rolecode', 'code'];
   const ORG_LABEL_KEYS = ['orgname', 'org_name', 'organizationname', 'organization_name', 'name', 'text', 'label', 'displayname', 'description', 'orgcode', 'code'];
-  let chatHistory = loadChatHistory();
-  let zilcodeSessionId = sessionStorage.getItem(ZILCODE_SESSION_STORAGE_KEY) || '';
-  let pendingRoleOrgData = null;
-
-  function normalizeHistoryMessage(message) {
-    if (!message || typeof message !== 'object') return null;
-    if (message.role !== 'user' && message.role !== 'assistant') return null;
-    if (typeof message.content !== 'string') return null;
-
-    const content = message.content.trim().slice(0, MAX_HISTORY_CONTENT_CHARS);
-    if (!content) return null;
-
-    return { role: message.role, content };
-  }
-
-  function loadChatHistory() {
-    try {
-      const raw = sessionStorage.getItem(CHAT_HISTORY_STORAGE_KEY);
-      if (!raw) return [];
-
-      const parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed)) return [];
-
-      return parsed
-        .map(normalizeHistoryMessage)
-        .filter(Boolean)
-        .slice(-MAX_HISTORY_MESSAGES);
-    } catch {
-      return [];
-    }
-  }
-
-  function saveChatHistory() {
-    try {
-      sessionStorage.setItem(CHAT_HISTORY_STORAGE_KEY, JSON.stringify(chatHistory));
-    } catch {
-      // Ignore storage failures; chat still works without persistent session history.
-    }
-  }
-
-  function rememberChatTurn(userText, assistantText) {
-    const nextMessages = [
-      ...chatHistory,
-      { role: 'user', content: userText },
-      { role: 'assistant', content: assistantText || '' }
-    ];
-
-    chatHistory = nextMessages
-      .map(normalizeHistoryMessage)
-      .filter(Boolean)
-      .slice(-MAX_HISTORY_MESSAGES);
-    saveChatHistory();
-  }
-
-  function renderStoredHistory() {
-    chatHistory.forEach(message => {
-      appendMessage(message.role, message.content);
-    });
-  }
 
   function getUrl() {
     return document.getElementById('workerUrl').value.replace(/\/$/, '');
   }
 
   function getZilcodeHeaders() {
-    const headers = { 'Content-Type': 'application/json' };
-    if (zilcodeSessionId) headers['X-Zilcode-Session'] = zilcodeSessionId;
+    const token = document.getElementById('zilToken').value.trim();
+    const headers = {
+      'Content-Type': 'application/json',
+      'X-Zilcode-Base': document.getElementById('zilBase').value.trim(),
+      'X-Zilcode-UserId': document.getElementById('zilUserId').value.trim(),
+      'X-Zilcode-Username': document.getElementById('zilUsername').value.trim(),
+      'X-Zilcode-SiteCode': document.getElementById('zilSitecode').value.trim(),
+      'X-Zilcode-RoleId': document.getElementById('zilRoleId').value.trim(),
+      'X-Zilcode-OrgId': document.getElementById('zilOrgId').value.trim() || '0'
+    };
+    if (token) headers.Authorization = `Bearer ${token}`;
     return headers;
+  }
+
+  function hasZilcodeContext() {
+    return Boolean(
+      document.getElementById('zilToken').value.trim()
+      && document.getElementById('zilUserId').value.trim()
+      && document.getElementById('zilSitecode').value.trim()
+    );
   }
 
   function repairMojibakeText(value) {
@@ -618,39 +792,9 @@
     const entries = Object.entries(item);
     for (const key of keys) {
       const match = entries.find(([name]) => name.toLowerCase() === key.toLowerCase());
-      if (match && match[1] !== undefined && match[1] !== null) return String(match[1]);
+      if (match && match[1] !== undefined && match[1] !== null && match[1] !== '') return String(match[1]);
     }
     return '';
-  }
-
-  function getOptionId(item, keys) {
-    return getObjectValue(item, keys);
-  }
-
-  function getOptionLabel(item, labelKeys, fallback) {
-    return getObjectValue(item, labelKeys) || fallback || '-';
-  }
-
-  function formatRoleOrgStatus(data) {
-    const roleName = repairMojibakeText(data.role_name || '');
-    const orgName = repairMojibakeText(data.org_name || '');
-    const roleLabel = roleName
-      ? `${roleName} (${data.roleid || '-'})`
-      : `role ${data.roleid || '-'}`;
-    const orgLabel = orgName
-      ? `${orgName} (${data.orgid ?? 0})`
-      : `org ${data.orgid ?? 0}`;
-
-    return `Zilcode: ${data.base_url || '-'} | ${roleLabel}, ${orgLabel}`;
-  }
-
-  function setLoggedInStatus(data) {
-    setAuthStatus(formatRoleOrgStatus(data), true);
-  }
-
-  function hideRoleOrgPicker() {
-    document.getElementById('roleOrgPicker').hidden = true;
-    pendingRoleOrgData = null;
   }
 
   function fillSelect(select, items, idKeys, labelKeys, emptyOption = null) {
@@ -664,65 +808,131 @@
     }
 
     items.forEach((item, index) => {
-      const id = getOptionId(item, idKeys);
+      const id = getObjectValue(item, idKeys);
       if (!id) return;
 
       const option = document.createElement('option');
       option.value = id;
-      option.textContent = getOptionLabel(item, labelKeys, `${id}`);
+      option.textContent = getObjectValue(item, labelKeys) || id;
       option.title = option.textContent;
       if (index === 0 && !emptyOption) option.selected = true;
       select.appendChild(option);
     });
   }
 
-  /*
-    const roles = asList(data.roles);
-    const orgs = asList(data.orgs);
-    const defaultRole = getOptionId(roles[0], ['id', 'roleid']);
-    const defaultOrg = orgs.length ? getOptionId(orgs[0], ['id', 'orgid']) : '0';
+  function applyAuthPayloadToConversationContext(data) {
+    document.getElementById('zilToken').value = data.dev_token || data.token || document.getElementById('zilToken').value;
+    document.getElementById('zilBase').value = data.base_url || document.getElementById('zilBase').value;
+    document.getElementById('zilRoleId').value = data.roleid ?? document.getElementById('zilRoleId').value;
+    const orgValue = data.orgid !== undefined && data.orgid !== null && data.orgid !== ''
+      ? data.orgid
+      : (document.getElementById('zilOrgId').value || '0');
+    document.getElementById('zilOrgId').value = String(orgValue);
 
-    const roleid = window.prompt('Nhập roleid Zilcode cần dùng:', defaultRole);
-    if (!roleid) return;
-    const orgid = window.prompt('Nhập orgid Zilcode cần dùng:', defaultOrg || '0') || '0';
-
-    const res = await fetch(getUrl() + '/auth/select-role-org', {
-      method: 'POST',
-      headers: getZilcodeHeaders(),
-      body: JSON.stringify({ roleid, orgid })
-    });
-    const selected = await res.json();
-    if (!selected.success) throw new Error(selected.error || 'Không chọn được role/org');
-    setAuthStatus(`Zilcode: ${selected.base_url || '-'} | role ${selected.roleid}, org ${selected.orgid}`, true);
+    const user = data.user || {};
+    document.getElementById('zilUserId').value = user.userid || user.user_id || document.getElementById('zilUserId').value;
+    document.getElementById('zilUsername').value = user.username || document.getElementById('zilUsername').value;
+    document.getElementById('zilSitecode').value = user.sitecode || document.getElementById('zilSitecode').value || document.getElementById('zilLoginSitecode').value.trim();
   }
 
-  */
-
-  async function selectRoleOrgFromLogin(data) {
+  function prepareRoleOrgPicker(data) {
+    pendingDevAuth = data;
     const roles = asList(data.roles);
     const orgs = asList(data.orgs);
-    const roleSelect = document.getElementById('zilRoleSelect');
-    const orgSelect = document.getElementById('zilOrgSelect');
-
-    if (roles.length === 0) {
-      throw new Error('Zilcode không trả về danh sách role để chọn.');
-    }
-
-    pendingRoleOrgData = data;
-    fillSelect(roleSelect, roles, ROLE_ID_KEYS, ROLE_LABEL_KEYS);
-    fillSelect(orgSelect, orgs, ORG_ID_KEYS, ORG_LABEL_KEYS, {
+    const panel = document.getElementById('roleOrgPanel');
+    fillSelect(document.getElementById('zilRoleSelect'), roles, ROLE_ID_KEYS, ROLE_LABEL_KEYS);
+    fillSelect(document.getElementById('zilOrgSelect'), orgs, ORG_ID_KEYS, ORG_LABEL_KEYS, {
       value: '0',
       label: 'Không chọn tổ chức'
     });
+    panel.hidden = roles.length === 0;
+    document.getElementById('zilUseRoleBtn').disabled = roles.length === 0;
+  }
 
-    document.getElementById('roleOrgPicker').hidden = false;
-    setAuthStatus('Chọn role và organization bằng tên bên dưới, sau đó bấm Dùng role/org.');
+  function showChatShell() {
+    document.getElementById('chatShell').hidden = false;
+  }
+
+  async function startConversationArea() {
+    chatReady = true;
+    document.getElementById('loginControls').hidden = true;
+    document.getElementById('roleOrgPanel').hidden = true;
+    showChatShell();
+    const items = await loadConversationList();
+    if (items[0]?.conversation_id) {
+      await selectConversation(items[0].conversation_id);
+    } else {
+      currentConversationId = '';
+      resetMessages('Chưa có đoạn chat. Bấm + để tạo đoạn chat mới.', false);
+    }
+  }
+
+  async function loginZilcodeForDev() {
+    const usernameInput = document.getElementById('zilLoginUsername');
+    const sitecodeInput = document.getElementById('zilLoginSitecode');
+    const passwordInput = document.getElementById('zilLoginPassword');
+    let username = usernameInput.value.trim();
+    let sitecode = sitecodeInput.value.trim();
+    const password = passwordInput.value;
+
+    if (username.includes('.') && !sitecode) {
+      const parts = username.split('.');
+      sitecode = parts.pop() || '';
+      username = parts.join('.');
+      sitecodeInput.value = sitecode;
+      usernameInput.value = username;
+    }
+
+    if (!username || !sitecode || !password) {
+      setAuthStatus('Thiếu username/sitecode/password để dev login.');
+      return;
+    }
+
+    const btn = document.getElementById('zilLoginBtn');
+    btn.disabled = true;
+    document.getElementById('roleOrgPanel').hidden = true;
+    setAuthStatus('Đang đăng nhập dev...');
+
+    try {
+      const res = await fetch(getUrl() + '/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username,
+          sitecode,
+          password,
+          zilcode_base: document.getElementById('zilBase').value.trim()
+        })
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error || 'Đăng nhập thất bại');
+
+      devZilcodeSessionId = data.session_id || '';
+      passwordInput.value = '';
+      applyAuthPayloadToConversationContext(data);
+      prepareRoleOrgPicker(data);
+
+      if (data.needs_role_org) {
+        setAuthStatus('Đã đăng nhập. Hãy chọn role/org rồi bấm Dùng role/org.', true);
+      } else {
+        setAuthStatus('Đã đăng nhập. Đang tải các đoạn chat...', true);
+        await startConversationArea();
+      }
+    } catch (err) {
+      setAuthStatus(err.message || 'Lỗi đăng nhập dev');
+    } finally {
+      btn.disabled = false;
+    }
   }
 
   async function confirmRoleOrgSelection() {
+    if (!devZilcodeSessionId) {
+      setAuthStatus('Chưa có phiên đăng nhập. Hãy bấm Đăng nhập trước.');
+      return;
+    }
+
     const roleid = document.getElementById('zilRoleSelect').value;
     const orgid = document.getElementById('zilOrgSelect').value || '0';
-
     if (!roleid) {
       setAuthStatus('Chưa chọn role Zilcode.');
       return;
@@ -731,103 +941,243 @@
     try {
       const res = await fetch(getUrl() + '/auth/select-role-org', {
         method: 'POST',
-        headers: getZilcodeHeaders(),
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Zilcode-Session': devZilcodeSessionId
+        },
         body: JSON.stringify({ roleid, orgid })
       });
-      const selected = await res.json();
-      if (!selected.success) throw new Error(selected.error || 'Không chọn được role/org');
-      hideRoleOrgPicker();
-      setLoggedInStatus(selected);
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error || 'Không chọn được role/org');
+
+      applyAuthPayloadToConversationContext(data);
+      prepareRoleOrgPicker(data);
+      document.getElementById('roleOrgPanel').hidden = true;
+      setAuthStatus('Đã chọn role/org. Đang tải các đoạn chat...', true);
+      await startConversationArea();
     } catch (err) {
       setAuthStatus(err.message || 'Không chọn được role/org');
     }
   }
 
-  async function loginZilcode() {
-    const zilcode_base = document.getElementById('zilBase').value.trim();
-    let username = document.getElementById('zilUsername').value.trim();
-    let sitecode = document.getElementById('zilSitecode').value.trim();
-    const password = document.getElementById('zilPassword').value;
+  function formatConversationMeta(conversation) {
+    const count = Number(conversation.messages_count || 0);
+    return `${count} tin nhắn`;
+  }
 
-    if (username.includes('.') && !sitecode) {
-      const parts = username.split('.');
-      sitecode = parts.pop() || '';
-      username = parts.join('.');
-    }
+  function closeConversationMenus() {
+    if (!openConversationMenuId) return;
+    openConversationMenuId = '';
+    renderConversationList();
+  }
 
-    if (!username || !sitecode || !password) {
-      setAuthStatus('Thiếu username/sitecode/password');
+  function toggleConversationMenu(event, conversationId) {
+    event.stopPropagation();
+    openConversationMenuId = openConversationMenuId === conversationId ? '' : conversationId;
+    renderConversationList();
+  }
+
+  function renderConversationList() {
+    const list = document.getElementById('conversationList');
+    if (!list) return;
+    list.innerHTML = '';
+
+    if (!conversations.length) {
+      const empty = document.createElement('div');
+      empty.className = 'conversation-empty';
+      empty.textContent = 'Chưa có đoạn chat. Bấm + để tạo đoạn chat mới.';
+      list.appendChild(empty);
       return;
     }
 
-    const btn = document.getElementById('zilLoginBtn');
-    btn.disabled = true;
-    setAuthStatus('Đang đăng nhập...');
+    conversations.forEach(conversation => {
+      const conversationId = conversation.conversation_id;
+      const item = document.createElement('div');
+      item.className = `conversation-item${conversationId === currentConversationId ? ' active' : ''}`;
 
-    try {
-      const res = await fetch(getUrl() + '/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, sitecode, password, zilcode_base })
-      });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error || 'Đăng nhập thất bại');
+      const openButton = document.createElement('button');
+      openButton.type = 'button';
+      openButton.className = 'conversation-open';
+      openButton.onclick = () => selectConversation(conversationId);
 
-      zilcodeSessionId = data.session_id || '';
-      sessionStorage.setItem(ZILCODE_SESSION_STORAGE_KEY, zilcodeSessionId);
-      document.getElementById('zilPassword').value = '';
+      const title = document.createElement('span');
+      title.className = 'conversation-title';
+      title.textContent = conversation.title || conversationId;
+      openButton.appendChild(title);
 
-      if (data.needs_role_org) {
-        setAuthStatus('Cần chọn role/org');
-        await selectRoleOrgFromLogin(data);
-      } else {
-        hideRoleOrgPicker();
-        setLoggedInStatus(data);
-      }
-    } catch (err) {
-      setAuthStatus(err.message || 'Lỗi đăng nhập');
-    } finally {
-      btn.disabled = false;
-    }
+      const meta = document.createElement('span');
+      meta.className = 'conversation-meta';
+      meta.textContent = formatConversationMeta(conversation);
+      openButton.appendChild(meta);
+      item.appendChild(openButton);
+
+      const menu = document.createElement('div');
+      menu.className = 'conversation-menu';
+
+      const menuButton = document.createElement('button');
+      menuButton.type = 'button';
+      menuButton.className = 'conversation-menu-button';
+      menuButton.textContent = '...';
+      menuButton.title = 'Tùy chọn';
+      menuButton.setAttribute('aria-label', `Tùy chọn cho ${conversation.title || conversationId}`);
+      menuButton.onclick = event => toggleConversationMenu(event, conversationId);
+      menu.appendChild(menuButton);
+
+      const popover = document.createElement('div');
+      popover.className = 'conversation-menu-popover';
+      popover.hidden = openConversationMenuId !== conversationId;
+
+      const deleteButton = document.createElement('button');
+      deleteButton.type = 'button';
+      deleteButton.textContent = 'Xóa';
+      deleteButton.onclick = event => deleteConversation(event, conversationId);
+      popover.appendChild(deleteButton);
+      menu.appendChild(popover);
+
+      item.appendChild(menu);
+      list.appendChild(item);
+    });
   }
 
-  async function refreshZilcodeAuth() {
-    if (!zilcodeSessionId) {
-      hideRoleOrgPicker();
-      setAuthStatus('Chưa đăng nhập Zilcode');
+  function setConversationOptions(items) {
+    conversations = Array.isArray(items) ? items : [];
+    renderConversationList();
+  }
+
+  function resetMessages(message = 'Hỏi bất kỳ điều gì về Zilcode', showSuggestions = true) {
+    const container = document.getElementById('messages');
+    container.innerHTML = '';
+
+    const empty = document.createElement('div');
+    empty.className = 'empty-state';
+    empty.id = 'emptyState';
+
+    const icon = document.createElement('div');
+    icon.className = 'big';
+    icon.textContent = '⚡';
+    empty.appendChild(icon);
+
+    const text = document.createElement('p');
+    text.textContent = message;
+    empty.appendChild(text);
+
+    if (showSuggestions) {
+      const suggestions = document.createElement('div');
+      suggestions.className = 'suggestions';
+
+      [
+        ['Zilcode là gì?', 'Zilcode là gì?'],
+        ['z-Flow hoạt động như thế nào?', 'z-Flow hoạt động thế nào?'],
+        ['Tài khoản role system của tôi đang có những app, window, tab, bảng nào?', 'System blueprint'],
+        ['Tính năng z-Admin gồm những gì?', 'Tính năng z-Admin']
+      ].forEach(([prompt, label]) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'suggestion-btn';
+        button.textContent = label;
+        button.onclick = () => send(prompt);
+        suggestions.appendChild(button);
+      });
+      empty.appendChild(suggestions);
+    }
+
+    container.appendChild(empty);
+  }
+
+  async function apiFetch(path, options = {}) {
+    if (!hasZilcodeContext()) {
+      throw new Error('Thiếu token, UserID hoặc SiteCode Zilcode.');
+    }
+
+    const res = await fetch(getUrl() + path, {
+      ...options,
+      headers: {
+        ...getZilcodeHeaders(),
+        ...(options.headers || {})
+      }
+    });
+    const data = await res.json();
+    if (!data.success) throw new Error(data.error || 'API trả lỗi.');
+    return data;
+  }
+
+  async function loadConversationList() {
+    const data = await apiFetch('/conversations', { method: 'GET' });
+    setConversationOptions(data.conversations || []);
+    setAuthStatus(`Đã tải ${data.conversations?.length || 0} đoạn chat từ server.`, true);
+    return data.conversations || [];
+  }
+
+  async function createNewConversation() {
+    if (!hasZilcodeContext()) {
+      setAuthStatus('Hãy đăng nhập và chọn role/org trước khi tạo đoạn chat.');
+      return '';
+    }
+    chatReady = true;
+    showChatShell();
+    const data = await apiFetch('/conversations', {
+      method: 'POST',
+      body: JSON.stringify({ title: 'Đoạn chat mới' })
+    });
+    currentConversationId = data.conversation.conversation_id;
+    await loadConversationList();
+    await selectConversation(currentConversationId);
+    setAuthStatus(`Đã tạo đoạn chat ${currentConversationId}.`, true);
+    return currentConversationId;
+  }
+
+  async function ensureConversation() {
+    if (currentConversationId) return currentConversationId;
+    throw new Error('Chưa có đoạn chat. Bấm + để tạo đoạn chat mới trước khi gửi tin nhắn.');
+  }
+
+  async function selectConversation(conversationId) {
+    if (!conversationId) return;
+    currentConversationId = conversationId;
+    openConversationMenuId = '';
+    renderConversationList();
+    const data = await apiFetch(`/conversations/${encodeURIComponent(conversationId)}`, { method: 'GET' });
+    resetMessages();
+    (data.conversation.messages || []).forEach(message => {
+      appendMessage(
+        message.role,
+        message.content,
+        message.tools_called || [],
+        [],
+        message.sources || [],
+        null,
+        null,
+        message.debug_steps || []
+      );
+    });
+    renderConversationList();
+    setAuthStatus(`Đã mở đoạn chat ${data.conversation.title || conversationId}.`, true);
+  }
+
+  async function deleteConversation(event, conversationId) {
+    if (event) event.stopPropagation();
+    if (!conversationId) return;
+    const item = conversations.find(conversation => conversation.conversation_id === conversationId);
+    const title = item?.title || conversationId;
+    if (!confirm(`Xóa đoạn chat "${title}"?`)) {
+      closeConversationMenus();
       return;
     }
 
-    try {
-      const res = await fetch(getUrl() + '/auth/me', {
-        method: 'GET',
-        headers: getZilcodeHeaders()
-      });
-      const data = await res.json();
-      if (!data.success) throw new Error();
-      setLoggedInStatus(data);
-    } catch {
-      zilcodeSessionId = '';
-      sessionStorage.removeItem(ZILCODE_SESSION_STORAGE_KEY);
-      hideRoleOrgPicker();
-      setAuthStatus('Phiên Zilcode hết hạn');
+    await apiFetch(`/conversations/${encodeURIComponent(conversationId)}`, { method: 'DELETE' });
+    if (currentConversationId === conversationId) currentConversationId = '';
+    openConversationMenuId = '';
+    const items = await loadConversationList();
+    if (items[0]?.conversation_id) {
+      await selectConversation(items[0].conversation_id);
+    } else {
+      resetMessages('Chưa có đoạn chat. Bấm + để tạo đoạn chat mới.', false);
     }
+    setAuthStatus(`Đã xóa đoạn chat ${conversationId}.`, true);
   }
 
-  async function logoutZilcode() {
-    try {
-      if (zilcodeSessionId) {
-        await fetch(getUrl() + '/auth/logout', {
-          method: 'POST',
-          headers: getZilcodeHeaders()
-        });
-      }
-    } finally {
-      zilcodeSessionId = '';
-      sessionStorage.removeItem(ZILCODE_SESSION_STORAGE_KEY);
-      hideRoleOrgPicker();
-      setAuthStatus('Chưa đăng nhập Zilcode');
-    }
+  async function deleteCurrentConversation() {
+    return deleteConversation(null, currentConversationId);
   }
 
   async function checkHealth() {
@@ -1043,6 +1393,16 @@
     const text = input.value.trim();
     if (!text) return;
 
+    if (!chatReady || !hasZilcodeContext()) {
+      setAuthStatus('Hãy đăng nhập và chọn role/org trước khi gửi tin nhắn.');
+      return;
+    }
+
+    if (!currentConversationId) {
+      setAuthStatus('Chưa có đoạn chat. Bấm + để tạo đoạn chat mới trước khi gửi tin nhắn.');
+      return;
+    }
+
     const btn = document.getElementById('sendBtn');
     btn.disabled = true;
     input.value = '';
@@ -1052,12 +1412,12 @@
     appendTyping();
 
     try {
-      const res = await fetch(getUrl() + '/chat', {
+      const conversationId = await ensureConversation();
+      const res = await fetch(getUrl() + `/conversations/${encodeURIComponent(conversationId)}/messages`, {
         method: 'POST',
         headers: getZilcodeHeaders(),
         body: JSON.stringify({
           message: text,
-          history: chatHistory.slice(-MAX_HISTORY_MESSAGES),
           debug: true
         })
       });
@@ -1067,18 +1427,17 @@
       const data = await res.json();
 
       if (data.success) {
-        const assistantText = data.response || '';
         appendMessage(
           'assistant',
-          assistantText,
-          data.tools_called || [],
+          data.answer || '',
+          data.tools_called || data.message?.tools_called || [],
           data.images || [],
           data.sources || [],
           data.embedding_debug || null,
           data.rag_query_debug || null,
           data.debug_steps || []
         );
-        rememberChatTurn(text, assistantText);
+        await loadConversationList();
       } else {
         const msg = document.createElement('div');
         msg.className = 'msg assistant';
@@ -1100,7 +1459,7 @@
       msg.className = 'msg assistant';
       const errEl = document.createElement('div');
       errEl.className = 'error-bubble';
-      errEl.textContent = '❌ Không kết nối được Worker. Kiểm tra URL và CORS.';
+      errEl.textContent = '❌ ' + (err.message || 'Không kết nối được Worker. Kiểm tra URL, token/context và CORS.');
       msg.appendChild(errEl);
       container.appendChild(msg);
     }
@@ -1109,9 +1468,12 @@
     input.focus();
   }
 
-  renderStoredHistory();
+  document.addEventListener('click', event => {
+    if (!event.target.closest('.conversation-menu')) closeConversationMenus();
+  });
+
   checkHealth();
-  refreshZilcodeAuth();
+  setConversationOptions([]);
 </script>
 </body>
 </html>

@@ -37,6 +37,6 @@ export const DEFAULT_SESSION_TTL_SECONDS = 60 * 60 * 8;
 
 export const CORS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, X-Zilcode-Session",
+  "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Zilcode-Token, X-Zilcode-Session, X-Zilcode-Base, X-Zilcode-UserId, X-Zilcode-Username, X-Zilcode-RoleId, X-Zilcode-OrgId, X-Zilcode-SiteCode",
 };

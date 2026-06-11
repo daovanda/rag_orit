@@ -111,12 +111,29 @@ export interface RagSource {
   rerank_rank?: number;
 }
 
+export interface AgentActionState {
+  kind: "prepare_change" | "apply_change";
+  plan_id?: string;
+  status?: string;
+  ok?: boolean;
+  valid?: boolean;
+  requires_confirmation?: boolean;
+  summary?: unknown;
+  operations?: unknown;
+  applied_count?: number;
+  failed_count?: number;
+  skipped_count?: number;
+  error?: string;
+  updated_at?: string;
+}
+
 export interface AgenticLoopResult {
   answer: string;
   toolsCalled: string[];
   sources?: RagSource[];
   embedding_debug?: EmbeddingDebug;
   rag_query_debug?: RagQueryDebug;
+  action_state?: AgentActionState;
 }
 
 export interface AIMessage {

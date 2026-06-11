@@ -4,6 +4,13 @@ import { CORS, EMBEDDING_MODEL, MAX_HISTORY_MESSAGES, type Env } from "./config"
 import { addDebugStep, type DebugStep } from "./debug";
 import { runAgenticLoop, sanitizeChatHistory } from "./agent";
 import { TOOLS } from "./tools";
+import {
+  handleConversationMessage,
+  handleCreateConversation,
+  handleDeleteConversation,
+  handleGetConversation,
+  handleListConversations
+} from "./conversations";
 import { handleZilcodeLogin, handleZilcodeLogout, handleZilcodeMe, handleZilcodeSelectRoleOrg, loadZilcodeSession } from "./zilcode";
 import type { ChatRequest } from "./types";
 
@@ -26,7 +33,7 @@ export default {
       }, { headers: CORS });
     }
 
-    // ── POST /chat — agentic chat ────────────────────────────────────────────
+    // ── Legacy auth endpoints for standalone/dev chat ────────────────────────
     if (url.pathname === "/auth/login" && request.method === "POST") {
       try {
         return await handleZilcodeLogin(request, env);
@@ -57,6 +64,30 @@ export default {
       return handleZilcodeLogout(request, env);
     }
 
+    // ── Server-side conversations for embedded Zilcode integration ───────────
+    if (url.pathname === "/conversations" && request.method === "POST") {
+      return handleCreateConversation(request, env);
+    }
+
+    if (url.pathname === "/conversations" && request.method === "GET") {
+      return handleListConversations(request, env);
+    }
+
+    const conversationMessageMatch = url.pathname.match(/^\/conversations\/([^/]+)\/messages$/);
+    if (conversationMessageMatch && request.method === "POST") {
+      return handleConversationMessage(request, env, decodeURIComponent(conversationMessageMatch[1]));
+    }
+
+    const conversationMatch = url.pathname.match(/^\/conversations\/([^/]+)$/);
+    if (conversationMatch && request.method === "GET") {
+      return handleGetConversation(request, env, decodeURIComponent(conversationMatch[1]));
+    }
+
+    if (conversationMatch && request.method === "DELETE") {
+      return handleDeleteConversation(request, env, decodeURIComponent(conversationMatch[1]));
+    }
+
+    // ── Legacy POST /chat — kept for old standalone clients ──────────────────
     if (url.pathname === "/chat" && request.method === "POST") {
       let debugSteps: DebugStep[] | undefined;
 
