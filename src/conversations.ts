@@ -5,6 +5,7 @@ import { loadZilcodeSessionFromRequestHeaders, type ZilcodeSessionState } from "
 import type { AgentActionState, AIMessage, ChatHistoryMessage, RagSource } from "./types";
 
 const CONVERSATION_PREFIX = "conversation:";
+const CONVERSATION_INDEX_PREFIX = "conversation_index:";
 const MAX_STORED_MESSAGES = 200;
 const MAX_ACTION_LOGS = 100;
 
@@ -41,6 +42,28 @@ interface ConversationRecord {
 interface ConversationOwner {
   userid: string;
   sitecode: string;
+}
+
+interface ConversationIndexEntry {
+  conversation_id: string;
+  title: string;
+  userid: string;
+  sitecode: string;
+  created_at: string;
+  updated_at: string;
+  messages_count: number;
+  pending_action?: {
+    kind: string;
+    plan_id?: string;
+    status?: string;
+    requires_confirmation?: boolean;
+  };
+}
+
+interface ConversationIndex {
+  owner: ConversationOwner;
+  conversations: ConversationIndexEntry[];
+  updated_at: string;
 }
 
 function jsonResponse(data: unknown, init: ResponseInit = {}): Response {
@@ -97,7 +120,11 @@ function conversationKey(owner: ConversationOwner, conversationId: string): stri
   return `${ownerPrefix(owner)}${sanitizeKeyPart(conversationId)}`;
 }
 
-function summarizeConversation(conversation: ConversationRecord): Record<string, unknown> {
+function ownerIndexKey(owner: ConversationOwner): string {
+  return `${CONVERSATION_INDEX_PREFIX}${sanitizeKeyPart(owner.sitecode)}:${sanitizeKeyPart(owner.userid)}`;
+}
+
+function summarizeConversation(conversation: ConversationRecord): ConversationIndexEntry {
   return {
     conversation_id: conversation.conversation_id,
     title: conversation.title,
@@ -117,6 +144,62 @@ function summarizeConversation(conversation: ConversationRecord): Record<string,
   };
 }
 
+function sortConversationSummaries(conversations: ConversationIndexEntry[]): ConversationIndexEntry[] {
+  return [...conversations]
+    .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)));
+}
+
+async function loadConversationIndex(env: Env, owner: ConversationOwner): Promise<ConversationIndex> {
+  const raw = await env.CHUNKS.get(ownerIndexKey(owner));
+  if (raw) {
+    const parsed = JSON.parse(raw) as Partial<ConversationIndex>;
+    return {
+      owner,
+      conversations: Array.isArray(parsed.conversations)
+        ? parsed.conversations.filter((item): item is ConversationIndexEntry =>
+          Boolean(item)
+          && typeof item === "object"
+          && typeof item.conversation_id === "string"
+          && item.conversation_id.length > 0
+        )
+        : [],
+      updated_at: typeof parsed.updated_at === "string" ? parsed.updated_at : new Date().toISOString()
+    };
+  }
+
+  return { owner, conversations: [], updated_at: new Date().toISOString() };
+}
+
+async function saveConversationIndex(env: Env, owner: ConversationOwner, conversations: ConversationIndexEntry[]): Promise<void> {
+  await env.CHUNKS.put(
+    ownerIndexKey(owner),
+    JSON.stringify({
+      owner,
+      conversations: sortConversationSummaries(conversations),
+      updated_at: new Date().toISOString()
+    } satisfies ConversationIndex)
+  );
+}
+
+async function upsertConversationIndex(env: Env, owner: ConversationOwner, conversation: ConversationRecord): Promise<void> {
+  const index = await loadConversationIndex(env, owner);
+  const summary = summarizeConversation(conversation);
+  const conversations = [
+    summary,
+    ...index.conversations.filter(item => item.conversation_id !== conversation.conversation_id)
+  ];
+  await saveConversationIndex(env, owner, conversations);
+}
+
+async function removeConversationFromIndex(env: Env, owner: ConversationOwner, conversationId: string): Promise<void> {
+  const index = await loadConversationIndex(env, owner);
+  await saveConversationIndex(
+    env,
+    owner,
+    index.conversations.filter(item => item.conversation_id !== conversationId)
+  );
+}
+
 async function loadConversation(env: Env, owner: ConversationOwner, conversationId: string): Promise<ConversationRecord | null> {
   const raw = await env.CHUNKS.get(conversationKey(owner, conversationId));
   return raw ? JSON.parse(raw) as ConversationRecord : null;
@@ -124,6 +207,7 @@ async function loadConversation(env: Env, owner: ConversationOwner, conversation
 
 async function saveConversation(env: Env, owner: ConversationOwner, conversation: ConversationRecord): Promise<void> {
   await env.CHUNKS.put(conversationKey(owner, conversation.conversation_id), JSON.stringify(conversation));
+  await upsertConversationIndex(env, owner, conversation);
 }
 
 function truncateMessageContent(content: string): string {
@@ -234,6 +318,14 @@ export async function handleListConversations(request: Request, env: Env): Promi
   const context = requireZilcodeContext(request, env);
   if (context instanceof Response) return context;
 
+  const index = await loadConversationIndex(env, context.owner);
+  if (index.conversations.length > 0) {
+    return jsonResponse({
+      success: true,
+      conversations: sortConversationSummaries(index.conversations)
+    });
+  }
+
   const keys: { name: string }[] = [];
   let cursor: string | undefined;
   do {
@@ -248,12 +340,16 @@ export async function handleListConversations(request: Request, env: Env): Promi
       return raw ? summarizeConversation(JSON.parse(raw) as ConversationRecord) : null;
     })
   );
+  const summaries = sortConversationSummaries(
+    conversations.filter((item): item is ConversationIndexEntry => Boolean(item))
+  );
+  if (summaries.length > 0) {
+    await saveConversationIndex(env, context.owner, summaries);
+  }
 
   return jsonResponse({
     success: true,
-    conversations: conversations
-      .filter(Boolean)
-      .sort((a, b) => String((b as Record<string, unknown>).updated_at).localeCompare(String((a as Record<string, unknown>).updated_at)))
+    conversations: summaries
   });
 }
 
@@ -277,6 +373,7 @@ export async function handleDeleteConversation(request: Request, env: Env, conve
   if (context instanceof Response) return context;
 
   await env.CHUNKS.delete(conversationKey(context.owner, conversationId));
+  await removeConversationFromIndex(env, context.owner, conversationId);
   return jsonResponse({ success: true, conversation_id: conversationId });
 }
 
