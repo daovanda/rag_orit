@@ -135,8 +135,9 @@
     color: #1a1a1a;
   }
 
-  .auth-panel input[type="password"] {
+  .auth-panel .secret-input {
     width: 115px;
+    -webkit-text-security: disc;
   }
 
   .auth-panel input#zilBase {
@@ -151,7 +152,7 @@
 
   .login-card .auth-panel input,
   .login-card .auth-panel select,
-  .login-card .auth-panel input[type="password"],
+  .login-card .auth-panel .secret-input,
   .login-card .auth-panel input#zilBase,
   .login-card .role-org-picker select {
     width: 100%;
@@ -307,6 +308,82 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     font-size: 14px;
+  }
+
+  .settings-screen {
+    flex: 1;
+    min-height: 0;
+    background: #f5f5f3;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .settings-screen[hidden] {
+    display: none;
+  }
+
+  .settings-panel {
+    width: min(100%, 860px);
+    margin: 0 auto;
+    padding: 18px 16px 26px;
+    display: grid;
+    gap: 14px;
+  }
+
+  .settings-section {
+    border: 0.5px solid #e0e0dc;
+    border-radius: 10px;
+    background: #fff;
+    padding: 14px;
+    display: grid;
+    gap: 10px;
+  }
+
+  .settings-section h3 {
+    font-size: 14px;
+    font-weight: 600;
+  }
+
+  .settings-grid {
+    display: grid;
+    grid-template-columns: 160px minmax(0, 1fr);
+    gap: 8px 12px;
+    font-size: 13px;
+  }
+
+  .settings-label {
+    color: #777;
+  }
+
+  .settings-value {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    color: #1a1a1a;
+  }
+
+  .settings-json {
+    max-height: 280px;
+    overflow: auto;
+    border: 0.5px solid #e0e0dc;
+    border-radius: 8px;
+    background: #fafaf8;
+    padding: 10px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 12px;
+    line-height: 1.5;
+    color: #333;
+  }
+
+  .danger-btn {
+    border-color: #fecaca;
+    color: #b91c1c;
+  }
+
+  .danger-btn:hover {
+    background: #fef2f2;
+    border-color: #fca5a5;
+    color: #991b1b;
   }
 
   .conversation-header strong {
@@ -817,9 +894,9 @@
     <div class="auth-panel" id="authPanel">
       <div class="auth-controls" id="loginControls">
         <input type="text" id="zilBase" placeholder="Zilcode Base" value="https://demo.zilcode.com" autocomplete="url" />
-        <input type="text" id="zilLoginUsername" placeholder="Username" autocomplete="username" />
-        <input type="text" id="zilLoginSitecode" placeholder="SiteCode" autocomplete="organization" />
-        <input type="password" id="zilLoginPassword" placeholder="Password" autocomplete="current-password" />
+        <input type="text" id="zilLoginUsername" name="zilcode_dev_username" placeholder="Username" autocomplete="off" autocapitalize="off" spellcheck="false" />
+        <input type="text" id="zilLoginSitecode" name="zilcode_dev_sitecode" placeholder="SiteCode" autocomplete="off" autocapitalize="off" spellcheck="false" />
+        <input type="text" id="zilLoginSecret" name="zilcode_dev_secret_value" class="secret-input" placeholder="Zilcode secret" autocomplete="off" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore="true" aria-label="Zilcode secret" />
         <button class="suggestion-btn" id="zilLoginBtn" onclick="loginZilcodeForDev()">Đăng nhập</button>
       </div>
       <div class="role-org-picker" id="roleOrgPanel" hidden>
@@ -847,6 +924,7 @@
         <strong>Đoạn chat</strong>
         <p>Chọn một đoạn chat để mở, hoặc tạo đoạn chat mới.</p>
       </div>
+      <button class="suggestion-btn" type="button" onclick="showSettingsScreen()">Cài đặt</button>
       <button class="icon-btn" type="button" onclick="beginNewConversation()" title="Tạo đoạn chat mới" aria-label="Tạo đoạn chat mới">+</button>
     </div>
     <div class="new-conversation-form" id="newConversationForm" hidden>
@@ -856,6 +934,26 @@
     </div>
     <div class="conversation-list" id="conversationList"></div>
   </div>
+</main>
+
+<main class="screen settings-screen" id="settingsScreen" hidden>
+  <div class="chat-view-header">
+    <button class="icon-btn" type="button" onclick="showConversationListScreen()" title="Quay lại danh sách" aria-label="Quay lại danh sách">&larr;</button>
+    <strong>Cài đặt tài khoản</strong>
+  </div>
+  <section class="settings-panel">
+    <div class="settings-section">
+      <h3>Thông tin đăng nhập hiện tại</h3>
+      <div class="settings-grid" id="settingsSummary"></div>
+    </div>
+    <div class="settings-section">
+      <h3>Dữ liệu phiên</h3>
+      <pre class="settings-json" id="settingsJson"></pre>
+    </div>
+    <div class="settings-section">
+      <button class="suggestion-btn danger-btn" type="button" onclick="logoutZilcode()">Đăng xuất</button>
+    </div>
+  </section>
 </main>
 
 <main class="screen chat-shell" id="chatShell" hidden>
@@ -901,6 +999,7 @@
   let openConversationMenuId = '';
   let devZilcodeSessionId = '';
   let pendingDevAuth = null;
+  let currentAuthPayload = null;
   const ROLE_ID_KEYS = ['id', 'roleid', 'role_id'];
   const ORG_ID_KEYS = ['id', 'orgid', 'org_id', 'organizationid', 'organization_id'];
   const ROLE_LABEL_KEYS = ['rolename', 'role_name', 'name', 'text', 'label', 'displayname', 'description', 'rolecode', 'code'];
@@ -995,6 +1094,11 @@
   }
 
   function applyAuthPayloadToConversationContext(data) {
+    currentAuthPayload = {
+      ...(currentAuthPayload || {}),
+      ...(data || {}),
+      dev_token: data.dev_token ? '<masked>' : currentAuthPayload?.dev_token
+    };
     document.getElementById('zilToken').value = data.dev_token || data.token || document.getElementById('zilToken').value;
     document.getElementById('zilBase').value = data.base_url || document.getElementById('zilBase').value;
     document.getElementById('zilRoleId').value = data.roleid ?? document.getElementById('zilRoleId').value;
@@ -1026,12 +1130,14 @@
   function showAuthScreen() {
     document.getElementById('authScreen').hidden = false;
     document.getElementById('conversationScreen').hidden = true;
+    document.getElementById('settingsScreen').hidden = true;
     document.getElementById('chatShell').hidden = true;
   }
 
   function showConversationListScreen() {
     document.getElementById('authScreen').hidden = true;
     document.getElementById('conversationScreen').hidden = false;
+    document.getElementById('settingsScreen').hidden = true;
     document.getElementById('chatShell').hidden = true;
     renderConversationList();
   }
@@ -1039,7 +1145,89 @@
   function showChatShell() {
     document.getElementById('authScreen').hidden = true;
     document.getElementById('conversationScreen').hidden = true;
+    document.getElementById('settingsScreen').hidden = true;
     document.getElementById('chatShell').hidden = false;
+  }
+
+  function maskToken(value) {
+    const text = String(value || '');
+    if (!text) return '';
+    if (text.length <= 12) return '********';
+    return `${text.slice(0, 6)}...${text.slice(-4)}`;
+  }
+
+  function getCurrentUserInfo() {
+    const user = currentAuthPayload?.user || {};
+    return {
+      base_url: document.getElementById('zilBase').value.trim(),
+      session_id: devZilcodeSessionId,
+      token: maskToken(document.getElementById('zilToken').value.trim()),
+      userid: document.getElementById('zilUserId').value.trim(),
+      username: document.getElementById('zilUsername').value.trim() || user.username || '',
+      sitecode: document.getElementById('zilSitecode').value.trim(),
+      roleid: document.getElementById('zilRoleId').value.trim(),
+      role_name: currentAuthPayload?.role_name || '',
+      orgid: document.getElementById('zilOrgId').value.trim() || '0',
+      org_name: currentAuthPayload?.org_name || '',
+      expires_at: currentAuthPayload?.expires_at || ''
+    };
+  }
+
+  function appendSettingsRow(container, label, value) {
+    const labelEl = document.createElement('div');
+    labelEl.className = 'settings-label';
+    labelEl.textContent = label;
+    container.appendChild(labelEl);
+
+    const valueEl = document.createElement('div');
+    valueEl.className = 'settings-value';
+    valueEl.textContent = value || '-';
+    container.appendChild(valueEl);
+  }
+
+  function sanitizedAuthPayloadForDisplay() {
+    const payload = {
+      ...(currentAuthPayload || {}),
+      context: getCurrentUserInfo()
+    };
+    delete payload.dev_token;
+    delete payload.token;
+    return payload;
+  }
+
+  function renderSettingsScreen() {
+    const summary = document.getElementById('settingsSummary');
+    summary.innerHTML = '';
+    const info = getCurrentUserInfo();
+
+    [
+      ['Base URL', info.base_url],
+      ['Session ID', info.session_id],
+      ['Token', info.token],
+      ['User ID', info.userid],
+      ['Username', info.username],
+      ['SiteCode', info.sitecode],
+      ['Role ID', info.roleid],
+      ['Role', info.role_name],
+      ['Org ID', info.orgid],
+      ['Organization', info.org_name],
+      ['Expires at', info.expires_at]
+    ].forEach(([label, value]) => appendSettingsRow(summary, label, value));
+
+    document.getElementById('settingsJson').textContent = JSON.stringify(sanitizedAuthPayloadForDisplay(), null, 2);
+  }
+
+  function showSettingsScreen() {
+    if (!hasZilcodeContext()) {
+      setAuthStatus('Hãy đăng nhập trước khi mở cài đặt.');
+      return;
+    }
+
+    renderSettingsScreen();
+    document.getElementById('authScreen').hidden = true;
+    document.getElementById('conversationScreen').hidden = true;
+    document.getElementById('settingsScreen').hidden = false;
+    document.getElementById('chatShell').hidden = true;
   }
 
   async function startConversationArea() {
@@ -1057,10 +1245,10 @@
   async function loginZilcodeForDev() {
     const usernameInput = document.getElementById('zilLoginUsername');
     const sitecodeInput = document.getElementById('zilLoginSitecode');
-    const passwordInput = document.getElementById('zilLoginPassword');
+    const secretInput = document.getElementById('zilLoginSecret');
     let username = usernameInput.value.trim();
     let sitecode = sitecodeInput.value.trim();
-    const password = passwordInput.value;
+    const secret = secretInput.value;
 
     if (username.includes('.') && !sitecode) {
       const parts = username.split('.');
@@ -1070,8 +1258,8 @@
       usernameInput.value = username;
     }
 
-    if (!username || !sitecode || !password) {
-      setAuthStatus('Thiếu username/sitecode/password để dev login.');
+    if (!username || !sitecode || !secret) {
+      setAuthStatus('Thiếu username/sitecode/Zilcode secret để đăng nhập.');
       return;
     }
 
@@ -1087,7 +1275,7 @@
         body: JSON.stringify({
           username,
           sitecode,
-          password,
+          password: secret,
           zilcode_base: document.getElementById('zilBase').value.trim()
         })
       });
@@ -1095,7 +1283,7 @@
       if (!data.success) throw new Error(data.error || 'Đăng nhập thất bại');
 
       devZilcodeSessionId = data.session_id || '';
-      passwordInput.value = '';
+      secretInput.value = '';
       applyAuthPayloadToConversationContext(data);
       prepareRoleOrgPicker(data);
 
@@ -1145,6 +1333,59 @@
       await startConversationArea();
     } catch (err) {
       setAuthStatus(err.message || 'Không chọn được role/org');
+    }
+  }
+
+  function resetLocalAuthState() {
+    currentConversationId = '';
+    conversations = [];
+    chatReady = false;
+    openConversationMenuId = '';
+    devZilcodeSessionId = '';
+    pendingDevAuth = null;
+    currentAuthPayload = null;
+
+    [
+      'zilToken',
+      'zilUserId',
+      'zilUsername',
+      'zilSitecode',
+      'zilRoleId'
+    ].forEach(id => {
+      document.getElementById(id).value = '';
+    });
+    document.getElementById('zilOrgId').value = '0';
+    document.getElementById('zilLoginSecret').value = '';
+    document.getElementById('zilRoleSelect').innerHTML = '';
+    document.getElementById('zilOrgSelect').innerHTML = '';
+    document.getElementById('zilUseRoleBtn').disabled = true;
+    document.getElementById('loginControls').hidden = false;
+    document.getElementById('roleOrgPanel').hidden = true;
+    cancelNewConversation();
+    setConversationOptions([]);
+    resetMessages('Chọn hoặc tạo một đoạn chat để bắt đầu.', false);
+  }
+
+  async function logoutZilcode() {
+    const sessionId = devZilcodeSessionId;
+    setAuthStatus('Đang đăng xuất...');
+
+    try {
+      if (sessionId) {
+        await fetch(getUrl() + '/auth/logout', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Zilcode-Session': sessionId
+          }
+        });
+      }
+    } catch {
+      // Frontend vẫn reset state local dù backend logout tạm thời lỗi.
+    } finally {
+      resetLocalAuthState();
+      showAuthScreen();
+      setAuthStatus('Đã đăng xuất. Hãy đăng nhập lại để tiếp tục.', true);
     }
   }
 

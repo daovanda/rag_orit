@@ -245,6 +245,23 @@ async function main(): Promise<void> {
 
   const appDetailRecord = asRecord(appDetail);
   const appDetailData = asRecord(appDetailRecord.detail);
+  const answerFacts = asRecord(appDetailRecord.answer_facts);
+  const requiredFactKeys = [
+    "scope",
+    "flow_summary",
+    "tables_summary",
+    "windows_summary",
+    "menus_summary",
+    "permissions_summary",
+    "verified_relations",
+    "dependency_summary",
+    "write_contract_summary",
+    "creation_readiness",
+    "operation_plan_facts",
+    "inferred_notes",
+    "truncated"
+  ];
+  const missingFactKeys = requiredFactKeys.filter(key => !(key in answerFacts));
   checks.push({
     name: "node_detail_for_app_builder",
     status: appDetailRecord.error ? "fail" : "pass",
@@ -253,6 +270,20 @@ async function main(): Promise<void> {
       has_error: Boolean(appDetailRecord.error),
       detail_keys: Object.keys(appDetailData),
       neighbor_count: asRecords(appDetailRecord.neighbors).length
+    }
+  });
+  checks.push({
+    name: "node_detail_answer_facts",
+    status: missingFactKeys.length ? "fail" : "pass",
+    evidence: {
+      fact_keys: Object.keys(answerFacts),
+      missing_fact_keys: missingFactKeys,
+      flow_summary_count: Array.isArray(answerFacts.flow_summary) ? answerFacts.flow_summary.length : 0,
+      verified_relations_count: Array.isArray(answerFacts.verified_relations) ? answerFacts.verified_relations.length : 0,
+      has_dependency_summary: Boolean(answerFacts.dependency_summary),
+      has_write_contract_summary: Boolean(answerFacts.write_contract_summary),
+      has_creation_readiness: Boolean(answerFacts.creation_readiness),
+      has_operation_plan_facts: Boolean(answerFacts.operation_plan_facts)
     }
   });
 

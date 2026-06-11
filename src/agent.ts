@@ -44,6 +44,10 @@ const GRAPH_CONTINUE_TOOLS = new Set([
   "app_builder_graph_search"
 ]);
 
+function hasAppBuilderWriteResult(toolResults: ToolResultRecord[]): boolean {
+  return toolResults.some(result => isAppBuilderWriteTool(result.name));
+}
+
 async function executeTool(
   tool: ToolCall,
   env: Env,
@@ -206,9 +210,10 @@ function compactToolContentForFinalAnswer(result: ToolResultRecord): string {
         } : undefined,
         apps: nodes?.filter(node => node.type === "app"),
         root: nodes?.find(node => node.type === "root"),
+        answer_facts: data.answer_facts,
         errors: data.errors,
         truncated: data.truncated,
-        answer_policy: "Tóm tắt theo ý định user. Không liệt kê tất cả node/edge từ overview; nếu cần chi tiết hãy dùng search/subgraph/detail."
+        answer_policy: "Tóm tắt theo ý định user. Ưu tiên giải thích flow và liên kết chính trước, không liệt kê tất cả node/edge hay danh sách bảng/window dài trừ khi user hỏi rõ. Phân biệt rõ phần đã thấy trong graph/tool result với phần suy đoán hoặc khuyến nghị; nếu cần chi tiết hãy dùng search/subgraph/detail."
       }, null, 2);
     }
 
@@ -952,6 +957,15 @@ Nếu người hỏi dùng tiếng Việt, toàn bộ câu trả lời phải l�
 Hãy trả lời theo đúng ý định của user, không kể lại toàn bộ JSON.
 Chỉ nêu những thông tin liên quan trực tiếp tới câu hỏi. Nếu câu hỏi rộng, tóm tắt ngắn gọn theo nhóm.
 Khi nhận kết quả graph tool, hãy tự đọc nodes/edges/detail và diễn giải theo ý định của user; không render theo template cứng.
+Nếu tool result có answer_facts, ưu tiên dùng answer_facts để trả lời: flow_summary trước, sau đó chỉ dùng tables_summary/windows_summary/menus_summary/permissions_summary khi liên quan trực tiếp tới câu hỏi. Dùng verified_relations như bằng chứng đã thấy; dùng inferred_notes như phần suy luận/khuyến nghị.
+Với yêu cầu tạo/sửa/xóa, bắt buộc đọc dependency_summary, write_contract_summary, creation_readiness và operation_plan_facts trước khi đề xuất plan. Nếu creation_readiness có blocking_conditions liên quan tới yêu cầu, hãy hỏi lại hoặc tạo prepare_change thay vì tự bịa payload.
+Mặc định hãy giải thích bằng flow nghiệp vụ trước: đối tượng này dùng để làm gì, nó đi qua app/menu/window/tab/table/field/column như thế nào, điểm nào liên quan trực tiếp tới câu hỏi.
+Không mở đầu bằng bảng/list dài. Chỉ liệt kê bảng/window/menu đầy đủ khi người dùng hỏi rõ "liệt kê", "danh sách", "có những bảng/window nào", hoặc sau khi đã giải thích flow ngắn gọn.
+Khi cần liệt kê, giới hạn danh sách ở các mục quan trọng nhất, nhóm phần còn lại thành số lượng/tóm tắt, và gợi ý người dùng hỏi sâu vào mục cụ thể nếu cần.
+Bắt buộc phân biệt "Đã thấy trong graph/tool result" với "Suy đoán/khuyến nghị". Không trình bày suy đoán như sự thật đã xác minh.
+Nếu câu trả lời vừa có dữ liệu đọc được vừa có đề xuất, tách rõ hai phần: dữ liệu đã thấy trước, suy đoán/khuyến nghị sau.
+Nếu một thông tin không xuất hiện trong graph/detail/search/subgraph hoặc tool context, hãy nói rõ đó là suy luận, giả định, hoặc khuyến nghị.
+Nếu chỉ thấy metadata quyền/truy cập, không tự suy thành hành vi sử dụng thực tế.
 Nếu người dùng hỏi về hệ thống, tóm tắt theo nhóm: session/role nếu có, các app chính, mỗi app có số bảng/window/menu và điểm đáng chú ý. Không liệt kê node/edge thô.
 Nếu người dùng hỏi "đi sâu", "phân tích", "xem kỹ" một app/table/window, hãy mô tả cấu trúc và các liên kết quan trọng, không chỉ liệt kê kết quả tìm kiếm.
 Nếu người dùng hỏi về một app/table/window/tab/field cụ thể, tập trung vào node đó và quan hệ trực tiếp. Nếu top search match rõ, coi đó là đối tượng người dùng muốn nói tới và diễn giải tiếp.
@@ -1269,7 +1283,8 @@ Nếu user yêu cầu xóa window theo id, không hỏi lặp lại qua nhiều 
 
 Dùng rag_search khi cần tài liệu hướng dẫn/API contract, nhất là khi không chắc quy tắc tạo/sửa.
 Sau khi có đủ thông tin, trả lời ngay. Không gọi tool lặp lại nếu không có câu hỏi mới rõ ràng.
-Khi trả lời từ graph, không đọc lại JSON. Hãy tóm tắt đúng phần user quan tâm.`
+Khi trả lời từ graph, không đọc lại JSON. Hãy tóm tắt đúng phần user quan tâm.
+Ưu tiên giải thích flow/liên kết chính trước; chỉ liệt kê bảng/window/menu khi user hỏi rõ hoặc sau phần giải thích ngắn.`
     },
     ...chatHistory,
     { role: "user", content: userMessage }
@@ -1302,12 +1317,28 @@ Khi trả lời từ graph, không đọc lại JSON. Hãy tóm tắt đúng ph�
         response_chars: (response.response ?? "").length
       });
 
-      const directAnswer = response.response?.trim();
+      const directAnswer = cleanMarkdownArtifacts(response.response?.trim() ?? "");
       if (directAnswer && toolResults.length === 0) {
         return {
           answer: directAnswer,
           toolsCalled
         };
+      }
+
+      if (directAnswer && toolResults.length > 0 && !hasAppBuilderWriteResult(toolResults)) {
+        addDebugStep(debugSteps, "agent.direct_answer_after_tools", "ok", "Dùng câu trả lời trực tiếp của model sau khi đọc tool results.", {
+          iteration: i + 1,
+          tool_results: toolResults.map(result => result.name),
+          answer_chars: directAnswer.length
+        });
+
+        return withActionState({
+          answer: directAnswer,
+          toolsCalled,
+          sources: ragSources,
+          embedding_debug: embeddingDebug,
+          rag_query_debug: ragQueryDebug
+        }, toolResults);
       }
 
       if (toolResults.length > 0) {

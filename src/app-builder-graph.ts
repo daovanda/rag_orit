@@ -33,6 +33,43 @@ interface AppBuilderEdge {
   metadata?: Record<string, unknown>;
 }
 
+interface AnswerFactScope {
+  node_ids: string[];
+  node_types: Record<string, number>;
+  source: string;
+}
+
+interface VerifiedRelationFact {
+  type: string;
+  from: {
+    id: string;
+    type: string;
+    label: string;
+  };
+  to: {
+    id: string;
+    type: string;
+    label: string;
+  };
+  metadata?: Record<string, unknown>;
+}
+
+interface AnswerFacts {
+  scope: AnswerFactScope;
+  flow_summary: string[];
+  tables_summary: Record<string, unknown>[];
+  windows_summary: Record<string, unknown>[];
+  menus_summary: Record<string, unknown>[];
+  permissions_summary: Record<string, unknown>[];
+  verified_relations: VerifiedRelationFact[];
+  dependency_summary: Record<string, unknown>;
+  write_contract_summary: Record<string, unknown>;
+  creation_readiness: Record<string, unknown>;
+  operation_plan_facts: Record<string, unknown>;
+  inferred_notes: string[];
+  truncated: Record<string, boolean>;
+}
+
 interface SourceRecord {
   type: string;
   record: Record<string, unknown>;
@@ -71,6 +108,182 @@ const CHILD_KEYS = new Set([
 ]);
 const GRAPH_CONTEXT_CACHE_TTL_MS = 90 * 1000;
 const graphContextCache = new Map<string, { expiresAt: number; context: GraphContext }>();
+
+const WRITE_ENTITY_CONTRACTS: Record<string, Record<string, unknown>> = {
+  app: {
+    metadata_table: "n_app",
+    collection: "applications",
+    primary_key: "appid",
+    create_required_fields: ["appname", "seqno", "apptype"],
+    defaults_or_resolvable: {
+      seqno: "next sequence from existing n_app",
+      apptype: "existing apptype app value, first existing apptype, or app",
+      siteid: "session siteid or existing app siteid"
+    },
+    create_aliases: { name: "appname" },
+    delete_cascade_supported: true,
+    delete_scope: "Deletes app UI/access metadata: cache, field, tab, rolemenu, menu, roleapp, appservice, domain, window, then app. Does not delete physical business tables/data.",
+    api_endpoint: "/rest/{database}/{schema}/data/n_app"
+  },
+  service: {
+    metadata_table: "n_service",
+    collection: "services",
+    primary_key: "serviceid",
+    create_required_fields: ["servicename", "servicetype", "siteid"],
+    defaults_or_resolvable: { siteid: "session/existing", seqno: "next sequence" },
+    create_aliases: { name: "servicename" },
+    api_endpoint: "/rest/{database}/{schema}/data/n_service"
+  },
+  appservice: {
+    metadata_table: "n_appservice",
+    collection: "appservices",
+    primary_key: "appserviceid",
+    create_required_fields: ["appid", "serviceid", "siteid"],
+    defaults_or_resolvable: { appid: "app reference or previous create_app", serviceid: "service reference", siteid: "session/existing" },
+    api_endpoint: "/rest/{database}/{schema}/data/n_appservice"
+  },
+  table: {
+    metadata_table: "n_table",
+    collection: "tables",
+    primary_key: "tableid",
+    create_required_fields: ["tablename", "tabletype", "siteid", "serviceid"],
+    defaults_or_resolvable: {
+      alias: "tablename",
+      tabletype: "table",
+      serviceid: "explicit serviceid or inferred service binding",
+      siteid: "session/existing",
+      seqno: "next sequence"
+    },
+    create_aliases: { name: "tablename" },
+    delete_cascade_supported: true,
+    delete_scope: "Deletes related field, tab, access, archive, column metadata, then table. Does not delete physical data.",
+    api_endpoint: "/rest/{database}/{schema}/data/n_table"
+  },
+  column: {
+    metadata_table: "n_column",
+    collection: "columns",
+    primary_key: "columnid",
+    create_required_fields: ["tableid", "columnname", "seqno", "siteid"],
+    defaults_or_resolvable: {
+      tableid: "table reference or previous create_table",
+      datatype: "from columntype when provided",
+      columntype: "from datatype when provided",
+      siteid: "session/existing",
+      seqno: "next sequence"
+    },
+    create_aliases: { name: "columnname", default: "defaultvalue", default_value: "defaultvalue" },
+    delete_cascade_supported: true,
+    delete_scope: "Deletes fields mapped to column before deleting column. Does not delete table/data.",
+    api_endpoint: "/rest/{database}/{schema}/data/n_column"
+  },
+  window: {
+    metadata_table: "n_window",
+    collection: "windows",
+    primary_key: "windowid",
+    create_required_fields: ["appid", "windowname", "windowtype", "siteid"],
+    defaults_or_resolvable: {
+      appid: "app reference or previous create_app",
+      windowtype: "window",
+      siteid: "session/existing",
+      seqno: "next sequence"
+    },
+    create_aliases: { name: "windowname" },
+    delete_cascade_supported: true,
+    delete_scope: "Deletes cache, field, tab, rolemenu, linked menu, then window. Does not delete table/column/data.",
+    api_endpoint: "/rest/{database}/{schema}/data/n_window"
+  },
+  tab: {
+    metadata_table: "n_tab",
+    collection: "tabs",
+    primary_key: "tabid",
+    create_required_fields: ["windowid", "tableid", "tabname", "seqno", "siteid"],
+    defaults_or_resolvable: {
+      windowid: "window reference or previous create_window",
+      tableid: "table reference or previous create_table",
+      tabname: "name",
+      tablevel: "1 when parenttabid exists, else 0",
+      siteid: "session/existing",
+      seqno: "next sequence"
+    },
+    create_aliases: { name: "tabname" },
+    delete_cascade_supported: true,
+    delete_scope: "Deletes fields under tab before deleting tab. Does not delete table/column/data.",
+    api_endpoint: "/rest/{database}/{schema}/data/n_tab"
+  },
+  field: {
+    metadata_table: "n_field",
+    collection: "fields",
+    primary_key: "fieldid",
+    create_required_fields: ["tabid", "columnid", "fieldname", "fieldtype", "seqno", "siteid"],
+    defaults_or_resolvable: {
+      tabid: "tab reference or previous create_tab",
+      columnid: "column reference or previous create_column",
+      fieldname: "name, columnname, or mapped columnname",
+      fieldtype: "columntype/datatype from record or mapped column, else text",
+      siteid: "session/existing",
+      seqno: "next sequence"
+    },
+    create_aliases: { name: "fieldname", required: "isrequire", is_required: "isrequire", default: "defaultvalue" },
+    api_endpoint: "/rest/{database}/{schema}/data/n_field"
+  },
+  menu: {
+    metadata_table: "n_menu",
+    collection: "menus",
+    primary_key: "menuid",
+    create_required_fields: ["appid", "menuname", "seqno", "siteid", "menutype"],
+    defaults_or_resolvable: {
+      appid: "app reference or previous create_app",
+      linkwindowid: "window reference when menu opens a window",
+      translate: "menuname",
+      menutype: "menu",
+      siteid: "session/existing",
+      seqno: "next sequence"
+    },
+    create_aliases: { name: "menuname" },
+    api_endpoint: "/rest/{database}/{schema}/data/n_menu"
+  },
+  domain: {
+    metadata_table: "n_domain",
+    collection: "domains",
+    primary_key: "domainid",
+    create_required_fields: ["domainname"],
+    defaults_or_resolvable: { appid: "app reference", domainjson: "[]", domaintype: "list", siteid: "session/existing" },
+    create_aliases: { name: "domainname", values: "domainjson" },
+    api_endpoint: "/rest/{database}/{schema}/data/n_domain"
+  },
+  roleapp: {
+    metadata_table: "n_roleapp",
+    collection: "roleapps",
+    primary_key: "roleappid",
+    create_required_fields: ["roleid", "appid", "siteid"],
+    defaults_or_resolvable: { roleid: "role reference", appid: "app reference", siteid: "session/existing" },
+    api_endpoint: "/rest/{database}/{schema}/data/n_roleapp"
+  },
+  rolemenu: {
+    metadata_table: "n_rolemenu",
+    collection: "rolemenus",
+    primary_key: "rolemenuid",
+    create_required_fields: ["roleid", "menuid", "siteid"],
+    defaults_or_resolvable: { roleid: "role reference", menuid: "menu reference", siteid: "session/existing" },
+    api_endpoint: "/rest/{database}/{schema}/data/n_rolemenu"
+  },
+  access: {
+    metadata_table: "n_access",
+    collection: "accesses",
+    primary_key: "accessid",
+    create_required_fields: ["roleid", "tableid", "siteid"],
+    defaults_or_resolvable: { roleid: "role reference", tableid: "table reference", siteid: "session/existing" },
+    api_endpoint: "/rest/{database}/{schema}/data/n_access"
+  },
+  cache: {
+    metadata_table: "n_cache",
+    collection: "caches",
+    primary_key: "cacheid",
+    create_required_fields: ["appid", "siteid"],
+    defaults_or_resolvable: { appid: "app reference", windowid: "window reference when cache is window-specific", siteid: "session/existing" },
+    api_endpoint: "/rest/{database}/{schema}/data/n_cache"
+  }
+};
 
 export function invalidateAppBuilderGraphCache(session?: ZilcodeSession | null): void {
   if (!session) {
@@ -678,6 +891,7 @@ function buildOverviewResponse(context: GraphContext, args: Record<string, unkno
     session: context.blueprint.session,
     scan: context.blueprint.scan,
     graph,
+    answer_facts: buildAnswerFactsFromSelection(context, overviewNodes, overviewEdges, overviewNodes.map(node => node.id)),
     apps_count: allApps.length,
     apps,
     graph_counts: graphCounts(context.nodes, context.edges),
@@ -757,6 +971,7 @@ function buildSubgraphResponse(context: GraphContext, args: Record<string, unkno
     start_node_ids: resolvedStartIds,
     depth,
     graph: summarizeGraph(subgraph.nodes, subgraph.edges),
+    answer_facts: buildAnswerFactsFromSelection(context, subgraph.nodes, subgraph.edges, resolvedStartIds),
     graph_counts: graphCounts(context.nodes, context.edges),
     cache: context.cache,
     missing_node_ids: resolvedStartIds.filter(id => !context.nodeById.has(id))
@@ -794,12 +1009,15 @@ function buildNodeDetailResponse(context: GraphContext, args: Record<string, unk
     };
   }
 
+  const factGraph = filterNeighborhood(context, [nodeId], 2, 220);
+
   return {
     mode: "detail",
     requested_node_id: requestedNodeId,
     resolved_from: requestedNodeId && requestedNodeId !== nodeId ? requestedNodeId : undefined,
     node,
     detail: buildNodeDetail(context, nodeId, includeFields),
+    answer_facts: buildAnswerFactsFromSelection(context, factGraph.nodes, factGraph.edges, [nodeId]),
     neighbors: includeNeighbors ? buildNeighborSummary(context, nodeId) : undefined,
     cache: context.cache
   };
@@ -910,6 +1128,627 @@ function buildCreationSchema(args: Record<string, unknown>): Record<string, unkn
       validation: ["duplicate check", "required ids", "edge completeness", "payload fields filtered by actual App Builder metadata"]
     }
   };
+}
+
+function buildAnswerFactsFromSelection(
+  context: GraphContext,
+  selectedNodes: AppBuilderNode[],
+  selectedEdges: AppBuilderEdge[],
+  focusNodeIds: string[] = []
+): AnswerFacts {
+  const nodeById = new Map(selectedNodes.map(node => [node.id, node]));
+  const edgeList = selectedEdges.filter(edge => nodeById.has(edge.from) && nodeById.has(edge.to));
+
+  const tables = selectedNodes
+    .filter(node => node.type === "table")
+    .slice(0, 24)
+    .map(node => tableFact(context, node));
+
+  const windows = selectedNodes
+    .filter(node => node.type === "window")
+    .slice(0, 16)
+    .map(node => windowFact(context, node));
+
+  const menus = selectedNodes
+    .filter(node => node.type === "menu")
+    .slice(0, 16)
+    .map(node => menuFact(context, node));
+
+  const permissions = selectedNodes
+    .filter(node => ["roleapp", "rolemenu", "access"].includes(node.type))
+    .slice(0, 24)
+    .map(node => permissionFact(context, node));
+
+  const importantEdges = edgeList.filter(edge => isImportantRelation(edge.type));
+  const verifiedRelations = importantEdges
+    .slice(0, 80)
+    .map(edge => verifiedRelationFact(context, edge))
+    .filter((relation): relation is VerifiedRelationFact => Boolean(relation));
+
+  return {
+    scope: {
+      node_ids: focusNodeIds.length ? focusNodeIds : selectedNodes.slice(0, 20).map(node => node.id),
+      node_types: countBy(selectedNodes, node => node.type),
+      source: "derived_from_app_builder_graph_nodes_and_edges"
+    },
+    flow_summary: buildFlowSummary(selectedNodes, edgeList),
+    tables_summary: tables,
+    windows_summary: windows,
+    menus_summary: menus,
+    permissions_summary: permissions,
+    verified_relations: verifiedRelations,
+    dependency_summary: buildDependencySummary(context, selectedNodes, edgeList, focusNodeIds),
+    write_contract_summary: buildWriteContractSummary(selectedNodes),
+    creation_readiness: buildCreationReadiness(selectedNodes, focusNodeIds),
+    operation_plan_facts: buildOperationPlanFacts(selectedNodes),
+    inferred_notes: buildInferredNotes(selectedNodes, edgeList),
+    truncated: {
+      tables_summary: selectedNodes.filter(node => node.type === "table").length > tables.length,
+      windows_summary: selectedNodes.filter(node => node.type === "window").length > windows.length,
+      menus_summary: selectedNodes.filter(node => node.type === "menu").length > menus.length,
+      permissions_summary: selectedNodes.filter(node => ["roleapp", "rolemenu", "access"].includes(node.type)).length > permissions.length,
+      verified_relations: importantEdges.length > verifiedRelations.length
+    }
+  };
+}
+
+function buildFlowSummary(nodes: AppBuilderNode[], edges: AppBuilderEdge[]): string[] {
+  const counts = countBy(nodes, node => node.type);
+  const edgeCounts = countBy(edges, edge => edge.type);
+  const summary: string[] = [];
+
+  if (counts.app) {
+    summary.push(`Đã thấy ${counts.app} app trong phạm vi này; app là gốc cấu hình cho window, menu, domain, service binding và quyền app.`);
+  }
+  if (edgeCounts.app_has_appservice || edgeCounts.appservice_links_service || edgeCounts.service_has_table) {
+    summary.push("Luồng dữ liệu đã thấy: app -> n_appservice -> n_service -> n_table; table thuộc service, app dùng table thông qua service binding.");
+  } else if (counts.table) {
+    summary.push("Đã thấy table metadata trong phạm vi này; nếu cần xác minh table thuộc service/app nào, hãy mở rộng subgraph quanh table hoặc app.");
+  }
+  if (edgeCounts.app_has_window || edgeCounts.window_has_tab || edgeCounts.tab_uses_table || edgeCounts.tab_has_field || edgeCounts.field_maps_column) {
+    summary.push("Luồng giao diện đã thấy: app -> n_window -> n_tab -> n_field; tab gắn với n_table và field map về n_column.");
+  }
+  if (edgeCounts.app_has_menu || edgeCounts.menu_links_window) {
+    summary.push("Luồng điều hướng đã thấy: app -> n_menu; menu có thể mở window qua linkwindowid/windowid khi có cạnh menu_links_window.");
+  }
+  if (edgeCounts.column_uses_domain || edgeCounts.field_uses_domain) {
+    summary.push("Đã thấy domain/list giá trị được gắn qua domainid trên column hoặc field.");
+  }
+  if (edgeCounts.column_links_table || edgeCounts.field_links_table || edgeCounts.column_links_column || edgeCounts.field_links_column) {
+    summary.push("Đã thấy lookup/link qua linktableid/linkcolumn hoặc mapcolumn giữa field/column và table/column đích.");
+  }
+  if (edgeCounts.role_grants_app || edgeCounts.role_has_rolemenu || edgeCounts.rolemenu_grants_menu || edgeCounts.role_has_table_access || edgeCounts.access_controls_table) {
+    summary.push("Luồng quyền đã thấy: role -> roleapp -> app, role -> rolemenu -> menu, và role -> access -> table.");
+  }
+
+  if (!summary.length) {
+    summary.push("Phạm vi này có node/edge metadata nhưng chưa đủ cạnh để mô tả một flow hoàn chỉnh; cần mở subgraph sâu hơn hoặc node_detail của node liên quan.");
+  }
+
+  return summary;
+}
+
+function tableFact(context: GraphContext, node: AppBuilderNode): Record<string, unknown> {
+  const source = context.sourceByNodeId.get(node.id);
+  const record = source?.record ?? {};
+  const serviceEdges = context.edges.filter(edge => edge.to === node.id && edge.type === "service_has_table");
+  const tabEdges = context.edges.filter(edge => edge.to === node.id && ["tab_uses_table", "tab_uses_relation_table"].includes(edge.type));
+  const accessEdges = context.edges.filter(edge => edge.to === node.id && edge.type === "access_controls_table");
+  const columnEdges = context.edges.filter(edge => edge.from === node.id && edge.type === "table_has_column");
+
+  return compactUndefined({
+    node_id: node.id,
+    tableid: ci(record, "tableid") ?? node.summary?.tableid,
+    tablename: ci(record, "tablename") ?? node.summary?.tablename,
+    alias: ci(record, "alias") ?? node.label,
+    tabletype: ci(record, "tabletype") ?? node.summary?.tabletype,
+    serviceid: ci(record, "serviceid") ?? node.summary?.serviceid,
+    isreadonly: ci(record, "isreadonly") ?? node.summary?.isreadonly,
+    isview: ci(record, "isview") ?? node.summary?.isview,
+    columns_count: node.counts?.columns ?? columnEdges.length,
+    services: serviceEdges.map(edge => compactNodeRef(context.nodeById.get(edge.from))).filter(Boolean),
+    used_by_tabs: tabEdges.slice(0, 12).map(edge => {
+      const tab = context.nodeById.get(edge.from);
+      return compactUndefined({
+        tab: compactNodeRef(tab),
+        relation_type: edge.type,
+        window: tab ? compactNodeRef(findConnectedNode(context, tab.id, "in", "window_has_tab")) : undefined
+      });
+    }),
+    permission_records_count: accessEdges.length
+  });
+}
+
+function windowFact(context: GraphContext, node: AppBuilderNode): Record<string, unknown> {
+  const source = context.sourceByNodeId.get(node.id);
+  const record = source?.record ?? {};
+  const app = findConnectedNode(context, node.id, "in", "app_has_window");
+  const tabEdges = context.edges.filter(edge => edge.from === node.id && edge.type === "window_has_tab");
+  const menuEdges = context.edges.filter(edge => edge.to === node.id && edge.type === "menu_links_window");
+  const cacheEdges = context.edges.filter(edge => edge.to === node.id && edge.type === "cache_for_window");
+
+  return compactUndefined({
+    node_id: node.id,
+    windowid: ci(record, "windowid") ?? node.summary?.windowid,
+    windowname: ci(record, "windowname") ?? node.label,
+    windowtype: ci(record, "windowtype") ?? node.summary?.windowtype,
+    app: compactNodeRef(app),
+    tabs_count: node.counts?.tabs ?? tabEdges.length,
+    tabs: tabEdges.slice(0, 12).map(edge => {
+      const tab = context.nodeById.get(edge.to);
+      return compactUndefined({
+        tab: compactNodeRef(tab),
+        table: tab ? compactNodeRef(findConnectedNode(context, tab.id, "out", "tab_uses_table")) : undefined,
+        relation_table: tab ? compactNodeRef(findConnectedNode(context, tab.id, "out", "tab_uses_relation_table")) : undefined
+      });
+    }),
+    linked_menus: menuEdges.map(edge => compactNodeRef(context.nodeById.get(edge.from))).filter(Boolean),
+    cache_records_count: cacheEdges.length
+  });
+}
+
+function menuFact(context: GraphContext, node: AppBuilderNode): Record<string, unknown> {
+  const source = context.sourceByNodeId.get(node.id);
+  const record = source?.record ?? {};
+  const app = findConnectedNode(context, node.id, "in", "app_has_menu");
+  const linkedWindow = findConnectedNode(context, node.id, "out", "menu_links_window");
+  const roleMenuEdges = context.edges.filter(edge => edge.to === node.id && edge.type === "rolemenu_grants_menu");
+
+  return compactUndefined({
+    node_id: node.id,
+    menuid: ci(record, "menuid") ?? node.summary?.menuid,
+    menuname: ci(record, "menuname") ?? node.label,
+    menutype: ci(record, "menutype") ?? node.summary?.menutype,
+    parentid: ci(record, "parentid") ?? node.summary?.parentid,
+    seqno: ci(record, "seqno") ?? node.summary?.seqno,
+    app: compactNodeRef(app),
+    linkwindowid: ci(record, "linkwindowid") ?? ci(record, "windowid") ?? node.summary?.linkwindowid ?? node.summary?.windowid,
+    linked_window: compactNodeRef(linkedWindow),
+    permission_records_count: roleMenuEdges.length
+  });
+}
+
+function permissionFact(context: GraphContext, node: AppBuilderNode): Record<string, unknown> {
+  const source = context.sourceByNodeId.get(node.id);
+  const record = source?.record ?? {};
+
+  if (node.type === "roleapp") {
+    return compactUndefined({
+      type: "roleapp",
+      node_id: node.id,
+      role: compactNodeRef(findConnectedNode(context, node.id, "in", "role_grants_app")),
+      app: compactNodeRef(findConnectedNode(context, node.id, "in", "app_has_roleapp")),
+      roleid: ci(record, "roleid") ?? node.summary?.roleid,
+      appid: ci(record, "appid") ?? node.summary?.appid,
+      note: "Metadata cấp quyền role vào app; không chứng minh tần suất sử dụng thực tế."
+    });
+  }
+
+  if (node.type === "rolemenu") {
+    return compactUndefined({
+      type: "rolemenu",
+      node_id: node.id,
+      role: compactNodeRef(findConnectedNode(context, node.id, "in", "role_has_rolemenu")),
+      menu: compactNodeRef(findConnectedNode(context, node.id, "out", "rolemenu_grants_menu")),
+      roleid: ci(record, "roleid") ?? node.summary?.roleid,
+      menuid: ci(record, "menuid") ?? node.summary?.menuid,
+      whereclause: ci(record, "whereclause") ?? node.summary?.whereclause,
+      note: "Metadata cấp quyền role vào menu; whereclause nếu có là điều kiện lọc quyền/menu."
+    });
+  }
+
+  return compactUndefined({
+    type: "access",
+    node_id: node.id,
+    role: compactNodeRef(findConnectedNode(context, node.id, "in", "role_has_table_access")),
+    table: compactNodeRef(findConnectedNode(context, node.id, "out", "access_controls_table")),
+    roleid: ci(record, "roleid") ?? node.summary?.roleid,
+    tableid: ci(record, "tableid") ?? node.summary?.tableid,
+    flags: compactRecord(record, ["isarchive", "noinsert", "noupdate", "nodelete", "noselect", "noexport", "noattach", "islock"]),
+    note: "Metadata quyền trên table; các cờ no* là hạn chế thao tác, không phải log hành vi người dùng."
+  });
+}
+
+function verifiedRelationFact(context: GraphContext, edge: AppBuilderEdge): VerifiedRelationFact | undefined {
+  const from = context.nodeById.get(edge.from);
+  const to = context.nodeById.get(edge.to);
+  if (!from || !to) return undefined;
+  return {
+    type: edge.type,
+    from: { id: from.id, type: from.type, label: from.label },
+    to: { id: to.id, type: to.type, label: to.label },
+    metadata: edge.metadata
+  };
+}
+
+function buildInferredNotes(nodes: AppBuilderNode[], edges: AppBuilderEdge[]): string[] {
+  const notes: string[] = [
+    "Các mục trong verified_relations là quan hệ đã thấy trực tiếp trong graph/tool result; các ghi chú ở đây là suy luận hoặc khuyến nghị diễn giải.",
+    "Permission metadata chỉ cho biết role/menu/table access được cấu hình, không chứng minh người dùng đã sử dụng chức năng đó."
+  ];
+  const edgeCounts = countBy(edges, edge => edge.type);
+  const nodeCounts = countBy(nodes, node => node.type);
+
+  if (nodeCounts.table && !edgeCounts.service_has_table) {
+    notes.push("Có table trong phạm vi này nhưng chưa thấy cạnh service_has_table; cần mở rộng subgraph nếu muốn xác minh service binding.");
+  }
+  if (nodeCounts.menu && !edgeCounts.menu_links_window) {
+    notes.push("Có menu trong phạm vi này nhưng không phải menu nào cũng link trực tiếp tới window; menu có thể là nhóm, tool, report hoặc cần kiểm tra menutype/execname.");
+  }
+  if (nodeCounts.window && !edgeCounts.menu_links_window) {
+    notes.push("Có window trong phạm vi này nhưng chưa thấy menu trỏ tới window; window có thể tồn tại trong App Builder mà chưa được đưa vào navigation.");
+  }
+  if (edgeCounts.app_has_table && !edgeCounts.appservice_links_service) {
+    notes.push("Cạnh app_has_table trong graph là tiện ích để gom bảng theo app; theo metadata Zilcode, binding đúng nên được xác minh qua n_appservice/n_service/n_table.");
+  }
+
+  return notes;
+}
+
+function isImportantRelation(type: string): boolean {
+  return [
+    "manages_app",
+    "app_uses_service",
+    "app_has_appservice",
+    "appservice_links_service",
+    "service_has_table",
+    "app_has_table",
+    "table_has_column",
+    "app_has_window",
+    "window_has_tab",
+    "tab_parent_child",
+    "tab_uses_table",
+    "tab_uses_relation_table",
+    "tab_has_field",
+    "field_maps_column",
+    "column_uses_domain",
+    "field_uses_domain",
+    "column_links_table",
+    "column_links_column",
+    "field_links_table",
+    "field_links_column",
+    "app_has_menu",
+    "menu_links_window",
+    "app_has_domain",
+    "app_has_cache",
+    "cache_for_window",
+    "app_has_roleapp",
+    "role_grants_app",
+    "role_has_rolemenu",
+    "rolemenu_grants_menu",
+    "role_has_table_access",
+    "access_controls_table"
+  ].includes(type);
+}
+
+function findConnectedNode(
+  context: GraphContext,
+  nodeId: string,
+  direction: "in" | "out",
+  edgeType: string
+): AppBuilderNode | undefined {
+  const edge = context.edges.find(item => {
+    if (item.type !== edgeType) return false;
+    return direction === "in" ? item.to === nodeId : item.from === nodeId;
+  });
+  if (!edge) return undefined;
+  return context.nodeById.get(direction === "in" ? edge.from : edge.to);
+}
+
+function compactNodeRef(node: AppBuilderNode | undefined): Record<string, unknown> | undefined {
+  if (!node) return undefined;
+  return {
+    id: node.id,
+    type: node.type,
+    label: node.label,
+    summary: compactRecord(node.summary ?? {}, ["appid", "tableid", "windowid", "tabid", "fieldid", "columnid", "menuid", "roleid", "serviceid"])
+  };
+}
+
+function compactUndefined(record: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(record).filter(([, value]) => {
+    if (value === undefined) return false;
+    if (Array.isArray(value) && value.length === 0) return false;
+    if (value && typeof value === "object" && !Array.isArray(value) && !Object.keys(value as Record<string, unknown>).length) return false;
+    return true;
+  }));
+}
+
+function buildDependencySummary(
+  context: GraphContext,
+  selectedNodes: AppBuilderNode[],
+  selectedEdges: AppBuilderEdge[],
+  focusNodeIds: string[]
+): Record<string, unknown> {
+  const selected = new Set(selectedNodes.map(node => node.id));
+  const focus = (focusNodeIds.length ? focusNodeIds : selectedNodes.slice(0, 8).map(node => node.id))
+    .map(id => context.nodeById.get(id))
+    .filter((node): node is AppBuilderNode => Boolean(node));
+
+  const focusSummaries = focus.map(node => {
+    const inbound = context.edges.filter(edge => edge.to === node.id);
+    const outbound = context.edges.filter(edge => edge.from === node.id);
+    const dependents = inbound
+      .filter(edge => isDependencyEdge(edge.type))
+      .slice(0, 24)
+      .map(edge => compactUndefined({
+        relation: edge.type,
+        node: compactNodeRef(context.nodeById.get(edge.from)),
+        in_current_scope: selected.has(edge.from)
+      }));
+    const dependencies = outbound
+      .filter(edge => isDependencyEdge(edge.type))
+      .slice(0, 24)
+      .map(edge => compactUndefined({
+        relation: edge.type,
+        node: compactNodeRef(context.nodeById.get(edge.to)),
+        in_current_scope: selected.has(edge.to)
+      }));
+
+    return compactUndefined({
+      node: compactNodeRef(node),
+      dependencies,
+      dependents,
+      delete_order: deleteOrderForNodeType(node.type),
+      delete_cascade_supported: Boolean(WRITE_ENTITY_CONTRACTS[node.type]?.delete_cascade_supported),
+      shared_usage: sharedUsageForNode(context, node),
+      update_impact: updateImpactForNodeType(node.type)
+    });
+  });
+
+  return {
+    source: "derived_from_graph_edges",
+    focused_nodes: focusSummaries,
+    scope_dependency_counts: {
+      dependencies_edges_in_scope: selectedEdges.filter(edge => isDependencyEdge(edge.type)).length,
+      nodes_with_external_dependents: selectedNodes.filter(node =>
+        context.edges.some(edge => edge.to === node.id && !selected.has(edge.from) && isDependencyEdge(edge.type))
+      ).length
+    },
+    delete_safety_rules: [
+      "Không xóa table/column/window/app nếu chưa xem dependency_summary hoặc cascade plan.",
+      "delete_window cascade chỉ xóa UI metadata/cache/menu/rolemenu/window, không xóa table/column/dữ liệu thật.",
+      "delete_table cascade chỉ xóa metadata liên quan trong App Builder, không drop bảng vật lý hay dữ liệu business.",
+      "Nếu shared_usage cho thấy table/column/menu đang được dùng ở nhiều nơi, cần xác nhận rõ trước khi delete."
+    ]
+  };
+}
+
+function buildWriteContractSummary(selectedNodes: AppBuilderNode[]): Record<string, unknown> {
+  const typesInScope = [...new Set(selectedNodes.map(node => node.type))]
+    .filter(type => WRITE_ENTITY_CONTRACTS[type]);
+  const priorityTypes = typesInScope.length
+    ? typesInScope
+    : ["app", "table", "column", "window", "tab", "field", "menu"];
+
+  return {
+    source: "static_contract_from_app_builder_write_prepare_change",
+    note: "Các contract này phản ánh logic prepare_change hiện tại: lọc payload theo metadata thật, materialize default, validate required fields, rồi apply sau xác nhận.",
+    contracts: Object.fromEntries(priorityTypes.map(type => [type, WRITE_ENTITY_CONTRACTS[type]])),
+    always_filtered_by_metadata: true,
+    apply_requires_confirmation: true,
+    unsupported_without_prepare_change: "Không gọi API ghi trực tiếp từ agent final answer; phải tạo pending plan qua app_builder_prepare_change rồi app_builder_apply_change sau xác nhận."
+  };
+}
+
+function buildCreationReadiness(selectedNodes: AppBuilderNode[], focusNodeIds: string[]): Record<string, unknown> {
+  const nodeTypes = [...new Set(selectedNodes.map(node => node.type))];
+  const writableTypes = nodeTypes.filter(type => WRITE_ENTITY_CONTRACTS[type]);
+  const focusedExistingTargets = selectedNodes
+    .filter(node => focusNodeIds.includes(node.id) && WRITE_ENTITY_CONTRACTS[node.type])
+    .map(node => compactUndefined({
+      node: compactNodeRef(node),
+      update_can_prepare: true,
+      delete_can_prepare: true,
+      delete_cascade_supported: Boolean(WRITE_ENTITY_CONTRACTS[node.type]?.delete_cascade_supported)
+    }));
+
+  const requiredInputs = Object.fromEntries(
+    (writableTypes.length ? writableTypes : ["app", "table", "column", "window", "tab", "field", "menu"])
+      .map(type => [type, {
+        required_fields: WRITE_ENTITY_CONTRACTS[type]?.create_required_fields ?? [],
+        defaults_or_resolvable: WRITE_ENTITY_CONTRACTS[type]?.defaults_or_resolvable ?? {}
+      }])
+  );
+
+  return {
+    source: "derived_from_scope_plus_write_contract",
+    can_prepare_create_when: "Có đủ required fields hoặc có thể resolve/default theo write_contract_summary.",
+    can_prepare_update_when: "Có target id/node_id/id_value và có field update hợp lệ sau khi lọc metadata.",
+    can_prepare_delete_when: "Có target id/node_id/id_value; cascade chỉ dùng khi entity được hỗ trợ và user yêu cầu/xác nhận rõ.",
+    can_apply_after_confirmation: true,
+    requires_user_confirmation_before_apply: true,
+    focused_existing_targets: focusedExistingTargets,
+    create_required_inputs_by_entity: requiredInputs,
+    blocking_conditions: [
+      "Thiếu target id cho update/delete.",
+      "Thiếu required field không tự resolve/default được khi create.",
+      "Tên app/table/window mơ hồ và graph_search không có top match rõ.",
+      "Update không còn field hợp lệ sau khi lọc metadata.",
+      "Delete có shared_usage/rủi ro cao nhưng user chưa xác nhận phạm vi cascade."
+    ],
+    recommended_agent_decision: "Nếu thiếu thông tin trong blocking_conditions thì hỏi lại; nếu đủ thì gọi app_builder_prepare_change, không tự apply."
+  };
+}
+
+function buildOperationPlanFacts(selectedNodes: AppBuilderNode[]): Record<string, unknown> {
+  const types = new Set(selectedNodes.map(node => node.type));
+  const commonSequences: Record<string, unknown> = {
+    create_app_full: [
+      "create_app",
+      "create_or_bind_service/appservice",
+      "create_table",
+      "create_column",
+      "create_window",
+      "create_tab",
+      "create_field",
+      "create_menu",
+      "create_roleapp/rolemenu/access if user wants permissions",
+      "clear_cache_or_verify_cache"
+    ],
+    add_table_to_existing_app: [
+      "resolve app",
+      "resolve/create service binding",
+      "create_table",
+      "create_column",
+      "optional create_window/tab/field/menu",
+      "optional grant access",
+      "verify graph"
+    ],
+    add_field_to_existing_window: [
+      "resolve window",
+      "resolve tab",
+      "resolve or create column on tab table",
+      "create_field mapped to column",
+      "delete/refresh n_cache for window/app",
+      "verify field_maps_column"
+    ],
+    update_metadata: [
+      "resolve node",
+      "load node_detail/subgraph",
+      "prepare update with allowed fields only",
+      "apply after confirmation",
+      "verify node_detail and cache impact"
+    ],
+    delete_window_cascade: ["delete_cache", "delete_field", "delete_tab", "delete_rolemenu", "delete_menu", "delete_window"],
+    delete_table_cascade: ["delete_field", "delete_tab", "delete_access", "delete_archive", "delete_column", "delete_table"],
+    delete_app_cascade: ["delete_cache", "delete_field", "delete_tab", "delete_rolemenu", "delete_menu", "delete_roleapp", "delete_appservice", "delete_domain", "delete_window", "delete_app"]
+  };
+
+  return {
+    source: "static_plan_templates_aligned_with_app_builder_write",
+    relevant_to_scope: {
+      has_app: types.has("app"),
+      has_table: types.has("table"),
+      has_window: types.has("window"),
+      has_tab_or_field: types.has("tab") || types.has("field"),
+      has_menu: types.has("menu"),
+      has_permissions: ["roleapp", "rolemenu", "access"].some(type => types.has(type))
+    },
+    operation_sequences: commonSequences,
+    reference_bindings: [
+      "$create_app.appid -> create_window.appid/create_menu.appid/create_roleapp.appid/create_appservice.appid",
+      "$create_appservice.serviceid or existing serviceid -> create_table.serviceid",
+      "$create_table.tableid -> create_column.tableid/create_tab.tableid/create_access.tableid",
+      "$create_column.columnid -> create_field.columnid",
+      "$create_window.windowid -> create_tab.windowid/create_menu.linkwindowid",
+      "$create_tab.tabid -> create_field.tabid",
+      "$create_menu.menuid -> create_rolemenu.menuid"
+    ],
+    validation_rules: [
+      "Resolve existing node before create to avoid duplicates.",
+      "Use dependency_summary before delete/update destructive fields.",
+      "Payload must be filtered by actual metadata columns before prepare result is considered valid.",
+      "app_builder_apply_change only after explicit user confirmation with a valid plan_id."
+    ],
+    post_apply_verification: [
+      "invalidate graph cache",
+      "graph_search target by id/name",
+      "node_detail target",
+      "verify expected verified_relations exist",
+      "for UI changes, verify/delete n_cache impact if applicable"
+    ]
+  };
+}
+
+function isDependencyEdge(type: string): boolean {
+  return [
+    "app_uses_service",
+    "app_has_appservice",
+    "appservice_links_service",
+    "service_has_table",
+    "app_has_table",
+    "table_has_column",
+    "app_has_window",
+    "window_has_tab",
+    "tab_parent_child",
+    "tab_uses_table",
+    "tab_uses_relation_table",
+    "tab_has_field",
+    "field_maps_column",
+    "column_uses_domain",
+    "field_uses_domain",
+    "column_links_table",
+    "column_links_column",
+    "field_links_table",
+    "field_links_column",
+    "app_has_menu",
+    "menu_links_window",
+    "app_has_domain",
+    "app_has_cache",
+    "cache_for_window",
+    "app_has_roleapp",
+    "role_grants_app",
+    "role_has_rolemenu",
+    "rolemenu_grants_menu",
+    "role_has_table_access",
+    "access_controls_table"
+  ].includes(type);
+}
+
+function deleteOrderForNodeType(type: string): string[] | undefined {
+  const orders: Record<string, string[]> = {
+    app: ["cache", "field", "tab", "rolemenu", "menu", "roleapp", "appservice", "domain", "window", "app"],
+    window: ["cache", "field", "tab", "rolemenu", "menu", "window"],
+    tab: ["field", "tab"],
+    table: ["field", "tab", "access", "archive", "column", "table"],
+    column: ["field", "column"],
+    menu: ["rolemenu", "menu"],
+    role: ["roleapp", "rolemenu", "access", "role if explicitly supported"]
+  };
+  return orders[type];
+}
+
+function updateImpactForNodeType(type: string): string[] {
+  const impacts: Record<string, string[]> = {
+    app: ["Có thể ảnh hưởng menu/window/domain/service binding/roleapp thuộc app.", "Đổi app metadata không tự đổi table vật lý."],
+    table: ["Có thể ảnh hưởng tab dùng table, access permission, column/field mapping.", "Không đồng nghĩa đổi schema vật lý nếu chỉ sửa n_table metadata."],
+    column: ["Có thể ảnh hưởng field_maps_column, lookup/domain, và UI field hiển thị.", "Cần kiểm tra field đang map column trước khi xóa/đổi kiểu."],
+    window: ["Có thể ảnh hưởng tab/field/menu/cache của window.", "Sau đổi window/tab/field thường cần refresh hoặc xóa n_cache."],
+    tab: ["Có thể ảnh hưởng field trong tab và quan hệ parent/child tab.", "Đổi tableid của tab ảnh hưởng field-column mapping."],
+    field: ["Ảnh hưởng UI hiển thị/nhập liệu, domain/lookup, validation và readonly/required behavior."],
+    menu: ["Ảnh hưởng navigation và rolemenu permissions.", "Nếu menu link window, đổi linkwindowid sẽ đổi nơi điều hướng."],
+    roleapp: ["Ảnh hưởng quyền role vào app."],
+    rolemenu: ["Ảnh hưởng quyền role vào menu/navigation."],
+    access: ["Ảnh hưởng quyền thao tác trên table qua các cờ noinsert/noupdate/nodelete/noselect/noexport."]
+  };
+  return impacts[type] ?? ["Cần xem verified_relations/dependency_summary trước khi update để đánh giá ảnh hưởng."];
+}
+
+function sharedUsageForNode(context: GraphContext, node: AppBuilderNode): Record<string, unknown> | undefined {
+  if (node.type === "table") {
+    const tabs = context.edges.filter(edge => edge.to === node.id && ["tab_uses_table", "tab_uses_relation_table"].includes(edge.type));
+    const accesses = context.edges.filter(edge => edge.to === node.id && edge.type === "access_controls_table");
+    return {
+      used_by_tabs_count: tabs.length,
+      access_records_count: accesses.length,
+      safe_to_delete_without_user_confirmation: false
+    };
+  }
+  if (node.type === "column") {
+    const fields = context.edges.filter(edge => edge.to === node.id && edge.type === "field_maps_column");
+    return {
+      mapped_fields_count: fields.length,
+      safe_to_delete_without_user_confirmation: false
+    };
+  }
+  if (node.type === "window") {
+    const menus = context.edges.filter(edge => edge.to === node.id && edge.type === "menu_links_window");
+    const caches = context.edges.filter(edge => edge.to === node.id && edge.type === "cache_for_window");
+    return {
+      linked_menus_count: menus.length,
+      cache_records_count: caches.length,
+      safe_to_delete_without_user_confirmation: false
+    };
+  }
+  if (node.type === "menu") {
+    const rolemenus = context.edges.filter(edge => edge.to === node.id && edge.type === "rolemenu_grants_menu");
+    return {
+      rolemenu_records_count: rolemenus.length,
+      safe_to_delete_without_user_confirmation: false
+    };
+  }
+  return undefined;
 }
 
 function buildNodeDetail(context: GraphContext, nodeId: string, includeFields: boolean): Record<string, unknown> {
