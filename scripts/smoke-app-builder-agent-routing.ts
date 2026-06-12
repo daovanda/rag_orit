@@ -29,6 +29,15 @@ function searchResult(score = 100): string {
   });
 }
 
+function emptySearchResult(): string {
+  return JSON.stringify({
+    mode: "search",
+    query: "Time Sheet",
+    matches_count: 0,
+    matches: []
+  });
+}
+
 ok(inferGraphQuestionIntent("Hệ thống của tôi đang có những gì") === "overview", "overview intent should be detected");
 ok(inferGraphQuestionIntent("hãy đi sâu vào ứng dụng Quản lý thiết bị") === "deep_dive", "deep dive intent should be detected");
 ok(inferGraphQuestionIntent("phân tích luồng window tab field column") === "relationship", "relationship intent should be detected");
@@ -68,6 +77,24 @@ ok(
     "tìm app quản lý"
   ),
   "plain ambiguous search should not continue automatically"
+);
+
+ok(
+  shouldContinueAfterToolResult(
+    "app_builder_graph_search",
+    emptySearchResult(),
+    "hay di sau vao ung dung Time Sheet"
+  ),
+  "deep-dive search with no match should get one extra model pass for fallback search/detail strategy"
+);
+
+ok(
+  !shouldContinueAfterToolResult(
+    "app_builder_graph_search",
+    emptySearchResult(),
+    "tim app Time Sheet"
+  ),
+  "plain search with no match should not continue automatically"
 );
 
 console.log(JSON.stringify({

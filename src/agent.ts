@@ -43,6 +43,9 @@ const AVAILABLE_TOOL_NAMES = new Set<string>(TOOLS.map(tool => tool.name));
 const GRAPH_CONTINUE_TOOLS = new Set([
   "app_builder_graph_search"
 ]);
+const FINAL_ANSWER_ARRAY_LIMIT = 16;
+const FINAL_ANSWER_OBJECT_KEY_LIMIT = 28;
+const FINAL_ANSWER_RECURSION_LIMIT = 3;
 
 function hasAppBuilderWriteResult(toolResults: ToolResultRecord[]): boolean {
   return toolResults.some(result => isAppBuilderWriteTool(result.name));
@@ -223,7 +226,7 @@ function compactToolContentForFinalAnswer(result: ToolResultRecord): string {
         query: data.query,
         types: data.types,
         matches_count: data.matches_count,
-        matches: data.matches,
+        matches: compactRecordArrayForFinalAnswer(data.matches, 12),
         hint: data.hint
       }, null, 2);
     }
@@ -238,6 +241,39 @@ function compactToolContentForFinalAnswer(result: ToolResultRecord): string {
         create_app_branch: data.create_app_branch,
         edit_existing_branch: data.edit_existing_branch,
         proposed_plan_format: data.proposed_plan_format
+      }, null, 2);
+    }
+
+    if (mode === "subgraph") {
+      return JSON.stringify({
+        mode,
+        start_node_ids: data.start_node_ids,
+        depth: data.depth,
+        answer_facts: compactAnswerFactsForFinalAnswer(data.answer_facts),
+        graph_summary: graph ? {
+          node_counts: graph.node_counts,
+          edge_counts: graph.edge_counts,
+          nodes_count: graph.nodes_count,
+          edges_count: graph.edges_count
+        } : undefined,
+        graph_counts: data.graph_counts,
+        missing_node_ids: data.missing_node_ids,
+        cache: data.cache,
+        answer_policy: "Ưu tiên answer_facts. Không dùng raw graph để suy đoán nghiệp vụ nếu verified_relations/inferred_notes không chứng minh."
+      }, null, 2);
+    }
+
+    if (mode === "detail") {
+      return JSON.stringify({
+        mode,
+        requested_node_id: data.requested_node_id,
+        resolved_from: data.resolved_from,
+        node: compactValueForFinalAnswer(data.node),
+        answer_facts: compactAnswerFactsForFinalAnswer(data.answer_facts),
+        detail: compactValueForFinalAnswer(data.detail),
+        neighbors: compactValueForFinalAnswer(data.neighbors),
+        cache: data.cache,
+        answer_policy: "Ưu tiên answer_facts và detail đã xác minh. Tách rõ suy luận/khuyến nghị khỏi dữ liệu đã thấy."
       }, null, 2);
     }
 
@@ -267,6 +303,203 @@ function compactSessionForAnswer(session: Record<string, unknown> | null): Recor
     orgid: session.orgid,
     org_name: session.org_name
   };
+}
+
+function compactAnswerFactsForFinalAnswer(value: unknown): unknown {
+  const facts = asRecord(value);
+  if (!facts) return value;
+
+  return {
+    scope: compactValueForFinalAnswer(facts.scope),
+    flow_summary: compactScalarArrayForFinalAnswer(facts.flow_summary, 8),
+    tables_summary: compactRecordArrayForFinalAnswer(facts.tables_summary, 12),
+    windows_summary: compactRecordArrayForFinalAnswer(facts.windows_summary, 12),
+    menus_summary: compactRecordArrayForFinalAnswer(facts.menus_summary, 10),
+    permissions_summary: compactRecordArrayForFinalAnswer(facts.permissions_summary, 10),
+    runtime_summary: compactValueForFinalAnswer(facts.runtime_summary),
+    workflow_summary: compactRecordArrayForFinalAnswer(facts.workflow_summary, 10),
+    report_summary: compactRecordArrayForFinalAnswer(facts.report_summary, 10),
+    map_layer_summary: compactRecordArrayForFinalAnswer(facts.map_layer_summary, 10),
+    user_org_summary: compactValueForFinalAnswer(facts.user_org_summary),
+    site_summary: compactRecordArrayForFinalAnswer(facts.site_summary, 8),
+    archive_summary: compactRecordArrayForFinalAnswer(facts.archive_summary, 10),
+    verified_relations: compactRecordArrayForFinalAnswer(facts.verified_relations, 24),
+    dependency_summary: compactValueForFinalAnswer(facts.dependency_summary),
+    write_contract_summary: compactValueForFinalAnswer(facts.write_contract_summary),
+    creation_readiness: compactValueForFinalAnswer(facts.creation_readiness),
+    operation_plan_facts: compactValueForFinalAnswer(facts.operation_plan_facts),
+    inferred_notes: compactScalarArrayForFinalAnswer(facts.inferred_notes, 8),
+    truncated: facts.truncated
+  };
+}
+
+function compactScalarArrayForFinalAnswer(value: unknown, limit: number): unknown {
+  const items = toArrayValues(value);
+  if (!items.length) return Array.isArray(value) ? [] : value;
+
+  return {
+    count: items.length,
+    items: items.slice(0, limit).map(item => String(item)),
+    truncated: items.length > limit
+  };
+}
+
+function compactRecordArrayForFinalAnswer(value: unknown, limit = FINAL_ANSWER_ARRAY_LIMIT): unknown {
+  const records = recordArray(value);
+  if (!records.length) return Array.isArray(value) ? [] : value;
+
+  return {
+    count: records.length,
+    items: records.slice(0, limit).map(record => compactValueForFinalAnswer(record, 1)),
+    truncated: records.length > limit
+  };
+}
+
+function compactValueForFinalAnswer(value: unknown, depth = 0): unknown {
+  if (value === null || value === undefined) return value;
+  if (typeof value !== "object") return value;
+
+  if (Array.isArray(value)) {
+    return {
+      count: value.length,
+      items: value
+        .slice(0, FINAL_ANSWER_ARRAY_LIMIT)
+        .map(item => depth >= FINAL_ANSWER_RECURSION_LIMIT
+          ? compactLeafForFinalAnswer(item)
+          : compactValueForFinalAnswer(item, depth + 1)),
+      truncated: value.length > FINAL_ANSWER_ARRAY_LIMIT
+    };
+  }
+
+  const entries = Object.entries(value as Record<string, unknown>);
+  const compact: Record<string, unknown> = {};
+  for (const [key, entryValue] of entries.slice(0, FINAL_ANSWER_OBJECT_KEY_LIMIT)) {
+    compact[key] = depth >= FINAL_ANSWER_RECURSION_LIMIT
+      ? compactLeafForFinalAnswer(entryValue)
+      : compactValueForFinalAnswer(entryValue, depth + 1);
+  }
+  if (entries.length > FINAL_ANSWER_OBJECT_KEY_LIMIT) {
+    compact._truncated_keys = entries.length - FINAL_ANSWER_OBJECT_KEY_LIMIT;
+  }
+  return compact;
+}
+
+function compactLeafForFinalAnswer(value: unknown): unknown {
+  if (value === null || value === undefined) return value;
+  if (typeof value !== "object") return value;
+  if (Array.isArray(value)) return { count: value.length };
+  return { keys: Object.keys(value as Record<string, unknown>).slice(0, FINAL_ANSWER_OBJECT_KEY_LIMIT) };
+}
+
+function isUnusableModelAnswer(answer: string): boolean {
+  const text = normalizeVietnameseText(answer).replace(/[.!?]+$/g, "").trim();
+  return !text
+    || text === "khong tao duoc cau tra loi"
+    || text === "khong the tao duoc cau tra loi"
+    || text === "khong co cau tra loi";
+}
+
+function createGraphFactsFallbackAnswer(userMessage: string, toolResults: ToolResultRecord[]): string | null {
+  const graphResult = [...toolResults].reverse().find(result => isAppBuilderGraphTool(result.name));
+  if (!graphResult) return null;
+
+  try {
+    const data = JSON.parse(graphResult.content) as Record<string, unknown>;
+    const facts = asRecord(data.answer_facts);
+    if (!facts) return null;
+
+    const flowSummary = toArrayValues(facts.flow_summary).map(String).filter(Boolean).slice(0, 5);
+    const tables = recordArray(facts.tables_summary);
+    const windows = recordArray(facts.windows_summary);
+    const menus = recordArray(facts.menus_summary);
+    const permissions = recordArray(facts.permissions_summary);
+    const workflows = recordArray(facts.workflow_summary);
+    const reports = recordArray(facts.report_summary);
+    const mapLayers = recordArray(facts.map_layer_summary);
+    const sites = recordArray(facts.site_summary);
+    const archives = recordArray(facts.archive_summary);
+    const relations = recordArray(facts.verified_relations);
+    const inferredNotes = toArrayValues(facts.inferred_notes).map(String).filter(Boolean).slice(0, 5);
+    const scope = asRecord(facts.scope);
+    const nodeTypes = asRecord(scope?.node_types);
+
+    const lines: string[] = [
+      "Tôi đã đọc được cấu trúc liên quan trong App Builder. Tóm tắt ngắn từ dữ liệu đã thấy:"
+    ];
+
+    if (flowSummary.length) {
+      lines.push("", "Đã thấy trong graph:");
+      lines.push(...flowSummary.map(item => `- ${item}`));
+    }
+
+    const scopeLine = summarizeScopeTypes(nodeTypes);
+    if (scopeLine) lines.push(`- Phạm vi đọc gồm: ${scopeLine}.`);
+    if (tables.length) lines.push(`- Bảng nổi bật: ${summarizeFactLabels(tables, 6)}.`);
+    if (windows.length) lines.push(`- Window nổi bật: ${summarizeFactLabels(windows, 6)}.`);
+    if (menus.length) lines.push(`- Menu nổi bật: ${summarizeFactLabels(menus, 5)}.`);
+    if (permissions.length) lines.push(`- Quyền/truy cập thấy được: ${summarizeFactLabels(permissions, 5)}.`);
+    if (workflows.length) lines.push(`- Workflow thấy được: ${summarizeFactLabels(workflows, 5)}.`);
+    if (reports.length) lines.push(`- Report thấy được: ${summarizeFactLabels(reports, 5)}.`);
+    if (mapLayers.length) lines.push(`- Map/layer thấy được: ${summarizeFactLabels(mapLayers, 5)}.`);
+    if (sites.length) lines.push(`- Site thấy được: ${summarizeFactLabels(sites, 4)}.`);
+    if (archives.length) lines.push(`- Archive metadata thấy được: ${summarizeFactLabels(archives, 4)}.`);
+    if (relations.length) lines.push(`- Quan hệ đã xác minh: ${relations.length} cạnh quan trọng trong phạm vi đọc.`);
+
+    const normalizedQuestion = normalizeVietnameseText(userMessage);
+    if (/(bo sung|de xuat|hoan chinh|toi uu|can them|hop ly)/.test(normalizedQuestion)) {
+      lines.push("", "Khuyến nghị thận trọng:");
+      if (!menus.length) lines.push("- Chưa thấy menu rõ trong phạm vi này; nên kiểm tra app đã có menu dẫn tới các window chính chưa.");
+      if (!permissions.length) lines.push("- Chưa thấy đầy đủ roleapp/rolemenu/access trong phạm vi này; nên rà lại quyền app, quyền menu và quyền bảng trước khi đưa vào dùng thật.");
+      if (!relations.length) lines.push("- Chưa thấy nhiều quan hệ đã xác minh; nên mở sâu vào các window/table chính để kiểm tra tab -> table, field -> column và domain/lookup.");
+      if (inferredNotes.length) lines.push(...inferredNotes.map(note => `- ${note}`));
+      if (menus.length && permissions.length && relations.length && !inferredNotes.length) {
+        lines.push("- Nên đi sâu vào từng window chính để kiểm tra field bắt buộc, domain/lookup, menu liên kết và quyền truy cập theo vai trò.");
+      }
+    } else if (inferredNotes.length) {
+      lines.push("", "Suy luận/ghi chú:");
+      lines.push(...inferredNotes.map(note => `- ${note}`));
+    }
+
+    return lines.join("\n").trim();
+  } catch {
+    return null;
+  }
+}
+
+function summarizeScopeTypes(nodeTypes: Record<string, unknown> | null): string {
+  if (!nodeTypes) return "";
+  return Object.entries(nodeTypes)
+    .filter(([, count]) => Number(count) > 0)
+    .slice(0, 10)
+    .map(([type, count]) => `${String(count)} ${type}`)
+    .join(", ");
+}
+
+function summarizeFactLabels(records: Record<string, unknown>[], limit: number): string {
+  const labels = records
+    .slice(0, limit)
+    .map(record => String(
+      record.label
+      ?? record.name
+      ?? record.appname
+      ?? record.windowname
+      ?? record.tablename
+      ?? record.menuname
+      ?? record.workflowname
+      ?? record.stepname
+      ?? record.reportname
+      ?? record.mapname
+      ?? record.layername
+      ?? record.sitename
+      ?? record.username
+      ?? record.fullname
+      ?? record.orgname
+      ?? record.id
+      ?? ""
+    ))
+    .filter(Boolean);
+  const suffix = records.length > labels.length ? `, ... (${records.length} mục)` : "";
+  return `${labels.join(", ")}${suffix}`;
 }
 
 function createDeterministicChangeAnswer(toolResults: ToolResultRecord[]): string | null {
@@ -448,7 +681,9 @@ export function shouldContinueAfterToolResult(toolName: string, toolResult: stri
   try {
     const data = JSON.parse(toolResult) as Record<string, unknown>;
     if (String(data.mode ?? "") !== "search") return false;
-    if (Number(data.matches_count ?? 0) === 1) return true;
+    const matchesCount = Number(data.matches_count ?? 0);
+    if (matchesCount === 0) return true;
+    if (matchesCount === 1) return true;
     const matches = recordArray(data.matches);
     return isStrongSearchMatch(matches[0]);
   } catch {
@@ -914,7 +1149,8 @@ Không nhắc đến tool/function nội bộ.`
     ]
   }, env);
 
-  const answer = cleanMarkdownArtifacts(response.response ?? "Không tạo được câu trả lời.");
+  const cleanedAnswer = cleanMarkdownArtifacts(response.response?.trim() ?? "");
+  const answer = cleanedAnswer || "Không tạo được câu trả lời.";
   addDebugStep(debugSteps, "rag.final_answer", "ok", "Đã tạo câu trả lời cuối từ RAG/context.", {
     answer_chars: answer.length
   });
@@ -957,8 +1193,9 @@ Nếu người hỏi dùng tiếng Việt, toàn bộ câu trả lời phải l�
 Hãy trả lời theo đúng ý định của user, không kể lại toàn bộ JSON.
 Chỉ nêu những thông tin liên quan trực tiếp tới câu hỏi. Nếu câu hỏi rộng, tóm tắt ngắn gọn theo nhóm.
 Khi nhận kết quả graph tool, hãy tự đọc nodes/edges/detail và diễn giải theo ý định của user; không render theo template cứng.
-Nếu tool result có answer_facts, ưu tiên dùng answer_facts để trả lời: flow_summary trước, sau đó chỉ dùng tables_summary/windows_summary/menus_summary/permissions_summary khi liên quan trực tiếp tới câu hỏi. Dùng verified_relations như bằng chứng đã thấy; dùng inferred_notes như phần suy luận/khuyến nghị.
+Nếu tool result có answer_facts, ưu tiên dùng answer_facts để trả lời: flow_summary trước; sau đó chỉ dùng tables_summary/windows_summary/menus_summary/permissions_summary/workflow_summary/report_summary/map_layer_summary/user_org_summary/site_summary/archive_summary khi liên quan trực tiếp tới câu hỏi. Dùng runtime_summary để giải thích workflow/report/GIS/archive runtime. Dùng verified_relations như bằng chứng đã thấy; dùng inferred_notes như phần suy luận/khuyến nghị.
 Với yêu cầu tạo/sửa/xóa, bắt buộc đọc dependency_summary, write_contract_summary, creation_readiness và operation_plan_facts trước khi đề xuất plan. Nếu creation_readiness có blocking_conditions liên quan tới yêu cầu, hãy hỏi lại hoặc tạo prepare_change thay vì tự bịa payload.
+Phân biệt rõ App Builder metadata với runtime ngoài App Builder. SQLCloud/table/view/procedure/query/column alter là physical database/runtime, source editor là file/source runtime, upload là attachment runtime; không được nói có thể apply bằng App Builder metadata tool nếu tool/schema chưa hỗ trợ write contract riêng.
 Mặc định hãy giải thích bằng flow nghiệp vụ trước: đối tượng này dùng để làm gì, nó đi qua app/menu/window/tab/table/field/column như thế nào, điểm nào liên quan trực tiếp tới câu hỏi.
 Không mở đầu bằng bảng/list dài. Chỉ liệt kê bảng/window/menu đầy đủ khi người dùng hỏi rõ "liệt kê", "danh sách", "có những bảng/window nào", hoặc sau khi đã giải thích flow ngắn gọn.
 Khi cần liệt kê, giới hạn danh sách ở các mục quan trọng nhất, nhóm phần còn lại thành số lượng/tóm tắt, và gợi ý người dùng hỏi sâu vào mục cụ thể nếu cần.
@@ -966,6 +1203,9 @@ Bắt buộc phân biệt "Đã thấy trong graph/tool result" với "Suy đoá
 Nếu câu trả lời vừa có dữ liệu đọc được vừa có đề xuất, tách rõ hai phần: dữ liệu đã thấy trước, suy đoán/khuyến nghị sau.
 Nếu một thông tin không xuất hiện trong graph/detail/search/subgraph hoặc tool context, hãy nói rõ đó là suy luận, giả định, hoặc khuyến nghị.
 Nếu chỉ thấy metadata quyền/truy cập, không tự suy thành hành vi sử dụng thực tế.
+Không nói n_cache là cache dữ liệu nghiệp vụ/bảng. Trong Zilcode hiện tại, n_cache là generated window/app layout cache; chỉ liên hệ tới refresh/delete cache khi metadata UI thay đổi.
+Khi nói về quyền, phải tách rõ: roleapp là quyền vào app, rolemenu là quyền vào menu, access là quyền/cờ hạn chế trên table. Không nói roleapp một mình quyết định toàn bộ menu/window hiển thị nếu graph không chứng minh rolemenu/access tương ứng.
+Với câu hỏi "cách hoạt động" hoặc "flow", trả lời tối đa 3-5 đoạn/bullet chính trước. Chỉ mở rộng danh sách window/table/menu khi user hỏi rõ "liệt kê đầy đủ" hoặc "chi tiết từng mục".
 Nếu người dùng hỏi về hệ thống, tóm tắt theo nhóm: session/role nếu có, các app chính, mỗi app có số bảng/window/menu và điểm đáng chú ý. Không liệt kê node/edge thô.
 Nếu người dùng hỏi "đi sâu", "phân tích", "xem kỹ" một app/table/window, hãy mô tả cấu trúc và các liên kết quan trọng, không chỉ liệt kê kết quả tìm kiếm.
 Nếu người dùng hỏi về một app/table/window/tab/field cụ thể, tập trung vào node đó và quan hệ trực tiếp. Nếu top search match rõ, coi đó là đối tượng người dùng muốn nói tới và diễn giải tiếp.
@@ -985,7 +1225,16 @@ Không nhắc đến tool/function nội bộ.`
     ]
   }, env);
 
-  const answer = cleanMarkdownArtifacts(response.response ?? "Không tạo được câu trả lời.");
+  const cleanedAnswer = cleanMarkdownArtifacts(response.response?.trim() ?? "");
+  const fallbackAnswer = isUnusableModelAnswer(cleanedAnswer)
+    ? createGraphFactsFallbackAnswer(userMessage, toolResults)
+    : null;
+  const answer = fallbackAnswer ?? (cleanedAnswer || "Không tạo được câu trả lời.");
+  if (fallbackAnswer) {
+    addDebugStep(debugSteps, "tools.final_answer_fallback", "ok", "Model final-answer trả rỗng/lỗi chung; dùng answer_facts để tạo fallback.", {
+      answer_chars: fallbackAnswer.length
+    });
+  }
   addDebugStep(debugSteps, "tools.final_answer", "ok", "Đã tạo câu trả lời cuối từ kết quả tool.", {
     answer_chars: answer.length
   });
@@ -1318,14 +1567,15 @@ Khi trả lời từ graph, không đọc lại JSON. Hãy tóm tắt đúng ph�
       });
 
       const directAnswer = cleanMarkdownArtifacts(response.response?.trim() ?? "");
-      if (directAnswer && toolResults.length === 0) {
+      const directAnswerIsUsable = directAnswer.length > 0 && !isUnusableModelAnswer(directAnswer);
+      if (directAnswerIsUsable && toolResults.length === 0) {
         return {
           answer: directAnswer,
           toolsCalled
         };
       }
 
-      if (directAnswer && toolResults.length > 0 && !hasAppBuilderWriteResult(toolResults)) {
+      if (directAnswerIsUsable && toolResults.length > 0 && !hasAppBuilderWriteResult(toolResults)) {
         addDebugStep(debugSteps, "agent.direct_answer_after_tools", "ok", "Dùng câu trả lời trực tiếp của model sau khi đọc tool results.", {
           iteration: i + 1,
           tool_results: toolResults.map(result => result.name),
@@ -1450,7 +1700,10 @@ Khi trả lời từ graph, không đọc lại JSON. Hãy tóm tắt đúng ph�
 
       if (toolCall.name === "general_chat") generalChatResult = toolResult;
       if (toolCall.name === "rag_search") hasRagSearchResult = true;
-      if (shouldContinueAfterToolResult(toolCall.name, toolResult, userMessage)) shouldLetModelInspectToolResult = true;
+      const sameToolResultsCount = toolResults.filter(result => result.name === toolCall.name).length;
+      if (sameToolResultsCount <= 1 && shouldContinueAfterToolResult(toolCall.name, toolResult, userMessage)) {
+        shouldLetModelInspectToolResult = true;
+      }
     }
 
     if (hasRagSearchResult) {

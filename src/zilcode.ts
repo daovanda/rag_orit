@@ -1470,6 +1470,14 @@ const APP_BUILDER_RECORD_SPECS: AppBuilderRecordSpec[] = [
     summary_keys: ["appid", "appname", "appcode", "description", "siteid", "seqno", "apptype", "theme", "translate", "linkurl", "startexec", "icon", "color"]
   },
   {
+    key: "sites",
+    description: "Site/tenant metadata. Many App Builder records are scoped by siteid.",
+    table_aliases: ["NSite"],
+    table_names: ["n_site"],
+    summary_keys: ["siteid", "sitename", "sitecode", "description", "domain", "dbname", "dbserver", "hascache", "textbox", "url", "options"],
+    optional: true
+  },
+  {
     key: "services",
     description: "Data service metadata. App links to service through n_appservice; tables belong to service.",
     table_aliases: ["NService"],
@@ -1566,6 +1574,46 @@ const APP_BUILDER_RECORD_SPECS: AppBuilderRecordSpec[] = [
     table_aliases: ["NArchive"],
     table_names: ["n_archive"],
     summary_keys: ["archiveid", "archivetype", "archivetime", "recordid", "tableid", "siteid"],
+    optional: true
+  },
+  {
+    key: "workflows",
+    description: "Workflow/BPMN definitions linked to an app and referenced by tabs through workflowid.",
+    table_aliases: ["NWorkflow"],
+    table_names: ["n_workflow"],
+    summary_keys: ["workflowid", "workflowname", "description", "contentjson", "configjson", "appid", "siteid"],
+    optional: true
+  },
+  {
+    key: "wfsteps",
+    description: "Workflow steps. Runtime groups these rows by workflowid and binds steps to role/user/window.",
+    table_aliases: ["NWfStep", "NWFStep"],
+    table_names: ["n_wfstep"],
+    summary_keys: ["stepid", "workflowid", "elementid", "steptype", "stepname", "status", "reject", "duration", "roleid", "userid", "windowid", "ins", "outs", "siteid"],
+    optional: true
+  },
+  {
+    key: "reports",
+    description: "Report/analyst metadata. Menus can link reports through reportid; reports can use tableid as data source.",
+    table_aliases: ["NReport"],
+    table_names: ["n_report"],
+    summary_keys: ["reportid", "reportname", "reporttype", "description", "contentjson", "tableid", "appid", "siteid"],
+    optional: true
+  },
+  {
+    key: "maps",
+    description: "GIS map configuration metadata.",
+    table_aliases: ["NMap"],
+    table_names: ["n_map"],
+    summary_keys: ["mapid", "mapname", "level", "centerx", "centery", "projection", "subtype", "subtypefield", "workbook", "siteid"],
+    optional: true
+  },
+  {
+    key: "layers",
+    description: "GIS layer metadata. Menus/tables can reference layers through maplayer; layers can link to service/table.",
+    table_aliases: ["NLayer"],
+    table_names: ["n_layer"],
+    summary_keys: ["layerid", "layername", "alias", "layertype", "url", "subtype", "layergroup", "serviceid", "tableid", "isreadonly", "iscache", "invisible", "ismaster", "workbook", "workbookid", "siteid"],
     optional: true
   },
   {
@@ -1741,6 +1789,10 @@ function buildAppBuilderInventory(
   const rolemenus = recordLists.rolemenus ?? [];
   const accesses = recordLists.accesses ?? [];
   const archives = recordLists.archives ?? [];
+  const workflows = recordLists.workflows ?? [];
+  const wfsteps = recordLists.wfsteps ?? [];
+  const reports = recordLists.reports ?? [];
+  const layers = recordLists.layers ?? [];
 
   const apps = applications.map(app => {
     const appid = getCaseInsensitiveValue(app, "appid");
@@ -1773,6 +1825,17 @@ function buildAppBuilderInventory(
     const tableIds = collectAppBuilderIds(appTables, "tableid");
     const appAccesses = accesses.filter(access => tableIds.has(String(getCaseInsensitiveValue(access, "tableid") ?? "")));
     const appArchives = archives.filter(archive => tableIds.has(String(getCaseInsensitiveValue(archive, "tableid") ?? "")));
+    const appWorkflows = workflows.filter(workflow => sameZilcodeId(getCaseInsensitiveValue(workflow, "appid"), appid));
+    const workflowIds = collectAppBuilderIds(appWorkflows, "workflowid");
+    const appWfSteps = wfsteps.filter(step => workflowIds.has(String(getCaseInsensitiveValue(step, "workflowid") ?? "")));
+    const appReports = reports.filter(report =>
+      sameZilcodeId(getCaseInsensitiveValue(report, "appid"), appid)
+      || tableIds.has(String(getCaseInsensitiveValue(report, "tableid") ?? ""))
+    );
+    const appLayers = layers.filter(layer =>
+      tableIds.has(String(getCaseInsensitiveValue(layer, "tableid") ?? ""))
+      || serviceIds.has(String(getCaseInsensitiveValue(layer, "serviceid") ?? ""))
+    );
 
     return {
       appid,
@@ -1789,6 +1852,10 @@ function buildAppBuilderInventory(
       rolemenus_count: appRoleMenus.length,
       accesses_count: appAccesses.length,
       archives_count: appArchives.length,
+      workflows_count: appWorkflows.length,
+      wfsteps_count: appWfSteps.length,
+      reports_count: appReports.length,
+      layers_count: appLayers.length,
       appservices: appServices,
       services: appServiceRecords,
       tables: appTables.map(table => {
@@ -1836,6 +1903,14 @@ function buildAppBuilderInventory(
       roleapps: appRoleApps,
       rolemenus: appRoleMenus,
       accesses: appAccesses,
+      workflows: appWorkflows.map(workflow => ({
+        ...workflow,
+        steps_count: appWfSteps.filter(step => sameZilcodeId(getCaseInsensitiveValue(step, "workflowid"), getCaseInsensitiveValue(workflow, "workflowid"))).length
+      })),
+      wfsteps: appWfSteps,
+      reports: appReports,
+      layers: appLayers,
+      archives: appArchives,
       archives_summary: {
         records_count: appArchives.length,
         tableids: [...new Set(appArchives.map(archive => String(getCaseInsensitiveValue(archive, "tableid") ?? "")).filter(Boolean))]

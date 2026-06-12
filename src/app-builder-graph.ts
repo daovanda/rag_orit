@@ -1,6 +1,7 @@
 import type { Env } from "./config";
 import { asRecord, getCaseInsensitiveValue, getNumberArg, getStringArg, toArrayValues, truncateDebugText } from "./utils";
 import { buildZilcodeAppBuilderBlueprint, type ZilcodeSession } from "./zilcode";
+import { ZILCODE_SEMANTIC_GUIDE } from "./zilcode-semantic";
 
 export const APP_BUILDER_GRAPH_TOOL_NAMES = new Set([
   "app_builder_graph_overview",
@@ -61,6 +62,13 @@ interface AnswerFacts {
   windows_summary: Record<string, unknown>[];
   menus_summary: Record<string, unknown>[];
   permissions_summary: Record<string, unknown>[];
+  runtime_summary: Record<string, unknown>;
+  workflow_summary: Record<string, unknown>[];
+  report_summary: Record<string, unknown>[];
+  map_layer_summary: Record<string, unknown>[];
+  user_org_summary: Record<string, unknown>;
+  site_summary: Record<string, unknown>[];
+  archive_summary: Record<string, unknown>[];
   verified_relations: VerifiedRelationFact[];
   dependency_summary: Record<string, unknown>;
   write_contract_summary: Record<string, unknown>;
@@ -104,7 +112,17 @@ const CHILD_KEYS = new Set([
   "rolemenus",
   "accesses",
   "archives",
-  "archives_summary"
+  "archives_summary",
+  "workflows",
+  "wfsteps",
+  "reports",
+  "layers",
+  "maps",
+  "sites",
+  "users",
+  "roleusers",
+  "orgs",
+  "orgusers"
 ]);
 const GRAPH_CONTEXT_CACHE_TTL_MS = 90 * 1000;
 const graphContextCache = new Map<string, { expiresAt: number; context: GraphContext }>();
@@ -389,7 +407,17 @@ function buildGraphFromBlueprint(blueprint: Record<string, unknown>): GraphConte
   const tabById = new Map<string, string>();
   const menuById = new Map<string, string>();
   const domainById = new Map<string, string>();
+  const workflowById = new Map<string, string>();
+  const reportById = new Map<string, string>();
+  const mapById = new Map<string, string>();
+  const layerById = new Map<string, string>();
+  const roleById = new Map<string, string>();
+  const userById = new Map<string, string>();
+  const orgById = new Map<string, string>();
   const pendingTabParents: Array<{ child: string; parenttabid: unknown }> = [];
+  const pendingTabWorkflows: Array<{ tabNodeId: string; workflowid: unknown }> = [];
+  const pendingMenuReports: Array<{ menuNodeId: string; reportid: unknown }> = [];
+  const pendingMenuLayers: Array<{ menuNodeId: string; maplayer: unknown }> = [];
   const pendingColumnLinks: Array<{ columnNodeId: string; domainid?: unknown; linktableid?: unknown; linkcolumn?: unknown }> = [];
 
   const addNode = (node: AppBuilderNode, source?: SourceRecord): void => {
@@ -434,6 +462,11 @@ function buildGraphFromBlueprint(blueprint: Record<string, unknown>): GraphConte
     const roleapps = toRecords(app.roleapps);
     const rolemenus = toRecords(app.rolemenus);
     const accesses = toRecords(app.accesses);
+    const archives = toRecords(app.archives);
+    const workflows = toRecords(app.workflows);
+    const wfsteps = toRecords(app.wfsteps);
+    const reports = toRecords(app.reports);
+    const layers = toRecords(app.layers);
 
     addNode({
       id: appNodeId,
@@ -449,7 +482,12 @@ function buildGraphFromBlueprint(blueprint: Record<string, unknown>): GraphConte
         caches: caches.length,
         roleapps: roleapps.length,
         rolemenus: rolemenus.length,
-        accesses: accesses.length
+        accesses: accesses.length,
+        archives: archives.length,
+        workflows: workflows.length,
+        wfsteps: wfsteps.length,
+        reports: reports.length,
+        layers: layers.length
       },
       has_detail: true
     }, { type: "app", record: app });
@@ -542,6 +580,22 @@ function buildGraphFromBlueprint(blueprint: Record<string, unknown>): GraphConte
         columnRecordByNodeId.set(columnNodeId, column);
       }
     }
+
+    for (const archive of archives) {
+      const archiveKey = stringValue(ci(archive, "archiveid") ?? fallbackId(archive, "archive"));
+      const archiveNodeId = `archive:${idPart(archiveKey)}`;
+      addNode({
+        id: archiveNodeId,
+        type: "archive",
+        label: `archive ${archiveKey}`,
+        summary: compactRecord(archive, ["archiveid", "archivetype", "archivetime", "recordid", "tableid", "siteid"]),
+        has_detail: true
+      }, { type: "archive", record: archive, parent: app });
+      addEdge({ from: appNodeId, to: archiveNodeId, type: "app_has_archive" });
+      const tableId = stringValue(ci(archive, "tableid"));
+      const tableNodeId = tableId ? tableById.get(tableId) : undefined;
+      if (tableNodeId) addEdge({ from: tableNodeId, to: archiveNodeId, type: "table_has_archive" });
+    }
   }
 
   const domainsCollection = asRecord(collections.domains);
@@ -601,6 +655,87 @@ function buildGraphFromBlueprint(blueprint: Record<string, unknown>): GraphConte
       if (linkColumnNodeId) {
         addEdge({ from: pending.columnNodeId, to: linkColumnNodeId, type: "column_links_column" });
       }
+    }
+  }
+
+  const mapsCollection = asRecord(collections.maps);
+  for (const mapRecord of toRecords(mapsCollection?.records)) {
+    const mapKey = stringValue(ci(mapRecord, "mapid") ?? ci(mapRecord, "mapname") ?? fallbackId(mapRecord, "map"));
+    const mapNodeId = `map:${idPart(mapKey)}`;
+    addNode({
+      id: mapNodeId,
+      type: "map",
+      label: labelOf(mapRecord, ["mapname", "description"], mapNodeId),
+      summary: compactRecord(mapRecord, ["mapid", "mapname", "level", "centerx", "centery", "projection", "subtype", "subtypefield", "workbook", "siteid"]),
+      has_detail: true
+    }, { type: "map", record: mapRecord });
+    mapById.set(mapKey, mapNodeId);
+    addEdge({ from: rootId, to: mapNodeId, type: "app_builder_has_map" });
+  }
+
+  const layersCollection = asRecord(collections.layers);
+  for (const layer of toRecords(layersCollection?.records)) {
+    const layerKey = stringValue(ci(layer, "layerid") ?? ci(layer, "maplayer") ?? ci(layer, "layername") ?? fallbackId(layer, "layer"));
+    const layerNodeId = `layer:${idPart(layerKey)}`;
+    addNode({
+      id: layerNodeId,
+      type: "layer",
+      label: labelOf(layer, ["layername", "alias", "description"], layerNodeId),
+      summary: compactRecord(layer, ["layerid", "layername", "alias", "layertype", "url", "subtype", "layergroup", "serviceid", "tableid", "isreadonly", "iscache", "invisible", "ismaster", "workbook", "workbookid", "siteid"]),
+      has_detail: true
+    }, { type: "layer", record: layer });
+    layerById.set(layerKey, layerNodeId);
+    addEdge({ from: rootId, to: layerNodeId, type: "app_builder_has_layer" });
+    const tableId = stringValue(ci(layer, "tableid"));
+    const tableNodeId = tableId ? tableById.get(tableId) : undefined;
+    if (tableNodeId) addEdge({ from: layerNodeId, to: tableNodeId, type: "layer_uses_table" });
+    const serviceId = stringValue(ci(layer, "serviceid"));
+    const serviceNodeId = serviceId ? serviceById.get(serviceId) : undefined;
+    if (serviceNodeId) addEdge({ from: layerNodeId, to: serviceNodeId, type: "layer_uses_service" });
+    const mapId = stringValue(ci(layer, "mapid"));
+    const mapNodeId = mapId ? mapById.get(mapId) : undefined;
+    if (mapNodeId) addEdge({ from: mapNodeId, to: layerNodeId, type: "map_has_layer" });
+  }
+
+  for (const app of apps) {
+    const appid = stringValue(ci(app, "appid") ?? fallbackId(app, "app"));
+    const appNodeId = `app:${idPart(appid)}`;
+
+    for (const workflow of toRecords(app.workflows)) {
+      const workflowKey = stringValue(ci(workflow, "workflowid") ?? ci(workflow, "workflowname") ?? fallbackId(workflow, "workflow"));
+      const workflowNodeId = `workflow:${idPart(workflowKey)}`;
+      addNode({
+        id: workflowNodeId,
+        type: "workflow",
+        label: labelOf(workflow, ["workflowname", "description"], workflowNodeId),
+        summary: compactRecord(workflow, ["workflowid", "workflowname", "description", "appid", "siteid", "steps_count"]),
+        has_detail: true
+      }, { type: "workflow", record: workflow, parent: app });
+      workflowById.set(workflowKey, workflowNodeId);
+      addEdge({ from: appNodeId, to: workflowNodeId, type: "app_has_workflow" });
+    }
+
+    for (const report of toRecords(app.reports)) {
+      const reportKey = stringValue(ci(report, "reportid") ?? ci(report, "reportname") ?? fallbackId(report, "report"));
+      const reportNodeId = `report:${idPart(reportKey)}`;
+      addNode({
+        id: reportNodeId,
+        type: "report",
+        label: labelOf(report, ["reportname", "description"], reportNodeId),
+        summary: compactRecord(report, ["reportid", "reportname", "reporttype", "description", "appid", "tableid", "siteid"]),
+        has_detail: true
+      }, { type: "report", record: report, parent: app });
+      reportById.set(reportKey, reportNodeId);
+      addEdge({ from: appNodeId, to: reportNodeId, type: "app_has_report" });
+      const tableId = stringValue(ci(report, "tableid"));
+      const tableNodeId = tableId ? tableById.get(tableId) : undefined;
+      if (tableNodeId) addEdge({ from: reportNodeId, to: tableNodeId, type: "report_uses_table" });
+    }
+
+    for (const layer of toRecords(app.layers)) {
+      const layerKey = stringValue(ci(layer, "layerid") ?? ci(layer, "maplayer") ?? ci(layer, "layername"));
+      const layerNodeId = layerKey ? layerById.get(layerKey) : undefined;
+      if (layerNodeId) addEdge({ from: appNodeId, to: layerNodeId, type: "app_has_layer" });
     }
   }
 
@@ -664,6 +799,13 @@ function buildGraphFromBlueprint(blueprint: Record<string, unknown>): GraphConte
             type: "tab_uses_table",
             metadata: compactRecord(tab, ["tableid", "linktableid", "linkchildfield", "linkparentfield"])
           });
+        }
+
+        const workflowId = ci(tab, "workflowid");
+        if (workflowId !== undefined && workflowId !== null && String(workflowId) !== "0") {
+          const workflowNodeId = workflowById.get(String(workflowId));
+          if (workflowNodeId) addEdge({ from: tabNodeId, to: workflowNodeId, type: "tab_uses_workflow" });
+          else pendingTabWorkflows.push({ tabNodeId, workflowid: workflowId });
         }
 
         if (tabid) tabById.set(tabid, tabNodeId);
@@ -751,7 +893,7 @@ function buildGraphFromBlueprint(blueprint: Record<string, unknown>): GraphConte
         label: labelOf(menu, ["menuname", "translate", "name", "description"], menuNodeId),
         summary: compactRecord(menu, [
           "menuid", "menuname", "translate", "parentid", "seqno", "linktype",
-          "linkwindowid", "windowid", "appid", "execname", "icon"
+          "linkwindowid", "windowid", "appid", "execname", "icon", "reportid", "maplayer", "subtype", "menutype"
         ]),
         has_detail: true
       }, { type: "menu", record: menu, parent: app });
@@ -768,10 +910,33 @@ function buildGraphFromBlueprint(blueprint: Record<string, unknown>): GraphConte
           metadata: compactRecord(menu, ["linkwindowid", "windowid", "execname"])
         });
       }
+
+      const reportId = ci(menu, "reportid");
+      if (reportId !== undefined && reportId !== null && String(reportId) !== "0") {
+        const reportNodeId = reportById.get(String(reportId));
+        if (reportNodeId) addEdge({ from: menuNodeId, to: reportNodeId, type: "menu_links_report", metadata: compactRecord(menu, ["reportid", "menutype", "execname"]) });
+        else pendingMenuReports.push({ menuNodeId, reportid: reportId });
+      }
+
+      const maplayer = ci(menu, "maplayer");
+      if (maplayer !== undefined && maplayer !== null && String(maplayer) !== "") {
+        const layerNodeId = layerById.get(String(maplayer));
+        if (layerNodeId) addEdge({ from: menuNodeId, to: layerNodeId, type: "menu_links_layer", metadata: compactRecord(menu, ["maplayer", "subtype"]) });
+        else pendingMenuLayers.push({ menuNodeId, maplayer });
+      }
     }
   }
 
-  const roleById = new Map<string, string>();
+  for (const pending of pendingMenuReports) {
+    const reportNodeId = reportById.get(String(pending.reportid));
+    if (reportNodeId) addEdge({ from: pending.menuNodeId, to: reportNodeId, type: "menu_links_report" });
+  }
+
+  for (const pending of pendingMenuLayers) {
+    const layerNodeId = layerById.get(String(pending.maplayer));
+    if (layerNodeId) addEdge({ from: pending.menuNodeId, to: layerNodeId, type: "menu_links_layer" });
+  }
+
   const rolesCollection = asRecord(collections.roles);
   for (const role of toRecords(rolesCollection?.records)) {
     const roleKey = stringValue(ci(role, "roleid") ?? ci(role, "rolename") ?? fallbackId(role, "role"));
@@ -785,6 +950,117 @@ function buildGraphFromBlueprint(blueprint: Record<string, unknown>): GraphConte
     }, { type: "role", record: role });
     roleById.set(roleKey, roleNodeId);
     addEdge({ from: rootId, to: roleNodeId, type: "app_builder_has_role" });
+  }
+
+  const sitesCollection = asRecord(collections.sites);
+  for (const site of toRecords(sitesCollection?.records)) {
+    const siteKey = stringValue(ci(site, "siteid") ?? ci(site, "sitecode") ?? fallbackId(site, "site"));
+    const siteNodeId = `site:${idPart(siteKey)}`;
+    addNode({
+      id: siteNodeId,
+      type: "site",
+      label: labelOf(site, ["sitename", "sitecode", "description"], siteNodeId),
+      summary: compactRecord(site, ["siteid", "sitename", "sitecode", "description", "domain", "dbname", "url"]),
+      has_detail: true
+    }, { type: "site", record: site });
+    addEdge({ from: rootId, to: siteNodeId, type: "app_builder_has_site" });
+  }
+
+  const usersCollection = asRecord(collections.users);
+  for (const user of toRecords(usersCollection?.records)) {
+    const userKey = stringValue(ci(user, "userid") ?? ci(user, "username") ?? fallbackId(user, "user"));
+    const userNodeId = `user:${idPart(userKey)}`;
+    addNode({
+      id: userNodeId,
+      type: "user",
+      label: labelOf(user, ["fullname", "username", "email"], userNodeId),
+      summary: compactRecord(user, ["userid", "username", "fullname", "email", "phone", "active", "issystem", "isviewer", "parentid", "siteid"]),
+      has_detail: true
+    }, { type: "user", record: user });
+    userById.set(userKey, userNodeId);
+    addEdge({ from: rootId, to: userNodeId, type: "app_builder_has_user" });
+  }
+
+  const orgsCollection = asRecord(collections.orgs);
+  for (const org of toRecords(orgsCollection?.records)) {
+    const orgKey = stringValue(ci(org, "orgid") ?? ci(org, "orgcode") ?? ci(org, "orgname") ?? fallbackId(org, "org"));
+    const orgNodeId = `org:${idPart(orgKey)}`;
+    addNode({
+      id: orgNodeId,
+      type: "org",
+      label: labelOf(org, ["orgname", "orgcode", "description"], orgNodeId),
+      summary: compactRecord(org, ["orgid", "orgname", "orgcode", "active", "description", "parentid", "seqno", "siteid"]),
+      has_detail: true
+    }, { type: "org", record: org });
+    orgById.set(orgKey, orgNodeId);
+    addEdge({ from: rootId, to: orgNodeId, type: "app_builder_has_org" });
+    const parentId = stringValue(ci(org, "parentid"));
+    const parentNodeId = parentId ? orgById.get(parentId) : undefined;
+    if (parentNodeId) addEdge({ from: parentNodeId, to: orgNodeId, type: "org_parent_child" });
+  }
+
+  const roleUsersCollection = asRecord(collections.roleusers);
+  for (const roleuser of toRecords(roleUsersCollection?.records)) {
+    const roleUserKey = stringValue(ci(roleuser, "roleuserid") ?? fallbackId(roleuser, "roleuser"));
+    const roleUserNodeId = `roleuser:${idPart(roleUserKey)}`;
+    addNode({
+      id: roleUserNodeId,
+      type: "roleuser",
+      label: `roleuser ${roleUserKey}`,
+      summary: compactRecord(roleuser, ["roleuserid", "roleid", "userid", "siteid"]),
+      has_detail: true
+    }, { type: "roleuser", record: roleuser });
+    const roleNodeId = roleById.get(String(ci(roleuser, "roleid") ?? ""));
+    if (roleNodeId) addEdge({ from: roleNodeId, to: roleUserNodeId, type: "role_has_user_binding" });
+    const userNodeId = userById.get(String(ci(roleuser, "userid") ?? ""));
+    if (userNodeId) addEdge({ from: roleUserNodeId, to: userNodeId, type: "roleuser_grants_user" });
+  }
+
+  const orgUsersCollection = asRecord(collections.orgusers);
+  for (const orguser of toRecords(orgUsersCollection?.records)) {
+    const orgUserKey = stringValue(ci(orguser, "orguserid") ?? fallbackId(orguser, "orguser"));
+    const orgUserNodeId = `orguser:${idPart(orgUserKey)}`;
+    addNode({
+      id: orgUserNodeId,
+      type: "orguser",
+      label: `orguser ${orgUserKey}`,
+      summary: compactRecord(orguser, ["orguserid", "orgid", "userid", "siteid"]),
+      has_detail: true
+    }, { type: "orguser", record: orguser });
+    const orgNodeId = orgById.get(String(ci(orguser, "orgid") ?? ""));
+    if (orgNodeId) addEdge({ from: orgNodeId, to: orgUserNodeId, type: "org_has_user_binding" });
+    const userNodeId = userById.get(String(ci(orguser, "userid") ?? ""));
+    if (userNodeId) addEdge({ from: orgUserNodeId, to: userNodeId, type: "orguser_assigns_user" });
+  }
+
+  for (const pending of pendingTabWorkflows) {
+    const workflowNodeId = workflowById.get(String(pending.workflowid));
+    if (workflowNodeId) addEdge({ from: pending.tabNodeId, to: workflowNodeId, type: "tab_uses_workflow" });
+  }
+
+  for (const app of apps) {
+    const appid = stringValue(ci(app, "appid") ?? fallbackId(app, "app"));
+
+    for (const step of toRecords(app.wfsteps)) {
+      const stepKey = stringValue(ci(step, "stepid") ?? ci(step, "elementid") ?? fallbackId(step, "wfstep"));
+      const stepNodeId = `wfstep:${idPart(appid)}:${idPart(stepKey)}`;
+      addNode({
+        id: stepNodeId,
+        type: "wfstep",
+        label: labelOf(step, ["stepname", "elementid", "steptype"], stepNodeId),
+        summary: compactRecord(step, ["stepid", "workflowid", "elementid", "steptype", "stepname", "status", "reject", "duration", "roleid", "userid", "windowid", "siteid"]),
+        has_detail: true
+      }, { type: "wfstep", record: step, parent: app });
+
+      const workflowNodeId = workflowById.get(String(ci(step, "workflowid") ?? ""));
+      if (workflowNodeId) addEdge({ from: workflowNodeId, to: stepNodeId, type: "workflow_has_step" });
+      const roleNodeId = roleById.get(String(ci(step, "roleid") ?? ""));
+      if (roleNodeId) addEdge({ from: stepNodeId, to: roleNodeId, type: "wfstep_assigned_role" });
+      const userNodeId = userById.get(String(ci(step, "userid") ?? ""));
+      if (userNodeId) addEdge({ from: stepNodeId, to: userNodeId, type: "wfstep_assigned_user" });
+      const windowNodeId = windowById.get(String(ci(step, "windowid") ?? ""));
+      if (windowNodeId) addEdge({ from: stepNodeId, to: windowNodeId, type: "wfstep_opens_window" });
+    }
   }
 
   for (const app of apps) {
@@ -1030,6 +1306,7 @@ function buildCreationSchema(args: Record<string, unknown>): Record<string, unkn
     mode: "creation_schema",
     intent,
     status: "prepare_then_apply",
+    semantic_guide: ZILCODE_SEMANTIC_GUIDE,
     note: "Dùng app_builder_prepare_change để tạo pending plan. Chỉ dùng app_builder_apply_change sau khi user xác nhận rõ ràng.",
     graph_first_rule: [
       "1. Gọi app_builder_graph_overview để nắm skeleton hệ thống.",
@@ -1055,6 +1332,17 @@ function buildCreationSchema(args: Record<string, unknown>): Record<string, unkn
         "field -> linked table/column when lookup is used",
         "app -> menu",
         "menu -> window",
+        "app -> workflow -> wfstep",
+        "tab -> workflow when workflowid is used",
+        "wfstep -> role/user/window when assignment is configured",
+        "app -> report",
+        "menu -> report when reportid is used",
+        "report -> table when tableid is configured",
+        "map -> layer",
+        "menu/table -> layer when maplayer is used",
+        "table -> archive when archive is configured",
+        "role -> roleuser -> user",
+        "org -> orguser -> user",
         "app -> roleapp <- role",
         "role -> rolemenu -> menu",
         "role -> access -> table"
@@ -1069,6 +1357,11 @@ function buildCreationSchema(args: Record<string, unknown>): Record<string, unkn
         tab: ["windowid", "tableid", "tabname", "seqno"],
         field: ["tabid", "columnid or columnname", "fieldname/label", "seqno", "controltype/datatype when needed"],
         menu: ["appid", "menuname", "linkwindowid", "seqno"],
+        workflow: ["workflowid/workflowname/appid; wfstep has roleid/userid/windowid/status/duration"],
+        report: ["reportid/reportname/reporttype/appid/tableid; menu can link reportid"],
+        gis: ["map/maplayer/layer metadata; menu.maplayer and table.maplayer connect UI to GIS layer"],
+        site_user_org: ["siteid scopes metadata; user/org/role bindings come from roleuser/orguser"],
+        archive: ["archive records link archive/history behavior to tableid"],
         role_access: ["roleapp for app access", "rolemenu for menu access", "access for table permissions when needed"],
         cache: ["delete n_cache rows for changed app/window after UI metadata changes"]
       },
@@ -1090,7 +1383,78 @@ function buildCreationSchema(args: Record<string, unknown>): Record<string, unkn
         appservice: ["appid", "serviceid"],
         table: ["serviceid"],
         edges: ["app -> appservice -> service", "service -> table"]
+      },
+      runtime_branches: {
+        workflow: {
+          metadata_tables: ["n_workflow", "n_wfstep"],
+          meaning: "Workflow/BPMN runtime. Tabs can reference workflowid; steps can assign role/user/window and status transitions.",
+          edges: ["app -> workflow", "workflow -> wfstep", "tab -> workflow", "wfstep -> role/user/window"]
+        },
+        report: {
+          metadata_tables: ["n_report"],
+          meaning: "Report/analyst runtime. Reports belong to app, can use tableid as data source, and menus can open reports through reportid.",
+          edges: ["app -> report", "report -> table", "menu -> report"]
+        },
+        gis: {
+          metadata_tables: ["n_map", "n_layer", "n_menu.maplayer", "n_table.maplayer"],
+          meaning: "GIS runtime. Menus and tables can reference layers by maplayer; layers can bind service/table/url.",
+          edges: ["map -> layer", "layer -> table/service", "menu -> layer"]
+        },
+        identity_scope: {
+          metadata_tables: ["n_site", "n_user", "n_org", "n_roleuser", "n_orguser"],
+          meaning: "Site scopes metadata; users get roles through roleuser and organization membership through orguser.",
+          edges: ["root -> site/user/org", "role -> roleuser -> user", "org -> orguser -> user"]
+        },
+        archive: {
+          metadata_tables: ["n_archive"],
+          meaning: "Archive/history configuration linked to tableid; not the business data row itself.",
+          edges: ["table -> archive"]
+        },
+        sqlcloud_physical_schema: {
+          api_paths: [
+            "/rest/{database}/{schema}/table",
+            "/rest/{database}/{schema}/table/{name}",
+            "/rest/{database}/{schema}/column/{table}",
+            "/rest/{database}/{schema}/column/{table}/alter",
+            "/rest/{database}/{schema}/view/{name}",
+            "/rest/{database}/{schema}/view/{name}/edit",
+            "/rest/{database}/{schema}/procedure/{name}",
+            "/rest/{database}/{schema}/procedure/{name}/edit",
+            "/rest/{database}/{schema}/query"
+          ],
+          meaning: "SQLCloud/physical database runtime. This changes real database tables, columns, views, procedures or executes SQL. It is not the same as App Builder metadata.",
+          safety_rule: "Do not use app_builder_prepare_change for physical schema or raw SQL changes. Use a separate SQLCloud/source write tool with explicit policy, backup/preview, dependency scan and verify."
+        },
+        source_files: {
+          api_paths: ["/rest/source/{d1}/{d2}"],
+          meaning: "Source Editor runtime. Manages site/app source files, folders and preview/save through file manager.",
+          safety_rule: "Do not edit source files through App Builder metadata tools. Source writes need a separate source tool with path allow-list and diff preview."
+        },
+        upload_attachments: {
+          api_paths: ["/rest/upload/{d1}/{d2}/{d3}"],
+          meaning: "Attachment/media runtime for records and source/file assets.",
+          safety_rule: "Upload/delete attachments are record/file operations, not App Builder metadata operations."
+        },
+        proxy_external: {
+          api_paths: ["/rest/proxy"],
+          meaning: "Proxy endpoint for external requests.",
+          safety_rule: "Treat proxy calls as external network actions. Require a specific tool contract and do not let the model synthesize arbitrary proxy requests."
+        }
       }
+    },
+    external_runtime_boundaries: {
+      source_of_truth: ["api.json", "dai_viet/js", "dai_viet/sqlcloud", "dai_viet/sourceeditor", "dai_viet/bpmnwf", "dai_viet/htmlreport"],
+      app_builder_metadata_layer: [
+        "n_app/n_service/n_appservice/n_table/n_column/n_window/n_tab/n_field/n_menu/n_domain/n_roleapp/n_rolemenu/n_access",
+        "Safe core write path is app_builder_prepare_change -> app_builder_apply_change."
+      ],
+      physical_runtime_layer: [
+        "SQLCloud table/view/procedure/query/column alter endpoints affect physical database schema or SQL execution.",
+        "Source editor endpoints affect files under site/app source.",
+        "Upload endpoints affect record attachments/media.",
+        "These need separate tools and must not be hidden inside App Builder metadata plans."
+      ],
+      answer_rule: "When a user asks about SQLCloud/source/physical schema/report/GIS runtime, first explain whether it is App Builder metadata or external runtime. If write support is not implemented, say so clearly and propose the required tool contract instead of pretending the action can be applied."
     },
     edit_existing_branch: {
       order: ["search target", "subgraph around target", "node detail", "proposed patch plan"],
@@ -1159,6 +1523,31 @@ function buildAnswerFactsFromSelection(
     .slice(0, 24)
     .map(node => permissionFact(context, node));
 
+  const workflows = selectedNodes
+    .filter(node => node.type === "workflow")
+    .slice(0, 16)
+    .map(node => workflowFact(context, node));
+
+  const reports = selectedNodes
+    .filter(node => node.type === "report")
+    .slice(0, 16)
+    .map(node => reportFact(context, node));
+
+  const mapLayers = selectedNodes
+    .filter(node => ["map", "layer"].includes(node.type))
+    .slice(0, 20)
+    .map(node => mapLayerFact(context, node));
+
+  const sites = selectedNodes
+    .filter(node => node.type === "site")
+    .slice(0, 12)
+    .map(node => siteFact(context, node));
+
+  const archives = selectedNodes
+    .filter(node => node.type === "archive")
+    .slice(0, 16)
+    .map(node => archiveFact(context, node));
+
   const importantEdges = edgeList.filter(edge => isImportantRelation(edge.type));
   const verifiedRelations = importantEdges
     .slice(0, 80)
@@ -1176,6 +1565,13 @@ function buildAnswerFactsFromSelection(
     windows_summary: windows,
     menus_summary: menus,
     permissions_summary: permissions,
+    runtime_summary: buildRuntimeSummary(selectedNodes, edgeList),
+    workflow_summary: workflows,
+    report_summary: reports,
+    map_layer_summary: mapLayers,
+    user_org_summary: buildUserOrgSummary(context, selectedNodes),
+    site_summary: sites,
+    archive_summary: archives,
     verified_relations: verifiedRelations,
     dependency_summary: buildDependencySummary(context, selectedNodes, edgeList, focusNodeIds),
     write_contract_summary: buildWriteContractSummary(selectedNodes),
@@ -1187,6 +1583,11 @@ function buildAnswerFactsFromSelection(
       windows_summary: selectedNodes.filter(node => node.type === "window").length > windows.length,
       menus_summary: selectedNodes.filter(node => node.type === "menu").length > menus.length,
       permissions_summary: selectedNodes.filter(node => ["roleapp", "rolemenu", "access"].includes(node.type)).length > permissions.length,
+      workflow_summary: selectedNodes.filter(node => node.type === "workflow").length > workflows.length,
+      report_summary: selectedNodes.filter(node => node.type === "report").length > reports.length,
+      map_layer_summary: selectedNodes.filter(node => ["map", "layer"].includes(node.type)).length > mapLayers.length,
+      site_summary: selectedNodes.filter(node => node.type === "site").length > sites.length,
+      archive_summary: selectedNodes.filter(node => node.type === "archive").length > archives.length,
       verified_relations: importantEdges.length > verifiedRelations.length
     }
   };
@@ -1219,6 +1620,21 @@ function buildFlowSummary(nodes: AppBuilderNode[], edges: AppBuilderEdge[]): str
   }
   if (edgeCounts.role_grants_app || edgeCounts.role_has_rolemenu || edgeCounts.rolemenu_grants_menu || edgeCounts.role_has_table_access || edgeCounts.access_controls_table) {
     summary.push("Luồng quyền đã thấy: role -> roleapp -> app, role -> rolemenu -> menu, và role -> access -> table.");
+  }
+  if (edgeCounts.app_has_workflow || edgeCounts.tab_uses_workflow || edgeCounts.workflow_has_step) {
+    summary.push("Da thay workflow runtime: app -> workflow -> wfstep; tab co the gan workflowid va step co the gan role/user/window.");
+  }
+  if (edgeCounts.app_has_report || edgeCounts.report_uses_table || edgeCounts.menu_links_report) {
+    summary.push("Da thay report runtime: app -> report; report co the dung tableid lam data source va menu co the link report qua reportid.");
+  }
+  if (edgeCounts.app_builder_has_map || edgeCounts.map_has_layer || edgeCounts.layer_uses_table || edgeCounts.menu_links_layer) {
+    summary.push("Da thay GIS runtime: map -> layer; layer/menu/table co the lien ket bang maplayer/tableid/serviceid.");
+  }
+  if (edgeCounts.table_has_archive || edgeCounts.app_has_archive) {
+    summary.push("Da thay archive metadata gan voi table; archive la cau hinh lich su/luu vet, khong phai du lieu business truc tiep.");
+  }
+  if (edgeCounts.role_has_user_binding || edgeCounts.org_has_user_binding) {
+    summary.push("Da thay identity binding: role -> roleuser -> user va org -> orguser -> user.");
   }
 
   if (!summary.length) {
@@ -1292,6 +1708,8 @@ function menuFact(context: GraphContext, node: AppBuilderNode): Record<string, u
   const record = source?.record ?? {};
   const app = findConnectedNode(context, node.id, "in", "app_has_menu");
   const linkedWindow = findConnectedNode(context, node.id, "out", "menu_links_window");
+  const linkedReport = findConnectedNode(context, node.id, "out", "menu_links_report");
+  const linkedLayer = findConnectedNode(context, node.id, "out", "menu_links_layer");
   const roleMenuEdges = context.edges.filter(edge => edge.to === node.id && edge.type === "rolemenu_grants_menu");
 
   return compactUndefined({
@@ -1304,6 +1722,10 @@ function menuFact(context: GraphContext, node: AppBuilderNode): Record<string, u
     app: compactNodeRef(app),
     linkwindowid: ci(record, "linkwindowid") ?? ci(record, "windowid") ?? node.summary?.linkwindowid ?? node.summary?.windowid,
     linked_window: compactNodeRef(linkedWindow),
+    reportid: ci(record, "reportid") ?? node.summary?.reportid,
+    linked_report: compactNodeRef(linkedReport),
+    maplayer: ci(record, "maplayer") ?? node.summary?.maplayer,
+    linked_layer: compactNodeRef(linkedLayer),
     permission_records_count: roleMenuEdges.length
   });
 }
@@ -1349,6 +1771,169 @@ function permissionFact(context: GraphContext, node: AppBuilderNode): Record<str
   });
 }
 
+function workflowFact(context: GraphContext, node: AppBuilderNode): Record<string, unknown> {
+  const source = context.sourceByNodeId.get(node.id);
+  const record = source?.record ?? {};
+  const app = findConnectedNode(context, node.id, "in", "app_has_workflow");
+  const stepEdges = context.edges.filter(edge => edge.from === node.id && edge.type === "workflow_has_step");
+  const tabEdges = context.edges.filter(edge => edge.to === node.id && edge.type === "tab_uses_workflow");
+
+  return compactUndefined({
+    node_id: node.id,
+    workflowid: ci(record, "workflowid") ?? node.summary?.workflowid,
+    workflowname: ci(record, "workflowname") ?? node.label,
+    app: compactNodeRef(app),
+    steps_count: node.summary?.steps_count ?? stepEdges.length,
+    used_by_tabs: tabEdges.slice(0, 12).map(edge => {
+      const tab = context.nodeById.get(edge.from);
+      return compactUndefined({
+        tab: compactNodeRef(tab),
+        window: tab ? compactNodeRef(findConnectedNode(context, tab.id, "in", "window_has_tab")) : undefined
+      });
+    }),
+    steps: stepEdges.slice(0, 16).map(edge => {
+      const step = context.nodeById.get(edge.to);
+      if (!step) return undefined;
+      return compactUndefined({
+        step: compactNodeRef(step),
+        role: compactNodeRef(findConnectedNode(context, step.id, "out", "wfstep_assigned_role")),
+        user: compactNodeRef(findConnectedNode(context, step.id, "out", "wfstep_assigned_user")),
+        window: compactNodeRef(findConnectedNode(context, step.id, "out", "wfstep_opens_window"))
+      });
+    }).filter(Boolean)
+  });
+}
+
+function reportFact(context: GraphContext, node: AppBuilderNode): Record<string, unknown> {
+  const source = context.sourceByNodeId.get(node.id);
+  const record = source?.record ?? {};
+  const app = findConnectedNode(context, node.id, "in", "app_has_report");
+  const table = findConnectedNode(context, node.id, "out", "report_uses_table");
+  const menuEdges = context.edges.filter(edge => edge.to === node.id && edge.type === "menu_links_report");
+
+  return compactUndefined({
+    node_id: node.id,
+    reportid: ci(record, "reportid") ?? node.summary?.reportid,
+    reportname: ci(record, "reportname") ?? node.label,
+    reporttype: ci(record, "reporttype") ?? node.summary?.reporttype,
+    app: compactNodeRef(app),
+    data_table: compactNodeRef(table),
+    linked_menus: menuEdges.map(edge => compactNodeRef(context.nodeById.get(edge.from))).filter(Boolean)
+  });
+}
+
+function mapLayerFact(context: GraphContext, node: AppBuilderNode): Record<string, unknown> {
+  const source = context.sourceByNodeId.get(node.id);
+  const record = source?.record ?? {};
+
+  if (node.type === "map") {
+    const layerEdges = context.edges.filter(edge => edge.from === node.id && edge.type === "map_has_layer");
+    return compactUndefined({
+      type: "map",
+      node_id: node.id,
+      mapid: ci(record, "mapid") ?? node.summary?.mapid,
+      mapname: ci(record, "mapname") ?? node.label,
+      layers_count: layerEdges.length,
+      layers: layerEdges.slice(0, 12).map(edge => compactNodeRef(context.nodeById.get(edge.to))).filter(Boolean)
+    });
+  }
+
+  const table = findConnectedNode(context, node.id, "out", "layer_uses_table");
+  const service = findConnectedNode(context, node.id, "out", "layer_uses_service");
+  const app = findConnectedNode(context, node.id, "in", "app_has_layer");
+  const menuEdges = context.edges.filter(edge => edge.to === node.id && edge.type === "menu_links_layer");
+
+  return compactUndefined({
+    type: "layer",
+    node_id: node.id,
+    layerid: ci(record, "layerid") ?? node.summary?.layerid,
+    layername: ci(record, "layername") ?? node.label,
+    layertype: ci(record, "layertype") ?? node.summary?.layertype,
+    app: compactNodeRef(app),
+    data_table: compactNodeRef(table),
+    service: compactNodeRef(service),
+    linked_menus: menuEdges.map(edge => compactNodeRef(context.nodeById.get(edge.from))).filter(Boolean)
+  });
+}
+
+function siteFact(context: GraphContext, node: AppBuilderNode): Record<string, unknown> {
+  const source = context.sourceByNodeId.get(node.id);
+  const record = source?.record ?? {};
+  return compactUndefined({
+    node_id: node.id,
+    siteid: ci(record, "siteid") ?? node.summary?.siteid,
+    sitename: ci(record, "sitename") ?? node.label,
+    sitecode: ci(record, "sitecode") ?? node.summary?.sitecode,
+    domain: ci(record, "domain") ?? node.summary?.domain,
+    dbname: ci(record, "dbname") ?? node.summary?.dbname,
+    note: "siteid scopes app/user/org/metadata records; it is tenant/context metadata, not an app feature by itself."
+  });
+}
+
+function archiveFact(context: GraphContext, node: AppBuilderNode): Record<string, unknown> {
+  const source = context.sourceByNodeId.get(node.id);
+  const record = source?.record ?? {};
+  return compactUndefined({
+    node_id: node.id,
+    archiveid: ci(record, "archiveid") ?? node.summary?.archiveid,
+    archivetype: ci(record, "archivetype") ?? node.summary?.archivetype,
+    tableid: ci(record, "tableid") ?? node.summary?.tableid,
+    table: compactNodeRef(findConnectedNode(context, node.id, "in", "table_has_archive")),
+    note: "archive metadata links history/archive behavior to a table; it is not the archived business record itself."
+  });
+}
+
+function buildRuntimeSummary(nodes: AppBuilderNode[], edges: AppBuilderEdge[]): Record<string, unknown> {
+  const counts = countBy(nodes, node => node.type);
+  const edgeCounts = countBy(edges, edge => edge.type);
+  return compactUndefined({
+    source: "derived_from_runtime_metadata_nodes_and_edges",
+    workflows: counts.workflow ?? 0,
+    wfsteps: counts.wfstep ?? 0,
+    reports: counts.report ?? 0,
+    maps: counts.map ?? 0,
+    layers: counts.layer ?? 0,
+    archives: counts.archive ?? 0,
+    workflow_bindings: {
+      tabs_using_workflow: edgeCounts.tab_uses_workflow ?? 0,
+      workflow_steps: edgeCounts.workflow_has_step ?? 0,
+      steps_assigned_to_role: edgeCounts.wfstep_assigned_role ?? 0,
+      steps_opening_window: edgeCounts.wfstep_opens_window ?? 0
+    },
+    report_bindings: {
+      reports_using_table: edgeCounts.report_uses_table ?? 0,
+      menus_linking_report: edgeCounts.menu_links_report ?? 0
+    },
+    gis_bindings: {
+      map_layers: edgeCounts.map_has_layer ?? 0,
+      layer_table_links: edgeCounts.layer_uses_table ?? 0,
+      menu_layer_links: edgeCounts.menu_links_layer ?? 0
+    }
+  });
+}
+
+function buildUserOrgSummary(context: GraphContext, nodes: AppBuilderNode[]): Record<string, unknown> {
+  const counts = countBy(nodes, node => node.type);
+  const selected = new Set(nodes.map(node => node.id));
+  const relations = context.edges
+    .filter(edge => selected.has(edge.from) || selected.has(edge.to))
+    .filter(edge => ["role_has_user_binding", "roleuser_grants_user", "org_has_user_binding", "orguser_assigns_user", "org_parent_child"].includes(edge.type))
+    .slice(0, 40)
+    .map(edge => verifiedRelationFact(context, edge))
+    .filter(Boolean);
+
+  return compactUndefined({
+    source: "derived_from_user_org_role_bridge_tables",
+    users: counts.user ?? 0,
+    roles: counts.role ?? 0,
+    roleuser_bindings: counts.roleuser ?? 0,
+    orgs: counts.org ?? 0,
+    orguser_bindings: counts.orguser ?? 0,
+    relations,
+    note: "This shows configured user/org/role metadata in the selected graph scope. It does not expose password or PIN."
+  });
+}
+
 function verifiedRelationFact(context: GraphContext, edge: AppBuilderEdge): VerifiedRelationFact | undefined {
   const from = context.nodeById.get(edge.from);
   const to = context.nodeById.get(edge.to);
@@ -1381,6 +1966,15 @@ function buildInferredNotes(nodes: AppBuilderNode[], edges: AppBuilderEdge[]): s
   if (edgeCounts.app_has_table && !edgeCounts.appservice_links_service) {
     notes.push("Cạnh app_has_table trong graph là tiện ích để gom bảng theo app; theo metadata Zilcode, binding đúng nên được xác minh qua n_appservice/n_service/n_table.");
   }
+  if (nodeCounts.workflow && !edgeCounts.workflow_has_step) {
+    notes.push("Co workflow trong pham vi nay nhung chua thay wfstep; can mo rong detail/subgraph neu muon giai thich tung buoc BPMN.");
+  }
+  if (nodeCounts.report && !edgeCounts.report_uses_table) {
+    notes.push("Co report trong pham vi nay nhung chua thay report_uses_table; report co the thieu tableid hoac data source nam trong contentjson.");
+  }
+  if (nodeCounts.layer && !edgeCounts.layer_uses_table && !edgeCounts.layer_uses_service) {
+    notes.push("Co layer trong pham vi nay nhung chua thay link table/service; can kiem tra layerid/maplayer/url runtime.");
+  }
 
   return notes;
 }
@@ -1412,12 +2006,38 @@ function isImportantRelation(type: string): boolean {
     "app_has_domain",
     "app_has_cache",
     "cache_for_window",
+    "app_has_archive",
+    "table_has_archive",
+    "app_has_workflow",
+    "tab_uses_workflow",
+    "workflow_has_step",
+    "wfstep_assigned_role",
+    "wfstep_assigned_user",
+    "wfstep_opens_window",
+    "app_has_report",
+    "report_uses_table",
+    "menu_links_report",
+    "app_builder_has_map",
+    "app_builder_has_layer",
+    "map_has_layer",
+    "app_has_layer",
+    "layer_uses_table",
+    "layer_uses_service",
+    "menu_links_layer",
     "app_has_roleapp",
     "role_grants_app",
     "role_has_rolemenu",
     "rolemenu_grants_menu",
     "role_has_table_access",
-    "access_controls_table"
+    "access_controls_table",
+    "app_builder_has_site",
+    "app_builder_has_user",
+    "app_builder_has_org",
+    "org_parent_child",
+    "role_has_user_binding",
+    "roleuser_grants_user",
+    "org_has_user_binding",
+    "orguser_assigns_user"
   ].includes(type);
 }
 
@@ -1441,7 +2061,10 @@ function compactNodeRef(node: AppBuilderNode | undefined): Record<string, unknow
     id: node.id,
     type: node.type,
     label: node.label,
-    summary: compactRecord(node.summary ?? {}, ["appid", "tableid", "windowid", "tabid", "fieldid", "columnid", "menuid", "roleid", "serviceid"])
+    summary: compactRecord(node.summary ?? {}, [
+      "appid", "tableid", "windowid", "tabid", "fieldid", "columnid", "menuid", "roleid", "serviceid",
+      "workflowid", "stepid", "reportid", "mapid", "layerid", "archiveid", "userid", "orgid", "siteid"
+    ])
   };
 }
 
@@ -1677,12 +2300,38 @@ function isDependencyEdge(type: string): boolean {
     "app_has_domain",
     "app_has_cache",
     "cache_for_window",
+    "app_has_archive",
+    "table_has_archive",
+    "app_has_workflow",
+    "tab_uses_workflow",
+    "workflow_has_step",
+    "wfstep_assigned_role",
+    "wfstep_assigned_user",
+    "wfstep_opens_window",
+    "app_has_report",
+    "report_uses_table",
+    "menu_links_report",
+    "app_builder_has_map",
+    "app_builder_has_layer",
+    "map_has_layer",
+    "app_has_layer",
+    "layer_uses_table",
+    "layer_uses_service",
+    "menu_links_layer",
     "app_has_roleapp",
     "role_grants_app",
     "role_has_rolemenu",
     "rolemenu_grants_menu",
     "role_has_table_access",
-    "access_controls_table"
+    "access_controls_table",
+    "app_builder_has_site",
+    "app_builder_has_user",
+    "app_builder_has_org",
+    "org_parent_child",
+    "role_has_user_binding",
+    "roleuser_grants_user",
+    "org_has_user_binding",
+    "orguser_assigns_user"
   ].includes(type);
 }
 
@@ -1694,7 +2343,13 @@ function deleteOrderForNodeType(type: string): string[] | undefined {
     table: ["field", "tab", "access", "archive", "column", "table"],
     column: ["field", "column"],
     menu: ["rolemenu", "menu"],
-    role: ["roleapp", "rolemenu", "access", "role if explicitly supported"]
+    role: ["roleuser", "roleapp", "rolemenu", "access", "role if explicitly supported"],
+    workflow: ["wfstep", "workflow"],
+    report: ["menu/report link if any", "report"],
+    layer: ["menu layer link if any", "layer"],
+    archive: ["archive"],
+    user: ["roleuser", "orguser", "user if explicitly supported"],
+    org: ["orguser", "child org", "org if explicitly supported"]
   };
   return orders[type];
 }
@@ -1710,7 +2365,15 @@ function updateImpactForNodeType(type: string): string[] {
     menu: ["Ảnh hưởng navigation và rolemenu permissions.", "Nếu menu link window, đổi linkwindowid sẽ đổi nơi điều hướng."],
     roleapp: ["Ảnh hưởng quyền role vào app."],
     rolemenu: ["Ảnh hưởng quyền role vào menu/navigation."],
-    access: ["Ảnh hưởng quyền thao tác trên table qua các cờ noinsert/noupdate/nodelete/noselect/noexport."]
+    access: ["Ảnh hưởng quyền thao tác trên table qua các cờ noinsert/noupdate/nodelete/noselect/noexport."],
+    workflow: ["Anh huong cac tab gan workflowid va cac wfstep runtime.", "Can kiem tra wfstep role/user/window binding truoc khi sua/xoa."],
+    wfstep: ["Anh huong mot buoc trong BPMN workflow: role/user/window/status/duration."],
+    report: ["Anh huong report/analyst va menu co reportid tro toi report nay.", "Data source co the nam o tableid hoac contentjson."],
+    map: ["Anh huong cau hinh GIS map va cac layer thuoc map."],
+    layer: ["Anh huong GIS layer, menu maplayer, table maplayer va service/table binding."],
+    archive: ["Anh huong cau hinh archive/history cua table, khong phai du lieu business truc tiep."],
+    user: ["Anh huong roleuser/orguser binding va quyen truy cap thuc te cua user."],
+    org: ["Anh huong orguser binding va cay to chuc."]
   };
   return impacts[type] ?? ["Cần xem verified_relations/dependency_summary trước khi update để đánh giá ảnh hưởng."];
 }
@@ -1748,6 +2411,29 @@ function sharedUsageForNode(context: GraphContext, node: AppBuilderNode): Record
       safe_to_delete_without_user_confirmation: false
     };
   }
+  if (node.type === "workflow") {
+    const steps = context.edges.filter(edge => edge.from === node.id && edge.type === "workflow_has_step");
+    const tabs = context.edges.filter(edge => edge.to === node.id && edge.type === "tab_uses_workflow");
+    return {
+      wfstep_records_count: steps.length,
+      used_by_tabs_count: tabs.length,
+      safe_to_delete_without_user_confirmation: false
+    };
+  }
+  if (node.type === "report") {
+    const menus = context.edges.filter(edge => edge.to === node.id && edge.type === "menu_links_report");
+    return {
+      linked_menus_count: menus.length,
+      safe_to_delete_without_user_confirmation: false
+    };
+  }
+  if (node.type === "layer") {
+    const menus = context.edges.filter(edge => edge.to === node.id && edge.type === "menu_links_layer");
+    return {
+      linked_menus_count: menus.length,
+      safe_to_delete_without_user_confirmation: false
+    };
+  }
   return undefined;
 }
 
@@ -1766,6 +2452,11 @@ function buildNodeDetail(context: GraphContext, nodeId: string, includeFields: b
       const roleapps = toRecords(source.record.roleapps);
       const rolemenus = toRecords(source.record.rolemenus);
       const accesses = toRecords(source.record.accesses);
+      const workflows = toRecords(source.record.workflows);
+      const wfsteps = toRecords(source.record.wfsteps);
+      const reports = toRecords(source.record.reports);
+      const layers = toRecords(source.record.layers);
+      const archives = toRecords(source.record.archives);
       return {
         record: stripChildren(source.record),
         counts: {
@@ -1777,7 +2468,12 @@ function buildNodeDetail(context: GraphContext, nodeId: string, includeFields: b
           caches: caches.length,
           roleapps: roleapps.length,
           rolemenus: rolemenus.length,
-          accesses: accesses.length
+          accesses: accesses.length,
+          workflows: workflows.length,
+          wfsteps: wfsteps.length,
+          reports: reports.length,
+          layers: layers.length,
+          archives: archives.length
         },
         services: services.map(service => compactRecord(service, ["serviceid", "servicename", "url", "servicetype", "siteid"])),
         tables: tables.map(table => ({
@@ -1795,7 +2491,12 @@ function buildNodeDetail(context: GraphContext, nodeId: string, includeFields: b
         caches: caches.map(cache => compactRecord(cache, ["cacheid", "appid", "windowid", "siteid"])),
         roleapps: roleapps.map(roleapp => compactRecord(roleapp, ["roleappid", "roleid", "appid", "siteid"])),
         rolemenus: rolemenus.map(rolemenu => compactRecord(rolemenu, ["rolemenuid", "roleid", "menuid", "siteid"])),
-        accesses: accesses.map(access => compactRecord(access, ["accessid", "roleid", "tableid", "noinsert", "noupdate", "nodelete", "noselect", "siteid"]))
+        accesses: accesses.map(access => compactRecord(access, ["accessid", "roleid", "tableid", "noinsert", "noupdate", "nodelete", "noselect", "siteid"])),
+        workflows: workflows.map(workflow => compactRecord(workflow, ["workflowid", "workflowname", "description", "appid", "siteid", "steps_count"])),
+        wfsteps: wfsteps.map(step => compactRecord(step, ["stepid", "workflowid", "elementid", "steptype", "stepname", "roleid", "userid", "windowid", "status", "siteid"])),
+        reports: reports.map(report => compactRecord(report, ["reportid", "reportname", "reporttype", "description", "appid", "tableid", "siteid"])),
+        layers: layers.map(layer => compactRecord(layer, ["layerid", "layername", "alias", "layertype", "serviceid", "tableid", "isreadonly", "siteid"])),
+        archives: archives.map(archive => compactRecord(archive, ["archiveid", "archivetype", "archivetime", "recordid", "tableid", "siteid"]))
       };
     }
     case "table": {

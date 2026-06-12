@@ -32,7 +32,7 @@ export const TOOLS = [
   {
     name: "app_builder_graph_overview",
     description:
-      "Trả tổng quan App Builder thật ở dạng skeleton graph: root, app, service/appservice, table, column, window, tab, field, menu, domain, cache, role/access và các cạnh liên kết. Dùng khi user hỏi toàn hệ thống, danh sách app, số lượng hoặc cần bản đồ ban đầu.",
+      "Trả tổng quan App Builder thật ở dạng skeleton graph: root, app, site, service/appservice, table, column, window, tab, field, menu, domain, cache, workflow/wfstep, report, map/layer, archive, user/org/role/access và các cạnh liên kết. Dùng khi user hỏi toàn hệ thống, danh sách app, số lượng hoặc cần bản đồ ban đầu.",
     parameters: {
       type: "object",
       properties: {
@@ -68,7 +68,7 @@ export const TOOLS = [
         },
         types: {
           type: "string",
-          description: "Optional danh sách type lọc bằng dấu phẩy: app,table,column,window,tab,field,menu,domain."
+          description: "Optional danh sách type lọc bằng dấu phẩy: app,table,column,window,tab,field,menu,domain,workflow,wfstep,report,map,layer,archive,user,org,role,access."
         },
         limit: {
           type: "string",
@@ -119,7 +119,7 @@ export const TOOLS = [
   {
     name: "app_builder_node_detail",
     description:
-      "Lấy detail của một node cụ thể trong App Builder graph: app/table/column/window/tab/field/menu/domain. Dùng khi cần record chi tiết, columns/fields/neighbors hoặc khi subgraph chưa đủ để trả lời hoặc lập plan.",
+      "Lấy detail của một node cụ thể trong App Builder graph: app/table/column/window/tab/field/menu/domain/workflow/wfstep/report/map/layer/archive/user/org/role/access. Dùng khi cần record chi tiết, columns/fields/neighbors hoặc khi subgraph chưa đủ để trả lời hoặc lập plan.",
     parameters: {
       type: "object",
       properties: {
@@ -149,7 +149,7 @@ export const TOOLS = [
   {
     name: "app_builder_creation_schema",
     description:
-      "Trả quy tắc tạo/sửa App Builder ở dạng planning schema: app -> service/appservice -> table -> column và app -> window -> tab -> field/menu/domain/cache/role access. Tool này không ghi dữ liệu.",
+      "Trả quy tắc tạo/sửa App Builder ở dạng planning schema: app -> service/appservice -> table -> column và app -> window -> tab -> field/menu/domain/cache/role access. Có kèm ranh giới runtime ngoài App Builder như SQLCloud physical schema, source files, upload/proxy để agent không dùng nhầm App Builder tool cho các thao tác đó. Tool này không ghi dữ liệu.",
     parameters: {
       type: "object",
       properties: {
