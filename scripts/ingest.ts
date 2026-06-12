@@ -26,15 +26,12 @@ config({ path: ".env" });
 
 const DOCS_DIR = path.resolve("doc");
 const VECTORIZE_INDEX = process.env.VECTORIZE_INDEX ?? "zilcode-docs";
-const EMBEDDING_PROVIDER = (process.env.EMBEDDING_PROVIDER ?? "cloudflare").toLowerCase();
 const CLOUDFLARE_EMBEDDING_MODEL = process.env.CLOUDFLARE_EMBEDDING_MODEL ?? "@cf/baai/bge-m3";
-const OPENROUTER_EMBEDDING_MODEL = process.env.OPENROUTER_EMBEDDING_MODEL ?? process.env.OPENROUTER_MODEL ?? "";
 const EMBEDDING_DIMENSIONS = Number(process.env.EMBEDDING_DIMENSIONS ?? "1024");
 
 // Cloudflare credentials — read from env or wrangler login session
 const CF_ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID!;
 const CF_API_TOKEN = process.env.CLOUDFLARE_API_TOKEN!;
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 
 // KV namespace id — copy from wrangler.jsonc after creating namespace
 const KV_NAMESPACE_ID = process.env.KV_NAMESPACE_ID!;
@@ -83,13 +80,6 @@ interface MarkdownSection {
   headingLevel: number;
   sectionPath: string;
   text: string;
-}
-
-interface OpenRouterEmbeddingResponse {
-  data?: Array<{
-    embedding?: number[];
-    index?: number;
-  }>;
 }
 
 // ─── Chunking ─────────────────────────────────────────────────────────────────
@@ -369,14 +359,6 @@ function buildEmbeddingText(text: string, metadata: ChunkMetadata): string {
 // ─── Embedding + Cloudflare API helpers ───────────────────────────────────────
 
 async function embedTexts(texts: string[]): Promise<number[][]> {
-  if (EMBEDDING_PROVIDER === "openrouter") {
-    return embedTextsWithOpenRouter(texts);
-  }
-
-  if (EMBEDDING_PROVIDER !== "cloudflare") {
-    throw new Error("EMBEDDING_PROVIDER chỉ hỗ trợ 'cloudflare' hoặc 'openrouter'.");
-  }
-
   return embedTextsWithCloudflare(texts);
 }
 
@@ -398,52 +380,6 @@ async function embedTextsWithCloudflare(texts: string[]): Promise<number[][]> {
   }
   const json = await res.json() as { result: { data: number[][] } };
   return validateEmbeddings(json.result.data, texts.length);
-}
-
-async function embedTextsWithOpenRouter(texts: string[]): Promise<number[][]> {
-  if (!OPENROUTER_API_KEY) {
-    throw new Error("Thiếu OPENROUTER_API_KEY khi EMBEDDING_PROVIDER=openrouter.");
-  }
-
-  if (!OPENROUTER_EMBEDDING_MODEL) {
-    throw new Error("Thiếu OPENROUTER_EMBEDDING_MODEL hoặc OPENROUTER_MODEL khi EMBEDDING_PROVIDER=openrouter.");
-  }
-
-  const res = await fetch("https://openrouter.ai/api/v1/embeddings", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-      "Content-Type": "application/json",
-      "HTTP-Referer": "https://ragorit.daovanda2405.workers.dev",
-      "X-Title": "Ragorit Zilcode RAG Ingest"
-    },
-    body: JSON.stringify({
-      model: OPENROUTER_EMBEDDING_MODEL,
-      input: texts,
-      dimensions: EMBEDDING_DIMENSIONS
-    })
-  });
-
-  const responseText = await res.text();
-  let json: OpenRouterEmbeddingResponse | { error?: unknown };
-  try {
-    json = responseText ? JSON.parse(responseText) as OpenRouterEmbeddingResponse : {};
-  } catch {
-    json = { error: responseText };
-  }
-
-  if (!res.ok) {
-    throw new Error(`OpenRouter embedding API error: ${JSON.stringify(json)}`);
-  }
-
-  const payload = json as OpenRouterEmbeddingResponse;
-  const items = Array.isArray(payload.data) ? payload.data : [];
-  const ordered = items.every(item => typeof item.index === "number")
-    ? items.slice().sort((a, b) => (a.index || 0) - (b.index || 0))
-    : items;
-  const embeddings = ordered.map(item => item.embedding || []);
-
-  return validateEmbeddings(embeddings, texts.length);
 }
 
 function validateEmbeddings(embeddings: number[][], expectedCount: number): number[][] {
@@ -537,15 +473,8 @@ async function main() {
     process.exit(1);
   }
 
-  if (EMBEDDING_PROVIDER === "openrouter" && (!OPENROUTER_API_KEY || !OPENROUTER_EMBEDDING_MODEL)) {
-    console.error(
-      "Missing OpenRouter env vars. Set OPENROUTER_API_KEY and OPENROUTER_EMBEDDING_MODEL or OPENROUTER_MODEL."
-    );
-    process.exit(1);
-  }
-
-  console.log(`Embedding provider: ${EMBEDDING_PROVIDER}`);
-  console.log(`Embedding model: ${EMBEDDING_PROVIDER === "openrouter" ? OPENROUTER_EMBEDDING_MODEL : CLOUDFLARE_EMBEDDING_MODEL}`);
+  console.log("Embedding provider: cloudflare");
+  console.log(`Embedding model: ${CLOUDFLARE_EMBEDDING_MODEL}`);
   console.log(`Embedding dimensions: ${EMBEDDING_DIMENSIONS}`);
   console.log(`Vectorize index: ${VECTORIZE_INDEX}`);
 

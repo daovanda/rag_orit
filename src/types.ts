@@ -14,7 +14,7 @@ export interface ToolExecutionResult {
 }
 
 export interface EmbeddingDebug {
-  provider: "cloudflare" | "openrouter";
+  provider: "cloudflare";
   model: string;
   dimensions: number;
   fallback: boolean;
@@ -69,20 +69,6 @@ export interface ChatModelRequest {
 export interface ChatModelResponse {
   response?: string;
   tool_calls?: ToolCall[];
-}
-
-export interface OpenRouterMessage {
-  role: "system" | "user" | "assistant" | "tool";
-  content: string;
-  tool_call_id?: string;
-}
-
-export interface ResponseApiOutputItem {
-  type?: string;
-  name?: string;
-  call_id?: string;
-  arguments?: unknown;
-  content?: Array<{ text?: string; type?: string }>;
 }
 
 export interface ChatHistoryMessage {

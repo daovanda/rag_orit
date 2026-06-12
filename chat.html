@@ -1830,7 +1830,7 @@
       const debug = document.createElement('div');
       debug.className = 'debug-log';
 
-      const provider = embeddingDebug.provider === 'openrouter' ? 'OpenRouter' : 'Cloudflare';
+      const provider = 'Cloudflare';
       const model = embeddingDebug.model || 'unknown model';
       const dimensions = typeof embeddingDebug.dimensions === 'number'
         ? `${embeddingDebug.dimensions} chiều`

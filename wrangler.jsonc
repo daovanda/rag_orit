@@ -17,8 +17,6 @@
 	"keep_vars": true,
 
 	"vars": {
-		"OPENROUTER_MODEL": "openrouter/free",
-		"OPENROUTER_EMBEDDING_MODEL": "nvidia/llama-nemotron-embed-vl-1b-v2:free",
 		"ZILCODE_BASE": "https://dvnb.zilcode.vn",
 		"SESSION_TTL_SECONDS": "28800"
 	},

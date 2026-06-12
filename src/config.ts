@@ -6,9 +6,6 @@ export interface Env {
   ZILCODE_API_TOKEN: string;
   ZILCODE_BASE?: string;
   SESSION_TTL_SECONDS?: string;
-  OPENROUTER_API_KEY?: string;
-  OPENROUTER_MODEL?: string;
-  OPENROUTER_EMBEDDING_MODEL?: string;
 }
 
 export const LLAMA_CHAT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
