@@ -10,7 +10,6 @@ import {
   RAG_QUERY_REWRITE_MAX_TOKENS,
   RAG_RERANK_MAX_TOKENS,
   RAG_RERANK_TEXT_MAX_CHARS,
-  RAG_VECTOR_DIMENSIONS,
   RAG_VECTOR_TOP_K,
   type Env
 } from "./config";
@@ -34,24 +33,6 @@ interface ChatModelResponse {
   }>;
 }
 
-interface OpenRouterMessage {
-  role: "system" | "user" | "assistant" | "tool";
-  content: string;
-  tool_call_id?: string;
-}
-
-interface ResponseApiOutputItem {
-  type?: string;
-  role?: string;
-  name?: string;
-  arguments?: unknown;
-  call_id?: string;
-  content?: Array<{
-    type?: string;
-    text?: string;
-  }>;
-}
-
 function getStringArg(args: Record<string, unknown>, name: string): string {
   const value = args[name];
   return typeof value === "string" ? value.trim() : "";
@@ -67,13 +48,6 @@ function getErrorText(error: unknown): string {
   }
 }
 
-function isCloudflareNeuronQuotaError(error: unknown): boolean {
-  const text = getErrorText(error).toLowerCase();
-  return text.includes("4006")
-    || text.includes("daily free allocation")
-    || text.includes("neurons");
-}
-
 function isCloudflareNeuronQuotaResult(result: unknown): boolean {
   const text = getErrorText(result).toLowerCase();
   return text.includes("4006")
@@ -85,38 +59,6 @@ function isCloudflareInternalModelError(error: unknown): boolean {
   return text.includes("3043") || text.includes("internal server error");
 }
 
-function isOpenAiWorkersModel(model: string): boolean {
-  return model.includes("/openai/gpt-oss");
-}
-
-function normalizeMessagesForOpenRouter(messages: AIMessage[]): OpenRouterMessage[] {
-  return messages.map(message => {
-    if (message.role === "tool") {
-      return {
-        role: "user",
-        content: `Kết quả công cụ${message.tool_call_id ? ` (${message.tool_call_id})` : ""}:\n${message.content}`
-      };
-    }
-
-    return {
-      role: message.role,
-      content: message.content
-    };
-  });
-}
-
-function toOpenRouterTools(tools?: typeof TOOLS) {
-  if (!tools) return undefined;
-  return tools.map(tool => ({
-    type: "function",
-    function: {
-      name: tool.name,
-      description: getRuntimeToolDescription(String(tool.name), String(tool.description ?? "")),
-      parameters: tool.parameters
-    }
-  }));
-}
-
 function getRuntimeToolDescription(name: string, description: string): string {
   if (name !== "rag_search") return description;
 
@@ -125,23 +67,20 @@ function getRuntimeToolDescription(name: string, description: string): string {
 Bổ sung sau ingest: rag_search cũng có thể tra cứu doc/logic/*.md. Dùng nó khi cần hiểu cách Zilcode hoạt động, domain model, REST API contract, runtime architecture, window/tab/field config, tool safety rules, hoặc khi cần lấy kiến thức logic để chọn/gọi các tool Zilcode đúng hơn và kết hợp với dữ liệu thật.`;
 }
 
-function buildCloudflareChatRequest(
-  cfModel: string,
-  request: ChatModelRequest
-): Record<string, unknown> {
-  if (!isOpenAiWorkersModel(cfModel)) {
-    return {
-      ...request,
-      tools: request.tools?.map(tool => ({
-        ...tool,
-        description: getRuntimeToolDescription(String(tool.name), String(tool.description ?? ""))
-      }))
-    } as unknown as Record<string, unknown>;
-  }
-
+function buildCloudflareChatRequest(request: ChatModelRequest): Record<string, unknown> {
   return {
-    messages: normalizeMessagesForOpenRouter(request.messages),
-    tools: toOpenRouterTools(request.tools),
+    messages: request.messages.map(message => ({
+      role: message.role,
+      content: message.content ?? ""
+    })),
+    tools: request.tools?.map(tool => ({
+      type: "function",
+      function: {
+        name: String(tool.name),
+        description: getRuntimeToolDescription(String(tool.name), String(tool.description ?? "")),
+        parameters: tool.parameters
+      }
+    })),
     tool_choice: request.tools ? "auto" : undefined,
     max_tokens: request.max_tokens,
     temperature: request.temperature
@@ -164,7 +103,7 @@ function parseToolArguments(rawArguments: unknown): Record<string, unknown> {
   return {};
 }
 
-function normalizeOpenRouterResponse(data: unknown): ChatModelResponse {
+function normalizeCloudflareChatResponse(data: unknown): ChatModelResponse {
   const payload = data as {
     choices?: Array<{
       message?: {
@@ -181,108 +120,25 @@ function normalizeOpenRouterResponse(data: unknown): ChatModelResponse {
   };
 
   const message = payload.choices?.[0]?.message;
-  const toolCalls = message?.tool_calls
-    ?.map(toolCall => ({
-      id: toolCall.id,
-      name: toolCall.function?.name ?? "",
-      arguments: parseToolArguments(toolCall.function?.arguments)
-    }))
-    .filter(toolCall => toolCall.name);
+  if (message !== undefined) {
+    const toolCalls = message.tool_calls
+      ?.map(toolCall => ({
+        id: toolCall.id,
+        name: toolCall.function?.name ?? "",
+        arguments: parseToolArguments(toolCall.function?.arguments)
+      }))
+      .filter(toolCall => toolCall.name);
 
-  return {
-    response: message?.content ?? undefined,
-    tool_calls: toolCalls?.length ? toolCalls : undefined
-  };
-}
-
-function normalizeResponsesApiOutput(output?: ResponseApiOutputItem[]): ChatModelResponse {
-  if (!Array.isArray(output)) return {};
-
-  const text = output
-    .filter(item => item.type === "message" || item.role === "assistant")
-    .flatMap(item => item.content ?? [])
-    .map(content => content.text ?? "")
-    .join("");
-
-  const toolCalls = output
-    .filter(item => item.type === "function_call" && item.name)
-    .map(item => ({
-      id: item.call_id,
-      name: item.name ?? "",
-      arguments: parseToolArguments(item.arguments)
-    }))
-    .filter(toolCall => toolCall.name);
-
-  return {
-    response: text || undefined,
-    tool_calls: toolCalls.length ? toolCalls : undefined
-  };
-}
-
-function normalizeCloudflareChatResponse(data: unknown): ChatModelResponse {
-  const existing = data as ChatModelResponse;
-  if (existing.response || existing.tool_calls) return existing;
-
-  const payload = data as {
-    output_text?: string;
-    output?: ResponseApiOutputItem[];
-    choices?: unknown[];
-  };
-
-  const chatCompletion = normalizeOpenRouterResponse(data);
-  if (chatCompletion.response || chatCompletion.tool_calls) {
-    return chatCompletion;
+    return {
+      response: message.content ?? undefined,
+      tool_calls: toolCalls?.length ? toolCalls : undefined
+    };
   }
 
-  const responsesApi = normalizeResponsesApiOutput(payload.output);
-  if (responsesApi.response || responsesApi.tool_calls) {
-    return responsesApi;
-  }
+  const direct = data as { response?: string };
+  if (direct.response) return { response: direct.response };
 
-  return {
-    response: payload.output_text
-  };
-}
-
-async function callOpenRouterChat(
-  request: ChatModelRequest,
-  env: Env
-): Promise<ChatModelResponse> {
-  if (!env.OPENROUTER_API_KEY || !env.OPENROUTER_MODEL) {
-    throw new Error("Thiếu OPENROUTER_API_KEY hoặc OPENROUTER_MODEL để fallback sang OpenRouter.");
-  }
-
-  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
-      "Content-Type": "application/json",
-      "HTTP-Referer": "https://ragorit.daovanda2405.workers.dev",
-      "X-Title": "Ragorit Zilcode RAG Chatbot"
-    },
-    body: JSON.stringify({
-      model: env.OPENROUTER_MODEL,
-      messages: normalizeMessagesForOpenRouter(request.messages),
-      tools: toOpenRouterTools(request.tools),
-      tool_choice: request.tools ? "auto" : undefined,
-      max_tokens: request.max_tokens,
-      temperature: request.temperature
-    })
-  });
-
-  const responseText = await response.text();
-  let data: unknown;
-  try {
-    data = responseText ? JSON.parse(responseText) : {};
-  } catch {
-    data = { error: responseText };
-  }
-
-  if (!response.ok) {
-    throw new Error(`OpenRouter API lỗi ${response.status}: ${getErrorText(data)}`);
-  }
-
-  return normalizeOpenRouterResponse(data);
+  return {};
 }
 
 async function callCloudflareChatModel(
@@ -292,7 +148,7 @@ async function callCloudflareChatModel(
 ): Promise<ChatModelResponse> {
   const result = await env.AI.run(
     cfModel as string & {},
-    buildCloudflareChatRequest(cfModel, request)
+    buildCloudflareChatRequest(request)
   ) as unknown;
 
   if (isCloudflareNeuronQuotaResult(result)) {
@@ -315,110 +171,32 @@ export async function runChatModel(
       return callCloudflareChatModel(INTERNAL_CHAT_FALLBACK_MODEL, request, env);
     }
 
-    if (isCloudflareNeuronQuotaError(error)) {
-      console.log("[CHAT_MODEL] Cloudflare quota error, fallback sang OpenRouter");
-      return callOpenRouterChat(request, env);
-    }
-
     throw error;
   }
-}
-
-async function callOpenRouterEmbedding(
-  text: string,
-  env: Env
-): Promise<EmbeddingResult> {
-  const model = env.OPENROUTER_EMBEDDING_MODEL ?? env.OPENROUTER_MODEL;
-
-  if (!env.OPENROUTER_API_KEY || !model) {
-    throw new Error("Thiếu OPENROUTER_API_KEY và OPENROUTER_EMBEDDING_MODEL/OPENROUTER_MODEL để fallback embedding sang OpenRouter.");
-  }
-
-  const response = await fetch("https://openrouter.ai/api/v1/embeddings", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
-      "Content-Type": "application/json",
-      "HTTP-Referer": "https://ragorit.daovanda2405.workers.dev",
-      "X-Title": "Ragorit Zilcode RAG Chatbot"
-    },
-    body: JSON.stringify({
-      model,
-      input: text,
-      dimensions: RAG_VECTOR_DIMENSIONS
-    })
-  });
-
-  const responseText = await response.text();
-  let data: unknown;
-  try {
-    data = responseText ? JSON.parse(responseText) : {};
-  } catch {
-    data = { error: responseText };
-  }
-
-  if (!response.ok) {
-    throw new Error(`OpenRouter Embeddings API lỗi ${response.status}: ${getErrorText(data)}`);
-  }
-
-  const payload = data as {
-    data?: Array<{
-      embedding?: number[];
-    }>;
-  };
-  const embedding = payload.data?.[0]?.embedding;
-
-  if (!embedding?.length) {
-    throw new Error("OpenRouter Embeddings API không trả về embedding.");
-  }
-
-  if (embedding.length !== RAG_VECTOR_DIMENSIONS) {
-    throw new Error(
-      `Embedding OpenRouter có ${embedding.length} chiều, nhưng Vectorize index hiện tại cần ${RAG_VECTOR_DIMENSIONS} chiều. Cần dùng embedding model hỗ trợ dimensions=${RAG_VECTOR_DIMENSIONS} hoặc tạo lại Vectorize index và ingest lại.`
-    );
-  }
-
-  return {
-    vector: embedding,
-    debug: {
-      provider: "openrouter",
-      model,
-      dimensions: embedding.length,
-      fallback: true
-    }
-  };
 }
 
 export async function embedQuery(
   text: string,
   env: Env
 ): Promise<EmbeddingResult> {
-  try {
-    const embeddingResult = await env.AI.run(
-      EMBEDDING_MODEL,
-      { text }
-    ) as { data: number[] | number[][] };
+  const embeddingResult = await env.AI.run(
+    EMBEDDING_MODEL,
+    { text }
+  ) as { data: number[] | number[][] };
 
-    const vector = Array.isArray(embeddingResult.data[0])
-      ? embeddingResult.data[0] as number[]
-      : embeddingResult.data as number[];
-    return {
-      vector,
-      debug: {
-        provider: "cloudflare",
-        model: EMBEDDING_MODEL,
-        dimensions: vector.length,
-        fallback: false
-      }
-    };
-  } catch (error) {
-    if (isCloudflareNeuronQuotaError(error)) {
-      console.log("[EMBEDDING_MODEL] Cloudflare quota error, fallback embedding sang OpenRouter");
-      return callOpenRouterEmbedding(text, env);
+  const vector = Array.isArray(embeddingResult.data[0])
+    ? embeddingResult.data[0] as number[]
+    : embeddingResult.data as number[];
+
+  return {
+    vector,
+    debug: {
+      provider: "cloudflare",
+      model: EMBEDDING_MODEL,
+      dimensions: vector.length,
+      fallback: false
     }
-
-    throw error;
-  }
+  };
 }
 
 function formatScore(score?: number): string {
