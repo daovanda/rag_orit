@@ -1244,7 +1244,7 @@ function normalizeRawOperations(
     referenceAliases[oldImplicitId] = canonicalId;
     if (originalId) referenceAliases[originalId] = canonicalId;
 
-    const explicitRecord = asRecord(rawOperation.record) ?? asRecord(rawOperation.fields) ?? asRecord(rawOperation.updates);
+    const explicitRecord = getExplicitOperationRecord(rawOperation);
     const recordSource = explicitRecord ?? stripOperationFields(rawOperation);
     const record = normalizeRecordAliases(target, recordSource, warnings);
 
@@ -1286,12 +1286,21 @@ function getOperationRecordPayload(
   rawOperation: Record<string, unknown>,
   warnings: string[]
 ): Record<string, unknown> {
-  const explicitRecord = asRecord(rawOperation.record) ?? asRecord(rawOperation.fields) ?? asRecord(rawOperation.updates);
+  const explicitRecord = getExplicitOperationRecord(rawOperation);
   return normalizeRecordAliases(
     target,
     explicitRecord ?? stripOperationFields(rawOperation),
     warnings
   );
+}
+
+function getExplicitOperationRecord(rawOperation: Record<string, unknown>): Record<string, unknown> | null {
+  return asRecord(rawOperation.record)
+    ?? asRecord(rawOperation.fields)
+    ?? asRecord(rawOperation.updates)
+    ?? asRecord(rawOperation.set)
+    ?? asRecord(rawOperation.values)
+    ?? asRecord(rawOperation.data);
 }
 
 function normalizeRecordKey(target: string, key: string, warnings: string[]): string {
@@ -1344,6 +1353,11 @@ function normalizeRecordKey(target: string, key: string, warnings: string[]): st
   };
 
   const targetSpecific: Record<string, Record<string, string>> = {
+    app: {
+      name: "appname",
+      app_name: "appname",
+      application_name: "appname"
+    },
     column: {
       is_primary: "isprimarykey",
       is_primary_key: "isprimarykey",

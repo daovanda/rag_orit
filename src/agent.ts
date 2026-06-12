@@ -1039,6 +1039,61 @@ function findLatestRenameWindowRequest(chatHistory: AIMessage[]): { currentName:
   return null;
 }
 
+interface RenameAppTarget {
+  appid?: string;
+  appName?: string;
+}
+
+function isRenameAppIntent(message: string): boolean {
+  const normalized = normalizeVietnameseText(message);
+  return /(doi ten|sua ten|rename|cap nhat ten)/.test(normalized)
+    && /(app|appid|ung dung)/.test(normalized);
+}
+
+function extractRenameAppTarget(message: string): RenameAppTarget | null {
+  const appidMatch = message.match(/\bapp\s*id\s*[:#=]?\s*(\d+)\b/i)
+    ?? message.match(/\bappid\s*[:#=]?\s*(\d+)\b/i)
+    ?? message.match(/(?:ứng dụng|ung dung|app)\s+(?:id\s*)?(\d+)\b/i);
+
+  if (appidMatch?.[1]) {
+    return { appid: appidMatch[1].trim() };
+  }
+
+  const appNameMatch = message.match(/(?:ứng dụng|ung dung|app)\s+["“]?([^"”\n,.;]+?)(?:["”]|\s+(?:thành|thanh|sang|to)\b|[,.;]|$)/i);
+  const appName = appNameMatch?.[1]?.trim();
+  if (!appName) return null;
+  if (/^(id|appid)$/i.test(appName)) return null;
+  return { appName };
+}
+
+function extractRenameNewName(message: string): string | null {
+  const match = message.match(/(?:thành|thanh|sang|to)\s+["“]?([^"”\n.;]+)["”]?/i)
+    ?? message.match(/(?:tên mới là|ten moi la|new name is)\s+["“]?([^"”\n.;]+)["”]?/i);
+  const value = match?.[1]?.trim();
+  if (!value) return null;
+  return value.replace(/\s+(?:nhé|nhe|giúp tôi|giup toi)$/i, "").trim() || null;
+}
+
+function findLatestRenameAppTarget(chatHistory: AIMessage[]): RenameAppTarget | null {
+  for (let i = chatHistory.length - 1; i >= 0; i--) {
+    if (chatHistory[i].role !== "user") continue;
+    const content = chatHistory[i].content ?? "";
+    if (!isRenameAppIntent(content) && !extractRenameAppTarget(content)) continue;
+    const target = extractRenameAppTarget(content);
+    if (target) return target;
+  }
+  return null;
+}
+
+function findLatestRenameAppNewName(chatHistory: AIMessage[]): string | null {
+  for (let i = chatHistory.length - 1; i >= 0; i--) {
+    if (chatHistory[i].role !== "user") continue;
+    const newName = extractRenameNewName(chatHistory[i].content ?? "");
+    if (newName) return newName;
+  }
+  return null;
+}
+
 function extractAppNameFromText(message: string): string | null {
   const match = message.match(/\bapp\s+([^\-,.;\n]+)/i)
     ?? message.match(/ung dung\s+([^\-,.;\n]+)/i)
@@ -1187,34 +1242,69 @@ async function createFinalAnswerFromToolResults(
     messages: [
       {
         role: "system",
-        content: `Bạn là trợ lý Zilcode/App Builder.
-Trả lời bằng cùng ngôn ngữ với người hỏi.
-Nếu người hỏi dùng tiếng Việt, toàn bộ câu trả lời phải là tiếng Việt. Không dùng heading/cụm từ tiếng Anh như "Proposed Change Plan", "Next steps", "Please confirm".
-Hãy trả lời theo đúng ý định của user, không kể lại toàn bộ JSON.
-Chỉ nêu những thông tin liên quan trực tiếp tới câu hỏi. Nếu câu hỏi rộng, tóm tắt ngắn gọn theo nhóm.
-Khi nhận kết quả graph tool, hãy tự đọc nodes/edges/detail và diễn giải theo ý định của user; không render theo template cứng.
-Nếu tool result có answer_facts, ưu tiên dùng answer_facts để trả lời: flow_summary trước; sau đó chỉ dùng tables_summary/windows_summary/menus_summary/permissions_summary/workflow_summary/report_summary/map_layer_summary/user_org_summary/site_summary/archive_summary khi liên quan trực tiếp tới câu hỏi. Dùng runtime_summary để giải thích workflow/report/GIS/archive runtime. Dùng verified_relations như bằng chứng đã thấy; dùng inferred_notes như phần suy luận/khuyến nghị.
-Với yêu cầu tạo/sửa/xóa, bắt buộc đọc dependency_summary, write_contract_summary, creation_readiness và operation_plan_facts trước khi đề xuất plan. Nếu creation_readiness có blocking_conditions liên quan tới yêu cầu, hãy hỏi lại hoặc tạo prepare_change thay vì tự bịa payload.
-Phân biệt rõ App Builder metadata với runtime ngoài App Builder. SQLCloud/table/view/procedure/query/column alter là physical database/runtime, source editor là file/source runtime, upload là attachment runtime; không được nói có thể apply bằng App Builder metadata tool nếu tool/schema chưa hỗ trợ write contract riêng.
-Mặc định hãy giải thích bằng flow nghiệp vụ trước: đối tượng này dùng để làm gì, nó đi qua app/menu/window/tab/table/field/column như thế nào, điểm nào liên quan trực tiếp tới câu hỏi.
-Không mở đầu bằng bảng/list dài. Chỉ liệt kê bảng/window/menu đầy đủ khi người dùng hỏi rõ "liệt kê", "danh sách", "có những bảng/window nào", hoặc sau khi đã giải thích flow ngắn gọn.
-Khi cần liệt kê, giới hạn danh sách ở các mục quan trọng nhất, nhóm phần còn lại thành số lượng/tóm tắt, và gợi ý người dùng hỏi sâu vào mục cụ thể nếu cần.
-Bắt buộc phân biệt "Đã thấy trong graph/tool result" với "Suy đoán/khuyến nghị". Không trình bày suy đoán như sự thật đã xác minh.
-Nếu câu trả lời vừa có dữ liệu đọc được vừa có đề xuất, tách rõ hai phần: dữ liệu đã thấy trước, suy đoán/khuyến nghị sau.
-Nếu một thông tin không xuất hiện trong graph/detail/search/subgraph hoặc tool context, hãy nói rõ đó là suy luận, giả định, hoặc khuyến nghị.
-Nếu chỉ thấy metadata quyền/truy cập, không tự suy thành hành vi sử dụng thực tế.
-Không nói n_cache là cache dữ liệu nghiệp vụ/bảng. Trong Zilcode hiện tại, n_cache là generated window/app layout cache; chỉ liên hệ tới refresh/delete cache khi metadata UI thay đổi.
-Khi nói về quyền, phải tách rõ: roleapp là quyền vào app, rolemenu là quyền vào menu, access là quyền/cờ hạn chế trên table. Không nói roleapp một mình quyết định toàn bộ menu/window hiển thị nếu graph không chứng minh rolemenu/access tương ứng.
-Với câu hỏi "cách hoạt động" hoặc "flow", trả lời tối đa 3-5 đoạn/bullet chính trước. Chỉ mở rộng danh sách window/table/menu khi user hỏi rõ "liệt kê đầy đủ" hoặc "chi tiết từng mục".
-Nếu người dùng hỏi về hệ thống, tóm tắt theo nhóm: session/role nếu có, các app chính, mỗi app có số bảng/window/menu và điểm đáng chú ý. Không liệt kê node/edge thô.
-Nếu người dùng hỏi "đi sâu", "phân tích", "xem kỹ" một app/table/window, hãy mô tả cấu trúc và các liên kết quan trọng, không chỉ liệt kê kết quả tìm kiếm.
-Nếu người dùng hỏi về một app/table/window/tab/field cụ thể, tập trung vào node đó và quan hệ trực tiếp. Nếu top search match rõ, coi đó là đối tượng người dùng muốn nói tới và diễn giải tiếp.
-Nếu người dùng hỏi về luồng hoặc liên kết trong App Builder, hãy diễn giải theo chuỗi dễ hiểu: app -> menu -> window -> tab -> table -> field -> column -> domain/lookup. Chỉ nhắc node_id/id khi cần đối chiếu.
-Nếu người dùng yêu cầu tạo/sửa/xóa, trả lời theo kiểu IDE agent: hiểu yêu cầu, những gì sẽ thay đổi, các bước plan, rủi ro/thiếu thông tin, và yêu cầu xác nhận trước khi ghi.
-Dùng đúng tên metadata Zilcode hiện tại: n_window, n_tab, n_field, n_menu hoặc window/tab/field/menu. Không tự đổi sang AD_Window/AD_Tab/AD_Field nếu tool không trả về các tên đó.
-Nếu đã có kết quả app_builder_prepare_change, chỉ tóm tắt plan id và các bước; không mở rộng thành hướng dẫn dài.
-Nếu đã có kết quả app_builder_apply_change, báo rõ thành công/thất bại và bước verify tiếp theo.
-Không nhắc đến tool/function nội bộ.`
+        content: `Bạn là trợ lý phân tích App Builder của Zilcode.
+Trả lời bằng ngôn ngữ của user. Không dùng heading hay cụm từ tiếng Anh nếu user viết tiếng Việt.
+ 
+## Bước 1 — Hiểu app từ graph
+ 
+Trước khi trả lời, đọc Context và xây dựng hiểu biết về app:
+- answer_facts.flow_summary: các luồng đã xác minh trong graph (data, UI, điều hướng, quyền)
+- answer_facts.verified_relations: các cạnh quan hệ đã thấy thực sự — đây là bằng chứng cứng
+- answer_facts.inferred_notes: suy luận từ graph — chưa phải sự thật xác minh
+- Nếu mode là "search": top match là đối tượng user đang hỏi, đọc nó trước
+- Nếu mode là "detail": node + neighbors là toàn bộ context liên quan
+- Nếu mode là "subgraph": đọc flow_summary để hiểu vùng graph đã mở
+ 
+## Bước 2 — Khớp với câu hỏi
+ 
+Xác định câu hỏi thuộc loại nào rồi chọn cách trả lời:
+ 
+Hỏi về cách hoạt động / flow / liên kết:
+→ Diễn giải theo chuỗi thực tế: app → menu → window → tab → table → field → column
+→ Dùng tên thật từ graph, không dùng tên giả định
+ 
+Hỏi về một đối tượng cụ thể (app/window/table/field...):
+→ Tập trung vào node đó và quan hệ trực tiếp của nó
+→ Nếu search có top match rõ, coi đó là đối tượng user muốn hỏi
+ 
+Hỏi tổng quan / "có những gì":
+→ Tóm tắt theo nhóm: số app, số window/table mỗi app, điểm đáng chú ý
+→ Không liệt kê raw node/edge
+ 
+Hỏi "liệt kê" / "danh sách" / "có bao nhiêu":
+→ Liệt kê từ tables_summary / windows_summary / menus_summary
+→ Nếu nhiều, nhóm phần còn lại thành số lượng và gợi ý hỏi sâu hơn
+ 
+## Bước 3 — Trả lời
+ 
+Quy tắc bắt buộc:
+ 
+TÁCH RÕ hai nguồn — không được trộn lẫn:
+- "Đã thấy trong graph": chỉ những gì có trong flow_summary / verified_relations / node data
+- "Suy luận / khuyến nghị": những gì đến từ inferred_notes hoặc kiến thức chung của bạn
+ 
+KHÔNG mở đầu bằng danh sách dài hay bảng. Bắt đầu từ điều quan trọng nhất với câu hỏi đang hỏi.
+ 
+KHÔNG kể lại JSON. KHÔNG nhắc đến tên tool/function nội bộ.
+ 
+Dùng kiến thức chung về no-code/ERP/CRUD/workflow như lớp diễn giải thêm nghĩa,
+không dùng để thay thế hay bổ sung dữ liệu graph khi graph chưa xác minh.
+ 
+## Quy tắc đặc thù của Zilcode
+ 
+Quyền có 3 lớp độc lập — không được gộp:
+- roleapp: quyền vào app
+- rolemenu: quyền vào menu  
+- access: cờ hạn chế trên table
+ 
+n_cache là layout cache của UI, không phải cache dữ liệu nghiệp vụ.
+Chỉ nhắc đến n_cache khi user hỏi về refresh/delete cache sau khi thay đổi metadata UI.
+ 
+Tên metadata đúng: window / tab / field / menu (hoặc n_window / n_tab / n_field / n_menu).
+Không tự đổi sang AD_Window / AD_Tab / AD_Field.
+ 
+App Builder metadata ≠ runtime ngoài App Builder.
+SQLCloud / procedure / view là physical database runtime — không thể apply bằng App Builder tool.`
       },
       ...chatHistory,
       { role: "user", content: userMessage },
@@ -1328,6 +1418,74 @@ export async function runAgenticLoop(
             ? `Tạo app "${createAppRequest.appName}" với bảng, cột, window, tab, field và menu cơ bản.`
             : `Tạo app "${createAppRequest.appName}".`,
           operations,
+          max_records_per_table: "5000"
+        }
+      },
+      env,
+      chatHistory,
+      debugSteps,
+      zilcodeSession
+    );
+    const toolResults = [{ name: "app_builder_prepare_change", content: toolExecution.content }];
+    const answer = await createFinalAnswerFromToolResults(userMessage, toolResults, env, chatHistory, debugSteps);
+
+    return withActionState({
+      answer,
+      toolsCalled: ["app_builder_prepare_change"]
+    }, toolResults);
+  }
+
+  const renameAppIntent = isRenameAppIntent(userMessage);
+  const renameAppTarget = extractRenameAppTarget(userMessage) ?? findLatestRenameAppTarget(chatHistory);
+  const renameAppNewName = extractRenameNewName(userMessage)
+    ?? ((renameAppIntent || isPlanConfirmation(userMessage)) ? findLatestRenameAppNewName(chatHistory) : null);
+
+  if (zilcodeSession && (renameAppIntent || (renameAppTarget && renameAppNewName))) {
+    if (!renameAppTarget) {
+      return {
+        answer: "Bạn muốn đổi tên app nào? Hãy gửi appid hoặc tên app hiện tại.",
+        toolsCalled: []
+      };
+    }
+    if (!renameAppNewName) {
+      const targetLabel = renameAppTarget.appid
+        ? `appid ${renameAppTarget.appid}`
+        : `app "${renameAppTarget.appName}"`;
+      return {
+        answer: `Bạn muốn đổi ${targetLabel} thành tên mới nào?`,
+        toolsCalled: []
+      };
+    }
+
+    const targetLabel = renameAppTarget.appid
+      ? `appid ${renameAppTarget.appid}`
+      : `app "${renameAppTarget.appName}"`;
+    addDebugStep(debugSteps, "agent.rename_app_prepare", "start", "Detected app rename intent; creating pending update_app plan.", {
+      appid: renameAppTarget.appid,
+      app_name: renameAppTarget.appName,
+      new_name: renameAppNewName
+    });
+
+    const operation: Record<string, unknown> = {
+      id: `rename_app_${renameAppTarget.appid ?? renameAppTarget.appName ?? "target"}`,
+      op: "update_app",
+      record: {
+        appname: renameAppNewName
+      }
+    };
+    if (renameAppTarget.appid) {
+      operation.id_value = renameAppTarget.appid;
+    } else if (renameAppTarget.appName) {
+      operation.target_ref = renameAppTarget.appName;
+    }
+
+    const toolExecution = await executeTool(
+      {
+        name: "app_builder_prepare_change",
+        arguments: {
+          intent: "rename_app",
+          summary: `Đổi tên ${targetLabel} thành "${renameAppNewName}".`,
+          operations: [operation],
           max_records_per_table: "5000"
         }
       },
