@@ -1210,12 +1210,41 @@ Không nhắc đến tool/function nội bộ.`
   return answer;
 }
 
+function extractAnswerFactsContext(toolResults: ToolResultRecord[]): string {
+  const graphResult = [...toolResults]
+    .reverse()
+    .find(result => isAppBuilderGraphTool(result.name));
+
+  if (!graphResult) return "";
+
+  try {
+    const data = JSON.parse(graphResult.content) as Record<string, unknown>;
+    const facts = data.answer_facts;
+    if (!facts) return "";
+
+    const compacted = {
+      mode: data.mode,
+      apps: data.apps,
+      matches: data.matches,
+      node: data.node,
+      answer_facts: facts
+    };
+
+    return JSON.stringify(compacted, null, 2);
+  } catch {
+    return "";
+  }
+}
+
 async function buildComprehension(
   toolContext: string,
+  toolResults: ToolResultRecord[],
   env: Env,
   debugSteps?: DebugStep[]
 ): Promise<string> {
   addDebugStep(debugSteps, "pipeline.comprehension", "start", "Buoc 1: doc graph data va hieu cau truc app.", {});
+
+  const factsContext = extractAnswerFactsContext(toolResults) || toolContext;
 
   const response = await runChatModel(CHAT_MODEL, {
     max_tokens: 600,
@@ -1240,7 +1269,7 @@ Chỉ dùng thông tin có trong graph/tool data. Không bịa thêm. Không gi�
       },
       {
         role: "user",
-        content: toolContext
+        content: `Dữ liệu graph App Builder:\n\n${factsContext}\n\nHãy phân tích và tóm tắt cấu trúc app theo format yêu cầu.`
       }
     ]
   }, env);
@@ -1379,7 +1408,7 @@ async function createFinalAnswerFromToolResults(
     context_chars: toolContext.length
   });
 
-  const comprehension = await buildComprehension(toolContext, env, debugSteps);
+  const comprehension = await buildComprehension(toolContext, toolResults, env, debugSteps);
   if (!comprehension) {
     addDebugStep(debugSteps, "pipeline.comprehension", "error", "Comprehension rong, fallback ve answer_facts.", {});
     const fallback = createGraphFactsFallbackAnswer(userMessage, toolResults);
