@@ -215,8 +215,7 @@ function compactToolContentForFinalAnswer(result: ToolResultRecord): string {
         root: nodes?.find(node => node.type === "root"),
         answer_facts: data.answer_facts,
         errors: data.errors,
-        truncated: data.truncated,
-        answer_policy: "Tóm tắt theo ý định user. Ưu tiên giải thích flow và liên kết chính trước, không liệt kê tất cả node/edge hay danh sách bảng/window dài trừ khi user hỏi rõ. Phân biệt rõ phần đã thấy trong graph/tool result với phần suy đoán hoặc khuyến nghị; nếu cần chi tiết hãy dùng search/subgraph/detail."
+        truncated: data.truncated
       }, null, 2);
     }
 
@@ -258,8 +257,7 @@ function compactToolContentForFinalAnswer(result: ToolResultRecord): string {
         } : undefined,
         graph_counts: data.graph_counts,
         missing_node_ids: data.missing_node_ids,
-        cache: data.cache,
-        answer_policy: "Ưu tiên answer_facts. Không dùng raw graph để suy đoán nghiệp vụ nếu verified_relations/inferred_notes không chứng minh."
+        cache: data.cache
       }, null, 2);
     }
 
@@ -272,8 +270,7 @@ function compactToolContentForFinalAnswer(result: ToolResultRecord): string {
         answer_facts: compactAnswerFactsForFinalAnswer(data.answer_facts),
         detail: compactValueForFinalAnswer(data.detail),
         neighbors: compactValueForFinalAnswer(data.neighbors),
-        cache: data.cache,
-        answer_policy: "Ưu tiên answer_facts và detail đã xác minh. Tách rõ suy luận/khuyến nghị khỏi dữ liệu đã thấy."
+        cache: data.cache
       }, null, 2);
     }
 
@@ -1213,6 +1210,152 @@ Không nhắc đến tool/function nội bộ.`
   return answer;
 }
 
+async function buildComprehension(
+  toolContext: string,
+  env: Env,
+  debugSteps?: DebugStep[]
+): Promise<string> {
+  addDebugStep(debugSteps, "pipeline.comprehension", "start", "Buoc 1: doc graph data va hieu cau truc app.", {});
+
+  const response = await runChatModel(CHAT_MODEL, {
+    max_tokens: 600,
+    temperature: 0,
+    messages: [
+      {
+        role: "system",
+        content: `Bạn là bộ phân tích cấu trúc App Builder.
+Nhiệm vụ: đọc graph/tool data bên dưới và tóm tắt thành prose ngắn gọn.
+
+Trả lời theo cấu trúc sau, viết prose thuần, không JSON, không markdown:
+
+APP & MỤC ĐÍCH: App tên gì, có bao nhiêu app, mỗi app dùng để làm gì. Nếu phải suy từ tên app/window/table thì nói rõ là suy từ tên.
+
+LUỒNG ĐÃ XÁC MINH: Chỉ nêu các luồng có trong flow_summary và verified_relations, ví dụ app -> window -> tab -> table, menu -> window, role -> app/menu/table.
+
+THÀNH PHẦN CHÍNH: Các window, table, menu quan trọng nhất và mối quan hệ giữa chúng.
+
+ĐIỂM CHƯA RÕ: Những phần graph chưa có đủ cạnh để kết luận, để bước sau không bịa.
+
+Chỉ dùng thông tin có trong graph/tool data. Không bịa thêm. Không giải thích định nghĩa chung.`
+      },
+      {
+        role: "user",
+        content: toolContext
+      }
+    ]
+  }, env);
+
+  const comprehension = response.response?.trim() ?? "";
+  addDebugStep(debugSteps, "pipeline.comprehension", "ok", "Buoc 1 hoan tat.", {
+    chars: comprehension.length
+  });
+
+  return comprehension;
+}
+
+async function buildReasoning(
+  comprehension: string,
+  userMessage: string,
+  env: Env,
+  debugSteps?: DebugStep[]
+): Promise<string> {
+  addDebugStep(debugSteps, "pipeline.reasoning", "start", "Buoc 2: xac dinh can tra loi gi.", {});
+
+  const response = await runChatModel(CHAT_MODEL, {
+    max_tokens: 400,
+    temperature: 0,
+    messages: [
+      {
+        role: "system",
+        content: `Bạn là bộ lập kế hoạch trả lời cho trợ lý App Builder.
+Bạn nhận được: (1) hiểu biết về app đã tóm tắt từ graph/tool data, (2) câu hỏi của user.
+
+Nhiệm vụ: quyết định câu trả lời nên bao gồm gì. Chưa viết câu trả lời cuối.
+
+Trả lời ngắn gọn theo cấu trúc:
+
+LOẠI CÂU HỎI: flow/liên kết | đối tượng cụ thể | tổng quan | liệt kê | tạo/sửa/xóa | khác.
+
+PHẦN CẦN TRẢ LỜI: Những thông tin nào từ comprehension trực tiếp trả lời câu hỏi.
+
+ĐÃ XÁC MINH: Phần nào có bằng chứng rõ trong graph/tool data.
+
+CẦN GHI CHÚ: Phần nào là suy luận, phần nào graph chưa đủ để kết luận.
+
+CẤU TRÚC TRẢ LỜI: Nên bắt đầu bằng gì, diễn giải flow như thế nào, có nên liệt kê hay không.`
+      },
+      {
+        role: "user",
+        content: `Hiểu biết về app:\n${comprehension}\n\nCâu hỏi của user: ${userMessage}`
+      }
+    ]
+  }, env);
+
+  const reasoning = response.response?.trim() ?? "";
+  addDebugStep(debugSteps, "pipeline.reasoning", "ok", "Buoc 2 hoan tat.", {
+    chars: reasoning.length
+  });
+
+  return reasoning;
+}
+
+async function buildFinalAnswerFromReasoning(
+  reasoning: string,
+  comprehension: string,
+  userMessage: string,
+  chatHistory: AIMessage[],
+  env: Env,
+  debugSteps?: DebugStep[]
+): Promise<string> {
+  addDebugStep(debugSteps, "pipeline.final_answer", "start", "Buoc 3: viet cau tra loi tu reasoning plan.", {});
+
+  const response = await runChatModel(CHAT_MODEL, {
+    max_tokens: RAG_FINAL_MAX_TOKENS,
+    temperature: 0.2,
+    messages: [
+      {
+        role: "system",
+        content: `Bạn là trợ lý phân tích App Builder của Zilcode.
+Trả lời bằng ngôn ngữ của user. Nếu user viết tiếng Việt, toàn bộ câu trả lời phải là tiếng Việt.
+Không dùng heading hay cụm từ tiếng Anh nếu user viết tiếng Việt.
+Không nhắc đến tool/function nội bộ.
+
+Quy tắc Zilcode:
+- Quyền có 3 lớp độc lập: roleapp (vào app), rolemenu (vào menu), access (cờ trên table). Không gộp chung.
+- n_cache = layout cache UI, không phải cache dữ liệu nghiệp vụ.
+- Tên đúng: window / tab / field / menu. Không dùng AD_Window / AD_Tab / AD_Field.
+- App Builder metadata khác runtime: SQLCloud/procedure/view là physical database, không apply được bằng App Builder metadata tool nếu không có write contract riêng.
+
+Cách viết:
+- Bắt đầu từ dữ liệu đã thấy trong graph/tool data, rồi mới diễn giải bằng kiến thức chung.
+- Được dùng kiến thức chung về no-code/app-builder/ERP/CRUD/workflow để giải thích dễ hiểu, nhưng không dùng để bịa dữ liệu graph chưa xác minh.
+- Phân biệt rõ phần đã xác minh với phần suy luận/khuyến nghị khi câu trả lời có cả hai.
+- Không kể lại JSON, không mở bằng danh sách dài nếu user không hỏi liệt kê.`
+      },
+      {
+        role: "assistant",
+        content: `Tôi đã đọc graph/tool data và hiểu như sau:\n${comprehension}`
+      },
+      {
+        role: "assistant",
+        content: `Kế hoạch trả lời:\n${reasoning}`
+      },
+      ...chatHistory,
+      {
+        role: "user",
+        content: userMessage
+      }
+    ]
+  }, env);
+
+  const answer = cleanMarkdownArtifacts(response.response?.trim() ?? "");
+  addDebugStep(debugSteps, "pipeline.final_answer", "ok", "Buoc 3 hoan tat.", {
+    chars: answer.length
+  });
+
+  return answer;
+}
+
 async function createFinalAnswerFromToolResults(
   userMessage: string,
   toolResults: ToolResultRecord[],
@@ -1222,7 +1365,7 @@ async function createFinalAnswerFromToolResults(
 ): Promise<string> {
   const deterministicAnswer = createDeterministicChangeAnswer(toolResults);
   if (deterministicAnswer) {
-    addDebugStep(debugSteps, "tools.final_answer", "ok", "Đã tạo câu trả lời deterministic cho App Builder change.", {
+    addDebugStep(debugSteps, "tools.final_answer", "ok", "Dung deterministic answer cho write operation.", {
       answer_chars: deterministicAnswer.length
     });
     return deterministicAnswer;
@@ -1230,102 +1373,36 @@ async function createFinalAnswerFromToolResults(
 
   const toolContext = truncateToolContext(formatToolResultsForFinalAnswer(toolResults));
 
-  addDebugStep(debugSteps, "tools.final_answer", "start", "Tạo câu trả lời cuối từ kết quả tool.", {
+  addDebugStep(debugSteps, "tools.final_answer", "start", "Bat dau 3-step final answer pipeline.", {
     model: CHAT_MODEL,
     tool_results: toolResults.map(result => result.name),
     context_chars: toolContext.length
   });
 
-  const response = await runChatModel(CHAT_MODEL, {
-    max_tokens: RAG_FINAL_MAX_TOKENS,
-    temperature: 0.2,
-    messages: [
-      {
-        role: "system",
-        content: `Bạn là trợ lý phân tích App Builder của Zilcode.
-Trả lời bằng ngôn ngữ của user. Không dùng heading hay cụm từ tiếng Anh nếu user viết tiếng Việt.
- 
-## Bước 1 — Hiểu app từ graph
- 
-Trước khi trả lời, đọc Context và xây dựng hiểu biết về app:
-- answer_facts.flow_summary: các luồng đã xác minh trong graph (data, UI, điều hướng, quyền)
-- answer_facts.verified_relations: các cạnh quan hệ đã thấy thực sự — đây là bằng chứng cứng
-- answer_facts.inferred_notes: suy luận từ graph — chưa phải sự thật xác minh
-- Nếu mode là "search": top match là đối tượng user đang hỏi, đọc nó trước
-- Nếu mode là "detail": node + neighbors là toàn bộ context liên quan
-- Nếu mode là "subgraph": đọc flow_summary để hiểu vùng graph đã mở
- 
-## Bước 2 — Khớp với câu hỏi
- 
-Xác định câu hỏi thuộc loại nào rồi chọn cách trả lời:
- 
-Hỏi về cách hoạt động / flow / liên kết:
-→ Diễn giải theo chuỗi thực tế: app → menu → window → tab → table → field → column
-→ Dùng tên thật từ graph, không dùng tên giả định
- 
-Hỏi về một đối tượng cụ thể (app/window/table/field...):
-→ Tập trung vào node đó và quan hệ trực tiếp của nó
-→ Nếu search có top match rõ, coi đó là đối tượng user muốn hỏi
- 
-Hỏi tổng quan / "có những gì":
-→ Tóm tắt theo nhóm: số app, số window/table mỗi app, điểm đáng chú ý
-→ Không liệt kê raw node/edge
- 
-Hỏi "liệt kê" / "danh sách" / "có bao nhiêu":
-→ Liệt kê từ tables_summary / windows_summary / menus_summary
-→ Nếu nhiều, nhóm phần còn lại thành số lượng và gợi ý hỏi sâu hơn
- 
-## Bước 3 — Trả lời
- 
-Quy tắc bắt buộc:
- 
-TÁCH RÕ hai nguồn — không được trộn lẫn:
-- "Đã thấy trong graph": chỉ những gì có trong flow_summary / verified_relations / node data
-- "Suy luận / khuyến nghị": những gì đến từ inferred_notes hoặc kiến thức chung của bạn
- 
-KHÔNG mở đầu bằng danh sách dài hay bảng. Bắt đầu từ điều quan trọng nhất với câu hỏi đang hỏi.
- 
-KHÔNG kể lại JSON. KHÔNG nhắc đến tên tool/function nội bộ.
- 
-Dùng kiến thức chung về no-code/ERP/CRUD/workflow như lớp diễn giải thêm nghĩa,
-không dùng để thay thế hay bổ sung dữ liệu graph khi graph chưa xác minh.
- 
-## Quy tắc đặc thù của Zilcode
- 
-Quyền có 3 lớp độc lập — không được gộp:
-- roleapp: quyền vào app
-- rolemenu: quyền vào menu  
-- access: cờ hạn chế trên table
- 
-n_cache là layout cache của UI, không phải cache dữ liệu nghiệp vụ.
-Chỉ nhắc đến n_cache khi user hỏi về refresh/delete cache sau khi thay đổi metadata UI.
- 
-Tên metadata đúng: window / tab / field / menu (hoặc n_window / n_tab / n_field / n_menu).
-Không tự đổi sang AD_Window / AD_Tab / AD_Field.
- 
-App Builder metadata ≠ runtime ngoài App Builder.
-SQLCloud / procedure / view là physical database runtime — không thể apply bằng App Builder tool.`
-      },
-      ...chatHistory,
-      { role: "user", content: userMessage },
-      {
-        role: "assistant",
-        content: `Context:\n${toolContext}`
-      }
-    ]
-  }, env);
-
-  const cleanedAnswer = cleanMarkdownArtifacts(response.response?.trim() ?? "");
-  const fallbackAnswer = isUnusableModelAnswer(cleanedAnswer)
-    ? createGraphFactsFallbackAnswer(userMessage, toolResults)
-    : null;
-  const answer = fallbackAnswer ?? (cleanedAnswer || "Không tạo được câu trả lời.");
-  if (fallbackAnswer) {
-    addDebugStep(debugSteps, "tools.final_answer_fallback", "ok", "Model final-answer trả rỗng/lỗi chung; dùng answer_facts để tạo fallback.", {
-      answer_chars: fallbackAnswer.length
-    });
+  const comprehension = await buildComprehension(toolContext, env, debugSteps);
+  if (!comprehension) {
+    addDebugStep(debugSteps, "pipeline.comprehension", "error", "Comprehension rong, fallback ve answer_facts.", {});
+    const fallback = createGraphFactsFallbackAnswer(userMessage, toolResults);
+    return fallback ?? "Không tạo được câu trả lời.";
   }
-  addDebugStep(debugSteps, "tools.final_answer", "ok", "Đã tạo câu trả lời cuối từ kết quả tool.", {
+
+  const reasoning = await buildReasoning(comprehension, userMessage, env, debugSteps);
+  const answer = await buildFinalAnswerFromReasoning(
+    reasoning,
+    comprehension,
+    userMessage,
+    chatHistory,
+    env,
+    debugSteps
+  );
+
+  if (isUnusableModelAnswer(answer)) {
+    addDebugStep(debugSteps, "pipeline.fallback", "ok", "Final answer khong dung duoc, dung answer_facts fallback.", {});
+    const fallback = createGraphFactsFallbackAnswer(userMessage, toolResults);
+    return fallback ?? "Không tạo được câu trả lời.";
+  }
+
+  addDebugStep(debugSteps, "tools.final_answer", "ok", "Pipeline 3 buoc hoan tat.", {
     answer_chars: answer.length
   });
 
