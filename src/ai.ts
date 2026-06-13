@@ -31,6 +31,10 @@ interface ChatModelResponse {
     arguments: Record<string, unknown>;
     id?: string;
   }>;
+  model?: string;
+  fallback?: boolean;
+  fallback_reason?: string;
+  primary_model?: string;
 }
 
 function getStringArg(args: Record<string, unknown>, name: string): string {
@@ -57,6 +61,10 @@ function isCloudflareNeuronQuotaResult(result: unknown): boolean {
 function isCloudflareInternalModelError(error: unknown): boolean {
   const text = getErrorText(error).toLowerCase();
   return text.includes("3043") || text.includes("internal server error");
+}
+
+function hasUsableChatModelResponse(response: ChatModelResponse): boolean {
+  return Boolean(response.tool_calls?.length) || Boolean((response.response ?? "").trim());
 }
 
 function getRuntimeToolDescription(name: string, description: string): string {
@@ -248,7 +256,10 @@ async function callCloudflareChatModel(
     throw new Error(getErrorText(result));
   }
 
-  return normalizeCloudflareChatResponse(result);
+  return {
+    ...normalizeCloudflareChatResponse(result),
+    model: cfModel
+  };
 }
 
 export async function runChatModel(
@@ -257,11 +268,29 @@ export async function runChatModel(
   env: Env
 ): Promise<ChatModelResponse> {
   try {
-    return await callCloudflareChatModel(cfModel, request, env);
+    const primary = await callCloudflareChatModel(cfModel, request, env);
+    if (!hasUsableChatModelResponse(primary) && cfModel !== INTERNAL_CHAT_FALLBACK_MODEL) {
+      console.log(`[CHAT_MODEL] ${cfModel} trả response rỗng, fallback sang ${INTERNAL_CHAT_FALLBACK_MODEL}`);
+      const fallback = await callCloudflareChatModel(INTERNAL_CHAT_FALLBACK_MODEL, request, env);
+      return {
+        ...fallback,
+        fallback: true,
+        fallback_reason: "empty_response",
+        primary_model: cfModel
+      };
+    }
+
+    return primary;
   } catch (error) {
     if (isCloudflareInternalModelError(error) && cfModel !== INTERNAL_CHAT_FALLBACK_MODEL) {
       console.log(`[CHAT_MODEL] ${cfModel} lỗi nội bộ, fallback sang ${INTERNAL_CHAT_FALLBACK_MODEL}`);
-      return callCloudflareChatModel(INTERNAL_CHAT_FALLBACK_MODEL, request, env);
+      const fallback = await callCloudflareChatModel(INTERNAL_CHAT_FALLBACK_MODEL, request, env);
+      return {
+        ...fallback,
+        fallback: true,
+        fallback_reason: "internal_model_error",
+        primary_model: cfModel
+      };
     }
 
     throw error;
