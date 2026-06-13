@@ -14,6 +14,24 @@ import {
 import { handleZilcodeLogin, handleZilcodeLogout, handleZilcodeMe, handleZilcodeSelectRoleOrg, loadZilcodeSession } from "./zilcode";
 import type { ChatRequest } from "./types";
 
+function routeErrorResponse(error: unknown, fallbackMessage: string): Response {
+  return Response.json(
+    {
+      success: false,
+      error: error instanceof Error ? error.message : fallbackMessage
+    },
+    { status: 500, headers: CORS }
+  );
+}
+
+async function handleRoute(handler: () => Promise<Response>, fallbackMessage: string): Promise<Response> {
+  try {
+    return await handler();
+  } catch (error) {
+    return routeErrorResponse(error, fallbackMessage);
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
 
@@ -66,25 +84,40 @@ export default {
 
     // ── Server-side conversations for embedded Zilcode integration ───────────
     if (url.pathname === "/conversations" && request.method === "POST") {
-      return handleCreateConversation(request, env);
+      return handleRoute(
+        () => handleCreateConversation(request, env),
+        "Lỗi tạo đoạn chat."
+      );
     }
 
     if (url.pathname === "/conversations" && request.method === "GET") {
-      return handleListConversations(request, env);
+      return handleRoute(
+        () => handleListConversations(request, env),
+        "Lỗi tải danh sách đoạn chat."
+      );
     }
 
     const conversationMessageMatch = url.pathname.match(/^\/conversations\/([^/]+)\/messages$/);
     if (conversationMessageMatch && request.method === "POST") {
-      return handleConversationMessage(request, env, decodeURIComponent(conversationMessageMatch[1]));
+      return handleRoute(
+        () => handleConversationMessage(request, env, decodeURIComponent(conversationMessageMatch[1])),
+        "Lỗi gửi tin nhắn."
+      );
     }
 
     const conversationMatch = url.pathname.match(/^\/conversations\/([^/]+)$/);
     if (conversationMatch && request.method === "GET") {
-      return handleGetConversation(request, env, decodeURIComponent(conversationMatch[1]));
+      return handleRoute(
+        () => handleGetConversation(request, env, decodeURIComponent(conversationMatch[1])),
+        "Lỗi tải đoạn chat."
+      );
     }
 
     if (conversationMatch && request.method === "DELETE") {
-      return handleDeleteConversation(request, env, decodeURIComponent(conversationMatch[1]));
+      return handleRoute(
+        () => handleDeleteConversation(request, env, decodeURIComponent(conversationMatch[1])),
+        "Lỗi xóa đoạn chat."
+      );
     }
 
     // ── Legacy POST /chat — kept for old standalone clients ──────────────────

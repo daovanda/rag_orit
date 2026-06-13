@@ -1242,9 +1242,14 @@ async function buildComprehension(
   env: Env,
   debugSteps?: DebugStep[]
 ): Promise<string> {
-  addDebugStep(debugSteps, "pipeline.comprehension", "start", "Buoc 1: doc graph data va hieu cau truc app.", {});
+  const rawFactsContext = extractAnswerFactsContext(toolResults);
+  const factsContext = truncateToolContext(rawFactsContext || toolContext);
 
-  const factsContext = extractAnswerFactsContext(toolResults) || toolContext;
+  addDebugStep(debugSteps, "pipeline.comprehension", "start", "Buoc 1: doc graph data va hieu cau truc app.", {
+    tool_context_chars: toolContext.length,
+    raw_facts_context_chars: rawFactsContext.length,
+    facts_context_chars: factsContext.length
+  });
 
   const response = await runChatModel(CHAT_MODEL, {
     max_tokens: 600,

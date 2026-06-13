@@ -1024,6 +1024,26 @@
     return headers;
   }
 
+  async function readApiJson(res) {
+    const text = await res.text();
+    let data = {};
+
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        const detail = text.slice(0, 300);
+        throw new Error(`HTTP ${res.status}: Worker không trả JSON. ${detail}`);
+      }
+    }
+
+    if (!res.ok && data.success !== false) {
+      throw new Error(data.error || `HTTP ${res.status}: API trả lỗi.`);
+    }
+
+    return data;
+  }
+
   function hasZilcodeContext() {
     return Boolean(
       document.getElementById('zilToken').value.trim()
@@ -1279,7 +1299,7 @@
           zilcode_base: document.getElementById('zilBase').value.trim()
         })
       });
-      const data = await res.json();
+      const data = await readApiJson(res);
       if (!data.success) throw new Error(data.error || 'Đăng nhập thất bại');
 
       devZilcodeSessionId = data.session_id || '';
@@ -1323,7 +1343,7 @@
         },
         body: JSON.stringify({ roleid, orgid })
       });
-      const data = await res.json();
+      const data = await readApiJson(res);
       if (!data.success) throw new Error(data.error || 'Không chọn được role/org');
 
       applyAuthPayloadToConversationContext(data);
@@ -1525,7 +1545,7 @@
         ...(options.headers || {})
       }
     });
-    const data = await res.json();
+    const data = await readApiJson(res);
     if (!data.success) throw new Error(data.error || 'API trả lỗi.');
     return data;
   }
@@ -1679,7 +1699,7 @@
     dot.className = 'dot';
     try {
       const res = await fetch(getUrl() + '/');
-      const data = await res.json();
+      const data = await readApiJson(res);
       dot.className = data.success ? 'dot online' : 'dot';
     } catch {
       dot.className = 'dot';
@@ -1918,7 +1938,7 @@
 
       removeTyping();
 
-      const data = await res.json();
+      const data = await readApiJson(res);
 
       if (data.success) {
         appendMessage(

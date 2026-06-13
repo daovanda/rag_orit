@@ -103,11 +103,80 @@ function parseToolArguments(rawArguments: unknown): Record<string, unknown> {
   return {};
 }
 
+function asObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function extractTextContent(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+
+  if (Array.isArray(value)) {
+    const text = value
+      .map(part => {
+        if (typeof part === "string") return part;
+        const record = asObject(part);
+        if (!record) return "";
+        return extractTextContent(record.text)
+          ?? extractTextContent(record.content)
+          ?? extractTextContent(record.output_text)
+          ?? "";
+      })
+      .filter(Boolean)
+      .join("");
+    return text || undefined;
+  }
+
+  const record = asObject(value);
+  if (!record) return undefined;
+
+  return extractTextContent(record.text)
+    ?? extractTextContent(record.content)
+    ?? extractTextContent(record.output_text)
+    ?? extractTextContent(record.response);
+}
+
+function extractOutputText(value: unknown): string | undefined {
+  const record = asObject(value);
+  if (!record) return undefined;
+
+  const direct = extractTextContent(record.response)
+    ?? extractTextContent(record.output_text)
+    ?? extractTextContent(record.text);
+  if (direct !== undefined) return direct;
+
+  const output = record.output;
+  if (Array.isArray(output)) {
+    const text = output
+      .map(item => {
+        const itemRecord = asObject(item);
+        if (!itemRecord) return extractTextContent(item) ?? "";
+        return extractTextContent(itemRecord.content)
+          ?? extractTextContent(itemRecord.text)
+          ?? "";
+      })
+      .filter(Boolean)
+      .join("");
+    if (text) return text;
+  }
+
+  return undefined;
+}
+
 function normalizeCloudflareChatResponse(data: unknown): ChatModelResponse {
+  const wrapped = asObject(data);
+  const nestedResult = asObject(wrapped?.result);
+  if (nestedResult) {
+    const nested = normalizeCloudflareChatResponse(nestedResult);
+    if (nested.response !== undefined || nested.tool_calls?.length) return nested;
+  }
+
   const payload = data as {
     choices?: Array<{
+      text?: string | null;
       message?: {
-        content?: string | null;
+        content?: unknown;
         tool_calls?: Array<{
           id?: string;
           function?: {
@@ -130,13 +199,37 @@ function normalizeCloudflareChatResponse(data: unknown): ChatModelResponse {
       .filter(toolCall => toolCall.name);
 
     return {
-      response: message.content ?? undefined,
+      response: extractTextContent(message.content) ?? undefined,
       tool_calls: toolCalls?.length ? toolCalls : undefined
     };
   }
 
-  const direct = data as { response?: string };
-  if (direct.response) return { response: direct.response };
+  const choiceText = payload.choices?.[0]?.text;
+  if (typeof choiceText === "string") return { response: choiceText };
+
+  const directToolCalls = Array.isArray(wrapped?.tool_calls)
+    ? wrapped.tool_calls
+      .map(toolCall => {
+        const record = asObject(toolCall);
+        const fn = asObject(record?.function);
+        const directName = typeof record?.name === "string" ? record.name : "";
+        const functionName = typeof fn?.name === "string" ? fn.name : "";
+        return {
+          id: typeof record?.id === "string" ? record.id : undefined,
+          name: functionName || directName,
+          arguments: parseToolArguments(fn?.arguments ?? record?.arguments)
+        };
+      })
+      .filter(toolCall => toolCall.name)
+    : undefined;
+
+  const directText = extractOutputText(data);
+  if (directText !== undefined || directToolCalls?.length) {
+    return {
+      response: directText,
+      tool_calls: directToolCalls?.length ? directToolCalls : undefined
+    };
+  }
 
   return {};
 }
