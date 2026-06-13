@@ -43,6 +43,7 @@ const AVAILABLE_TOOL_NAMES = new Set<string>(TOOLS.map(tool => tool.name));
 const GRAPH_CONTINUE_TOOLS = new Set([
   "app_builder_graph_search"
 ]);
+const COMPREHENSION_CONTEXT_MAX_CHARS = 4000;
 const FINAL_ANSWER_ARRAY_LIMIT = 16;
 const FINAL_ANSWER_OBJECT_KEY_LIMIT = 28;
 const FINAL_ANSWER_RECURSION_LIMIT = 3;
@@ -1210,7 +1211,7 @@ Không nhắc đến tool/function nội bộ.`
   return answer;
 }
 
-function extractAnswerFactsContext(toolResults: ToolResultRecord[]): string {
+function buildComprehensionContext(toolResults: ToolResultRecord[]): string {
   const graphResult = [...toolResults]
     .reverse()
     .find(result => isAppBuilderGraphTool(result.name));
@@ -1219,9 +1220,42 @@ function extractAnswerFactsContext(toolResults: ToolResultRecord[]): string {
 
   try {
     const data = JSON.parse(graphResult.content) as Record<string, unknown>;
-    if (!data.answer_facts) return "";
+    const facts = asRecord(data.answer_facts);
+    if (!facts) return "";
 
-    return compactToolContentForFinalAnswer(graphResult);
+    const graph = asRecord(data.graph);
+    const nodes = recordArray(graph?.nodes);
+    const mini = {
+      mode: data.mode,
+      flow_summary: toArrayValues(facts.flow_summary)
+        .map(String)
+        .filter(Boolean)
+        .slice(0, 6),
+      verified_relations: recordArray(facts.verified_relations)
+        .slice(0, 10)
+        .map(relation => ({
+          from: relation.from,
+          type: relation.type,
+          to: relation.to
+        })),
+      inferred_notes: toArrayValues(facts.inferred_notes)
+        .map(String)
+        .filter(Boolean)
+        .slice(0, 4),
+      scope: facts.scope,
+      app_names: nodes
+        .filter(node => node.type === "app")
+        .slice(0, 8)
+        .map(node => ({
+          id: node.id,
+          label: node.label,
+          summary: node.summary
+        }))
+    };
+
+    const raw = JSON.stringify(mini, null, 2);
+    if (raw.length <= COMPREHENSION_CONTEXT_MAX_CHARS) return raw;
+    return `${raw.slice(0, COMPREHENSION_CONTEXT_MAX_CHARS).trim()}\n[truncated]`;
   } catch {
     return "";
   }
@@ -1233,13 +1267,16 @@ async function buildComprehension(
   env: Env,
   debugSteps?: DebugStep[]
 ): Promise<string> {
-  const rawFactsContext = extractAnswerFactsContext(toolResults);
-  const factsContext = truncateToolContext(rawFactsContext || toolContext);
+  const comprehensionContext = buildComprehensionContext(toolResults);
+  const hasGraphData = comprehensionContext.length > 0;
+  const inputContext = hasGraphData
+    ? comprehensionContext
+    : toolContext.slice(0, COMPREHENSION_CONTEXT_MAX_CHARS);
 
   addDebugStep(debugSteps, "pipeline.comprehension", "start", "Buoc 1: doc graph data va hieu cau truc app.", {
     tool_context_chars: toolContext.length,
-    raw_facts_context_chars: rawFactsContext.length,
-    facts_context_chars: factsContext.length
+    comprehension_context_chars: inputContext.length,
+    source: hasGraphData ? "graph_facts_mini" : "tool_context_fallback"
   });
 
   const response = await runChatModel(CHAT_MODEL, {
@@ -1265,7 +1302,7 @@ Chỉ dùng thông tin có trong graph/tool data. Không bịa thêm. Không gi�
       },
       {
         role: "user",
-        content: `Dữ liệu graph App Builder:\n\n${factsContext}\n\nHãy phân tích và tóm tắt cấu trúc app theo format yêu cầu.`
+        content: `Dữ liệu graph App Builder:\n\n${inputContext}\n\nHãy phân tích và tóm tắt cấu trúc app theo format yêu cầu.`
       }
     ]
   }, env);
