@@ -213,7 +213,7 @@ function compactToolContentForFinalAnswer(result: ToolResultRecord): string {
         } : undefined,
         apps: nodes?.filter(node => node.type === "app"),
         root: nodes?.find(node => node.type === "root"),
-        answer_facts: data.answer_facts,
+        answer_facts: compactAnswerFactsForFinalAnswer(data.answer_facts),
         errors: data.errors,
         truncated: data.truncated
       }, null, 2);
@@ -1219,18 +1219,9 @@ function extractAnswerFactsContext(toolResults: ToolResultRecord[]): string {
 
   try {
     const data = JSON.parse(graphResult.content) as Record<string, unknown>;
-    const facts = data.answer_facts;
-    if (!facts) return "";
+    if (!data.answer_facts) return "";
 
-    const compacted = {
-      mode: data.mode,
-      apps: data.apps,
-      matches: data.matches,
-      node: data.node,
-      answer_facts: facts
-    };
-
-    return JSON.stringify(compacted, null, 2);
+    return compactToolContentForFinalAnswer(graphResult);
   } catch {
     return "";
   }
