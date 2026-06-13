@@ -8,11 +8,9 @@ export interface Env {
   SESSION_TTL_SECONDS?: string;
 }
 
-export const LLAMA_CHAT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 export const CHAT_MODEL = "@cf/openai/gpt-oss-120b";
 export const GENERAL_CHAT_MODEL = CHAT_MODEL;
 export const QUERY_REWRITE_MODEL = CHAT_MODEL;
-export const INTERNAL_CHAT_FALLBACK_MODEL = LLAMA_CHAT_MODEL;
 export const EMBEDDING_MODEL = "@cf/baai/bge-m3";
 
 export const TOOL_SELECTION_MAX_TOKENS = 2048;

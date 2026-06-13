@@ -1310,10 +1310,7 @@ Chỉ dùng thông tin có trong graph/tool data. Không bịa thêm. Không gi�
   const comprehension = response.response?.trim() ?? "";
   addDebugStep(debugSteps, "pipeline.comprehension", "ok", "Buoc 1 hoan tat.", {
     chars: comprehension.length,
-    model: response.model,
-    fallback: response.fallback,
-    fallback_reason: response.fallback_reason,
-    primary_model: response.primary_model
+    model: response.model
   });
 
   return comprehension;

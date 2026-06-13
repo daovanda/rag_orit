@@ -1,7 +1,6 @@
 import {
   CHAT_MODEL,
   EMBEDDING_MODEL,
-  INTERNAL_CHAT_FALLBACK_MODEL,
   MAX_HISTORY_CONTENT_CHARS,
   MAX_HISTORY_MESSAGES,
   QUERY_REWRITE_MODEL,
@@ -32,9 +31,6 @@ interface ChatModelResponse {
     id?: string;
   }>;
   model?: string;
-  fallback?: boolean;
-  fallback_reason?: string;
-  primary_model?: string;
 }
 
 function getStringArg(args: Record<string, unknown>, name: string): string {
@@ -58,15 +54,6 @@ function isCloudflareNeuronQuotaResult(result: unknown): boolean {
     && (text.includes("daily free allocation") || text.includes("neurons"));
 }
 
-function isCloudflareInternalModelError(error: unknown): boolean {
-  const text = getErrorText(error).toLowerCase();
-  return text.includes("3043") || text.includes("internal server error");
-}
-
-function hasUsableChatModelResponse(response: ChatModelResponse): boolean {
-  return Boolean(response.tool_calls?.length) || Boolean((response.response ?? "").trim());
-}
-
 function getRuntimeToolDescription(name: string, description: string): string {
   if (name !== "rag_search") return description;
 
@@ -75,7 +62,28 @@ function getRuntimeToolDescription(name: string, description: string): string {
 Bổ sung sau ingest: rag_search cũng có thể tra cứu doc/logic/*.md. Dùng nó khi cần hiểu cách Zilcode hoạt động, domain model, REST API contract, runtime architecture, window/tab/field config, tool safety rules, hoặc khi cần lấy kiến thức logic để chọn/gọi các tool Zilcode đúng hơn và kết hợp với dữ liệu thật.`;
 }
 
-function buildCloudflareChatRequest(request: ChatModelRequest): Record<string, unknown> {
+function isOpenAiGptOssModel(cfModel: string): boolean {
+  return cfModel.startsWith("@cf/openai/gpt-oss-");
+}
+
+function canUseResponsesApi(cfModel: string, request: ChatModelRequest): boolean {
+  return isOpenAiGptOssModel(cfModel)
+    && !request.tools?.length
+    && !request.messages.some(message => message.role === "tool");
+}
+
+function buildCloudflareResponsesRequest(request: ChatModelRequest): Record<string, unknown> {
+  return {
+    input: request.messages.map(message => ({
+      role: message.role,
+      content: message.content ?? ""
+    })),
+    max_output_tokens: request.max_tokens,
+    temperature: request.temperature
+  };
+}
+
+function buildCloudflareChatCompletionsRequest(request: ChatModelRequest): Record<string, unknown> {
   return {
     messages: request.messages.map(message => ({
       role: message.role,
@@ -93,6 +101,14 @@ function buildCloudflareChatRequest(request: ChatModelRequest): Record<string, u
     max_tokens: request.max_tokens,
     temperature: request.temperature
   };
+}
+
+function buildCloudflareChatRequest(cfModel: string, request: ChatModelRequest): Record<string, unknown> {
+  if (canUseResponsesApi(cfModel, request)) {
+    return buildCloudflareResponsesRequest(request);
+  }
+
+  return buildCloudflareChatCompletionsRequest(request);
 }
 
 function parseToolArguments(rawArguments: unknown): Record<string, unknown> {
@@ -249,7 +265,7 @@ async function callCloudflareChatModel(
 ): Promise<ChatModelResponse> {
   const result = await env.AI.run(
     cfModel as string & {},
-    buildCloudflareChatRequest(request)
+    buildCloudflareChatRequest(cfModel, request)
   ) as unknown;
 
   if (isCloudflareNeuronQuotaResult(result)) {
@@ -267,36 +283,8 @@ export async function runChatModel(
   request: ChatModelRequest,
   env: Env
 ): Promise<ChatModelResponse> {
-  try {
-    const primary = await callCloudflareChatModel(cfModel, request, env);
-    if (!hasUsableChatModelResponse(primary) && cfModel !== INTERNAL_CHAT_FALLBACK_MODEL) {
-      console.log(`[CHAT_MODEL] ${cfModel} trả response rỗng, fallback sang ${INTERNAL_CHAT_FALLBACK_MODEL}`);
-      const fallback = await callCloudflareChatModel(INTERNAL_CHAT_FALLBACK_MODEL, request, env);
-      return {
-        ...fallback,
-        fallback: true,
-        fallback_reason: "empty_response",
-        primary_model: cfModel
-      };
-    }
-
-    return primary;
-  } catch (error) {
-    if (isCloudflareInternalModelError(error) && cfModel !== INTERNAL_CHAT_FALLBACK_MODEL) {
-      console.log(`[CHAT_MODEL] ${cfModel} lỗi nội bộ, fallback sang ${INTERNAL_CHAT_FALLBACK_MODEL}`);
-      const fallback = await callCloudflareChatModel(INTERNAL_CHAT_FALLBACK_MODEL, request, env);
-      return {
-        ...fallback,
-        fallback: true,
-        fallback_reason: "internal_model_error",
-        primary_model: cfModel
-      };
-    }
-
-    throw error;
-  }
+  return callCloudflareChatModel(cfModel, request, env);
 }
-
 export async function embedQuery(
   text: string,
   env: Env
