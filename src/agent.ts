@@ -1807,7 +1807,7 @@ Nếu người dùng viết tiếng Việt, bắt buộc trả lời tiếng Vi�
 
 Tools:
 - general_chat: dùng cho hội thoại thông thường, không cần RAG/Zilcode.
-- rag_search: dùng khi cần docs/guide/API contract/playbook.
+- rag_search: dùng khi cần docs/guide/API contract/playbook và khi người dùng hỏi kiến thức chung về zilcode và khi không cần tương tác với hệ thống.
 - app_builder_graph_overview: dùng đầu tiên khi cần đọc App Builder hiện tại. Tool này trả skeleton graph.
 - app_builder_graph_search: tìm node app/table/window/tab/field/menu/domain theo tên/id.
 - app_builder_graph_subgraph: mở vùng graph liên quan quanh node.

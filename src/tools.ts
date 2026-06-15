@@ -17,7 +17,7 @@ export const TOOLS = [
   {
     name: "rag_search",
     description:
-      "Tìm trong Vector DB/KV docs các tài liệu Zilcode, App Builder guide, API contract, domain model và playbook tạo/sửa app. Dùng khi cần quy tắc hoặc thông tin tài liệu ngoài graph hiện tại.",
+      "Tìm trong Vector DB/KV docs các tài liệu Zilcode, App Builder guide, API contract, domain model và playbook tạo/sửa app. Dùng khi cần quy tắc hoặc thông tin tài liệu ngoài graph hiện tại và dùng khi user hỏi cách làm, hướng dẫn, quy tắc, API contract, logic Zilcode, hoặc cần kiến thức nền về zilcode.",
     parameters: {
       type: "object",
       properties: {
@@ -58,7 +58,7 @@ export const TOOLS = [
   {
     name: "app_builder_graph_search",
     description:
-      "Tìm node trong App Builder graph theo tên, id hoặc summary. Dùng để resolve appid/serviceid/tableid/windowid/tabid/fieldid/menuid/domainid/cacheid/role/access trước khi mở subgraph hoặc detail. Nếu user đã đưa node_id chính xác, có thể dùng subgraph/detail trực tiếp.",
+      "Tìm node trong App Builder graph theo tên, id hoặc summary. Dùng để resolve appid/serviceid/tableid/windowid/tabid/fieldid/menuid/domainid/cacheid/role/access trước khi mở subgraph hoặc detail. Nếu user đã đưa node_id hoặc đã biết node_id chính xác, có thể dùng subgraph/detail trực tiếp.",
     parameters: {
       type: "object",
       properties: {

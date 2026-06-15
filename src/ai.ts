@@ -161,6 +161,50 @@ function extractTextContent(value: unknown): string | undefined {
     ?? extractTextContent(record.response);
 }
 
+function getRecordType(value: Record<string, unknown>): string {
+  return typeof value.type === "string" ? value.type.toLowerCase() : "";
+}
+
+function extractResponsesMessageText(output: unknown): string | undefined {
+  if (!Array.isArray(output)) return undefined;
+
+  const messageText = output
+    .map(item => {
+      const itemRecord = asObject(item);
+      if (!itemRecord) return "";
+
+      const type = getRecordType(itemRecord);
+      if (type && type !== "message") return "";
+
+      return extractTextContent(itemRecord.content)
+        ?? extractTextContent(itemRecord.output_text)
+        ?? extractTextContent(itemRecord.text)
+        ?? "";
+    })
+    .filter(Boolean)
+    .join("");
+
+  if (messageText) return messageText;
+
+  const directText = output
+    .map(item => {
+      const itemRecord = asObject(item);
+      if (!itemRecord) return extractTextContent(item) ?? "";
+
+      const type = getRecordType(itemRecord);
+      if (["reasoning", "function_call", "tool_call"].includes(type)) return "";
+
+      return extractTextContent(itemRecord.content)
+        ?? extractTextContent(itemRecord.output_text)
+        ?? extractTextContent(itemRecord.text)
+        ?? "";
+    })
+    .filter(Boolean)
+    .join("");
+
+  return directText || undefined;
+}
+
 function extractOutputText(value: unknown): string | undefined {
   const record = asObject(value);
   if (!record) return undefined;
@@ -170,20 +214,8 @@ function extractOutputText(value: unknown): string | undefined {
     ?? extractTextContent(record.text);
   if (direct !== undefined) return direct;
 
-  const output = record.output;
-  if (Array.isArray(output)) {
-    const text = output
-      .map(item => {
-        const itemRecord = asObject(item);
-        if (!itemRecord) return extractTextContent(item) ?? "";
-        return extractTextContent(itemRecord.content)
-          ?? extractTextContent(itemRecord.text)
-          ?? "";
-      })
-      .filter(Boolean)
-      .join("");
-    if (text) return text;
-  }
+  const responsesText = extractResponsesMessageText(record.output);
+  if (responsesText) return responsesText;
 
   return undefined;
 }
