@@ -47,6 +47,226 @@ const COMPREHENSION_CONTEXT_MAX_CHARS = 4000;
 const FINAL_ANSWER_ARRAY_LIMIT = 16;
 const FINAL_ANSWER_OBJECT_KEY_LIMIT = 28;
 const FINAL_ANSWER_RECURSION_LIMIT = 3;
+const REQUEST_CONTEXTUALIZER_MAX_TOKENS = 700;
+
+export interface ResolvedReference {
+  type?: string;
+  id?: string;
+  name?: string;
+  source?: string;
+}
+
+interface ContextualizedRequest {
+  valid: boolean;
+  rewritten_message: string;
+  needs_clarification: boolean;
+  clarification_question: string | null;
+  resolved_references: ResolvedReference[];
+}
+
+function sanitizeResolvedReferences(value: unknown): ResolvedReference[] {
+  return toArrayValues(value)
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
+    .slice(0, 8)
+    .map(item => ({
+      type: typeof item.type === "string" ? item.type.trim() : undefined,
+      id: typeof item.id === "string" || typeof item.id === "number" ? String(item.id).trim() : undefined,
+      name: typeof item.name === "string" ? item.name.trim() : undefined,
+      source: typeof item.source === "string" ? item.source.trim().slice(0, 160) : undefined
+    }))
+    .filter(reference => reference.type || reference.id || reference.name);
+}
+
+function extractJsonObjectText(text: string): string | null {
+  const cleaned = text.replace(/```json|```/gi, "").trim();
+  const start = cleaned.indexOf("{");
+  const end = cleaned.lastIndexOf("}");
+  if (start < 0 || end <= start) return null;
+  return cleaned.slice(start, end + 1);
+}
+
+export function parseContextualizedRequest(text: string): ContextualizedRequest | null {
+  const jsonText = extractJsonObjectText(text);
+  if (!jsonText) return null;
+
+  try {
+    const data = JSON.parse(jsonText) as Record<string, unknown>;
+    const rewrittenMessage = typeof data.rewritten_message === "string"
+      ? data.rewritten_message.trim().slice(0, 3000)
+      : "";
+    if (!rewrittenMessage) return null;
+
+    const needsClarification = data.needs_clarification === true;
+    const clarificationQuestion = typeof data.clarification_question === "string"
+      ? data.clarification_question.trim().slice(0, 500)
+      : "";
+
+    return {
+      valid: true,
+      rewritten_message: rewrittenMessage,
+      needs_clarification: needsClarification,
+      clarification_question: needsClarification
+        ? clarificationQuestion || "Bạn có thể nói rõ đối tượng hoặc hành động bạn đang muốn nhắc tới không?"
+        : null,
+      resolved_references: sanitizeResolvedReferences(data.resolved_references)
+    };
+  } catch {
+    return null;
+  }
+}
+
+function fallbackContextualizedRequest(userMessage: string): ContextualizedRequest {
+  return {
+    valid: false,
+    rewritten_message: userMessage.trim(),
+    needs_clarification: false,
+    clarification_question: null,
+    resolved_references: []
+  };
+}
+
+function summarizeHistoryForContextualizer(chatHistory: AIMessage[]): string {
+  return chatHistory
+    .slice(-6)
+    .map(message => `${message.role}: ${message.content.slice(0, 500)}`)
+    .join("\n");
+}
+
+async function contextualizeUserRequest(
+  userMessage: string,
+  chatHistory: AIMessage[],
+  env: Env,
+  debugSteps?: DebugStep[]
+): Promise<ContextualizedRequest> {
+  addDebugStep(debugSteps, "agent.request_contextualizer", "start", "Làm rõ yêu cầu người dùng từ câu hiện tại và lịch sử gần đây.", {
+    message_chars: userMessage.length,
+    history_messages: chatHistory.length,
+    model: CHAT_MODEL
+  });
+
+  try {
+    const response = await runChatModel(CHAT_MODEL, {
+      max_tokens: REQUEST_CONTEXTUALIZER_MAX_TOKENS,
+      temperature: 0,
+      messages: [
+        {
+          role: "system",
+          content: `Bạn là bộ làm rõ yêu cầu theo ngữ cảnh cho agent Zilcode/App Builder.
+Chỉ trả về MỘT JSON object ngắn gọn. Không trả lời trực tiếp người dùng.
+
+Nhiệm vụ duy nhất:
+- Đọc câu hiện tại cùng lịch sử hội thoại gần đây.
+- Giải quyết các tham chiếu như "nó", "đó", "app vừa rồi", "window này" khi lịch sử chỉ ra duy nhất một đối tượng.
+- Viết lại yêu cầu thành một câu độc lập, rõ ràng, vẫn giữ đúng mục đích và mức độ hành động của người dùng.
+- Nếu không thể xác định chắc đối tượng hoặc ý định, yêu cầu hỏi lại thay vì tự đoán.
+
+Không chọn tool. Không phân loại intent. Không quyết định đọc/ghi. Không thực hiện hành động.
+
+Schema output bắt buộc:
+{
+  "rewritten_message": string,
+  "needs_clarification": boolean,
+  "clarification_question": string | null,
+  "resolved_references": [
+    {"type": string, "id": string, "name": string, "source": string}
+  ]
+}
+
+Quy tắc bắt buộc:
+- Không thêm ID, tên, đối tượng, giá trị mới hoặc hành động không có căn cứ trong câu hiện tại/lịch sử.
+- Giữ nguyên phủ định và mức độ yêu cầu. "Hướng dẫn cách xóa" vẫn là hỏi hướng dẫn, không được viết thành "xóa". "Đừng xóa" không được viết thành yêu cầu xóa.
+- Chỉ resolve tham chiếu khi có đúng một đối tượng phù hợp. Nếu có nhiều khả năng, đặt needs_clarification=true.
+- Nếu câu hiện tại đã rõ, chỉ viết lại tối thiểu; không mở rộng yêu cầu.
+- resolved_references chỉ chứa đối tượng thực sự lấy được từ câu hiện tại hoặc lịch sử. source phải nói ngắn gọn căn cứ lấy thông tin.
+- Khi needs_clarification=false, clarification_question phải là null.
+- Khi needs_clarification=true, clarification_question phải là một câu hỏi cụ thể và rewritten_message phải mô tả trung lập phần đã hiểu, không tự chọn một khả năng.
+
+Ví dụ:
+- Lịch sử nói app 107 là "Quản lý nhà trọ", user nói "đổi nó thành Quản lý phòng trọ" -> rewritten_message: "Đổi tên app có appid 107 từ Quản lý nhà trọ thành Quản lý phòng trọ"; resolve app 107 từ lịch sử.
+- User nói "hướng dẫn tôi xóa app" -> rewritten_message vẫn phải là "Hướng dẫn quy trình xóa app", không phải yêu cầu xóa app.
+- User nói "xóa nó" nhưng lịch sử có cả app và window -> needs_clarification=true và hỏi user muốn xóa đối tượng nào.
+- User nói "hệ thống hiện có gì" -> giữ nguyên ý nghĩa, không tự thêm phạm vi hoặc đối tượng.`
+        },
+        {
+          role: "user",
+          content: JSON.stringify({
+            history: summarizeHistoryForContextualizer(chatHistory),
+            user_message: userMessage
+          })
+        }
+      ]
+    }, env);
+
+    const contextualized = parseContextualizedRequest(response.response ?? "") ?? fallbackContextualizedRequest(userMessage);
+    addDebugStep(debugSteps, "agent.request_contextualizer", contextualized.valid ? "ok" : "skip", "Đã làm rõ yêu cầu người dùng.", {
+      valid: contextualized.valid,
+      rewritten_message_chars: contextualized.rewritten_message.length,
+      needs_clarification: contextualized.needs_clarification,
+      resolved_references: contextualized.resolved_references
+    });
+    return contextualized;
+  } catch (error) {
+    const contextualized = fallbackContextualizedRequest(userMessage);
+    addDebugStep(debugSteps, "agent.request_contextualizer", "error", "Không làm rõ được yêu cầu; dùng nguyên văn câu người dùng.", {
+      error: error instanceof Error ? error.message : String(error),
+      rewritten_message_chars: contextualized.rewritten_message.length
+    });
+    return contextualized;
+  }
+}
+
+function isInstructionalRequest(message: string): boolean {
+  const text = normalizeVietnameseText(message);
+  return /(huong dan|chi toi cach|cho toi biet cach|cach de|lam sao|lam the nao|quy trinh|can lam gi|how to)/.test(text);
+}
+
+function hasNegatedWriteRequest(message: string): boolean {
+  const text = normalizeVietnameseText(message);
+  return /(dung|khong|chua|khong duoc|khong can)\s+(?:\S+\s+){0,4}(tao|them|sua|doi ten|cap nhat|xoa|delete|remove|rename|update|create|add|apply|thuc hien)/.test(text);
+}
+
+export function isExplicitWriteRequest(message: string): boolean {
+  const text = normalizeVietnameseText(message);
+  if (!text || isInstructionalRequest(message) || hasNegatedWriteRequest(message)) return false;
+
+  const hasWriteVerb = /(tao|them|sua|doi ten|cap nhat|xoa|delete|remove|rename|update|create|add|apply|thuc hien|tien hanh)/.test(text);
+  if (!hasWriteVerb) return false;
+
+  return /^(?:(?:bay gio|xin|ban|hay|vui long|giup toi|thu|ban co the)\s+)*(tao|them|sua|doi ten|cap nhat|xoa|delete|remove|rename|update|create|add|apply|thuc hien|tien hanh)/.test(text)
+    || /(toi|minh)\s+(muon|can|yeu cau|nho)\s+(?:\S+\s+){0,4}(tao|them|sua|doi ten|cap nhat|xoa|delete|remove|rename|update|create|add|apply|thuc hien|tien hanh)/.test(text)
+    || isPrepareChangeRequest(message);
+}
+
+export function isWriteRequestAllowed(
+  originalMessage: string,
+  clarifiedMessage: string,
+  chatHistory: AIMessage[],
+  resolvedReferences: ResolvedReference[] = []
+): boolean {
+  if (isExplicitWriteRequest(originalMessage)) return true;
+  if (!isExplicitWriteRequest(clarifiedMessage)) return false;
+  if (resolvedReferences.length === 0) return false;
+
+  return chatHistory
+    .slice(-6)
+    .some(message => message.role === "user" && isExplicitWriteRequest(message.content ?? ""));
+}
+
+function isToolCallAllowedByPolicy(
+  toolName: string,
+  originalMessage: string,
+  clarifiedMessage: string,
+  chatHistory: AIMessage[],
+  resolvedReferences: ResolvedReference[]
+): boolean {
+  if (toolName === "app_builder_prepare_change") {
+    return isWriteRequestAllowed(originalMessage, clarifiedMessage, chatHistory, resolvedReferences);
+  }
+  if (toolName === "app_builder_apply_change") {
+    return isPlanConfirmation(originalMessage) && Boolean(findImmediatePreviousPlanId(chatHistory));
+  }
+  return true;
+}
 
 function hasAppBuilderWriteResult(toolResults: ToolResultRecord[]): boolean {
   return toolResults.some(result => isAppBuilderWriteTool(result.name));
@@ -772,12 +992,12 @@ function isPrepareChangeRequest(message: string): boolean {
     || text.includes("lap plan");
 }
 
-function extractCreateAppRequest(message: string): { appName: string; template: "order_management" | "basic" } | null {
+function extractCreateAppRequest(message: string): { appName: string } | null {
   const normalized = normalizeVietnameseText(message);
   const wantsCreate = /(tao|them|create|add)/.test(normalized);
   const mentionsApp = /\bapp\b/.test(normalized) || normalized.includes("ung dung");
   if (!wantsCreate || !mentionsApp) return null;
-  if (/(window|cua so|table|bang|field|truong|cot|column)/.test(normalized) && !/quan ly don hang|order/.test(normalized)) {
+  if (/(window|cua so|table|bang|field|truong|cot|column)/.test(normalized)) {
     return null;
   }
 
@@ -786,178 +1006,19 @@ function extractCreateAppRequest(message: string): { appName: string; template: 
     || message.match(/\bapp\s+(?:mới\s+|moi\s+)?([^,.;\n]+?)(?:\s+(?:với|voi|gồm|gom|các|cac|bảng|bang|window|cửa|cua)\b|[,.;]|$)/i)?.[1]?.trim()
     || message.match(/(?:ứng dụng|ung dung)\s+([^,.;\n]+?)(?:\s+(?:với|voi|gồm|gom|các|cac|bảng|bang|window|cửa|cua)\b|[,.;]|$)/i)?.[1]?.trim();
 
-  const template = /quan ly don hang|order/.test(normalized) ? "order_management" : "basic";
-  const appName = template === "order_management"
-    ? "Quản lý đơn hàng"
-    : (explicitName || "Ứng dụng mới");
-  return { appName, template };
+  return { appName: explicitName || "Ứng dụng mới" };
 }
 
-function buildCreateAppOperations(request: { appName: string; template: "order_management" | "basic" }): Record<string, unknown>[] {
-  if (request.template !== "order_management") {
-    return [
-      {
-        id: "create_app_1",
-        op: "create_app",
-        record: {
-          appname: request.appName
-        }
-      }
-    ];
-  }
-
-  const operations: Record<string, unknown>[] = [
+function buildCreateAppOperations(request: { appName: string }): Record<string, unknown>[] {
+  return [
     {
       id: "create_app_1",
       op: "create_app",
       record: {
-        appname: request.appName,
-        description: "Ứng dụng quản lý khách hàng, sản phẩm, đơn hàng và chi tiết đơn hàng."
+        appname: request.appName
       }
     }
   ];
-
-  const tables = [
-    {
-      id: "customers",
-      tablename: "customers",
-      alias: "Khách hàng",
-      columns: [
-        ["customerid", "Mã khách hàng", "key"],
-        ["customername", "Tên khách hàng", "text"],
-        ["phone", "Số điện thoại", "text"],
-        ["email", "Email", "text"],
-        ["address", "Địa chỉ", "text"]
-      ]
-    },
-    {
-      id: "products",
-      tablename: "products",
-      alias: "Sản phẩm",
-      columns: [
-        ["productid", "Mã sản phẩm", "key"],
-        ["productname", "Tên sản phẩm", "text"],
-        ["unitprice", "Đơn giá", "number"],
-        ["stockqty", "Tồn kho", "number"],
-        ["category", "Danh mục", "text"]
-      ]
-    },
-    {
-      id: "orders",
-      tablename: "orders",
-      alias: "Đơn hàng",
-      columns: [
-        ["orderid", "Mã đơn hàng", "key"],
-        ["orderno", "Số đơn hàng", "text"],
-        ["customerid", "Khách hàng", "number"],
-        ["orderdate", "Ngày đặt", "date"],
-        ["status", "Trạng thái", "text"],
-        ["totalamount", "Tổng tiền", "number"]
-      ]
-    },
-    {
-      id: "order_items",
-      tablename: "order_items",
-      alias: "Chi tiết đơn hàng",
-      columns: [
-        ["orderitemid", "Mã dòng", "key"],
-        ["orderid", "Đơn hàng", "number"],
-        ["productid", "Sản phẩm", "number"],
-        ["quantity", "Số lượng", "number"],
-        ["unitprice", "Đơn giá", "number"],
-        ["linetotal", "Thành tiền", "number"]
-      ]
-    }
-  ] as const;
-
-  for (const table of tables) {
-    const tableOperationId = `create_table_${table.id}`;
-    operations.push({
-      id: tableOperationId,
-      op: "create_table",
-      record: {
-        tablename: table.tablename,
-        alias: table.alias,
-        tabletype: "table"
-      }
-    });
-
-    table.columns.forEach(([columnname, caption, columntype], index) => {
-      operations.push({
-        id: `create_column_${table.id}_${columnname}`,
-        op: "create_column",
-        record: {
-          tableid: `$${tableOperationId}.tableid`,
-          columnname,
-          caption,
-          columntype,
-          datatype: columntype,
-          seqno: index + 1
-        }
-      });
-    });
-  }
-
-  const windows = [
-    { id: "orders", windowname: "Quản lý đơn hàng", table: "orders", menu: "Đơn hàng" },
-    { id: "customers", windowname: "Quản lý khách hàng", table: "customers", menu: "Khách hàng" },
-    { id: "products", windowname: "Quản lý sản phẩm", table: "products", menu: "Sản phẩm" }
-  ] as const;
-
-  for (const window of windows) {
-    const windowOperationId = `create_window_${window.id}`;
-    const tabOperationId = `create_tab_${window.id}`;
-    const table = tables.find(item => item.id === window.table);
-    if (!table) continue;
-
-    operations.push({
-      id: windowOperationId,
-      op: "create_window",
-      record: {
-        appid: "$create_app_1.appid",
-        windowname: window.windowname,
-        windowtype: "window"
-      }
-    });
-
-    operations.push({
-      id: tabOperationId,
-      op: "create_tab",
-      record: {
-        windowid: `$${windowOperationId}.windowid`,
-        tableid: `$create_table_${window.table}.tableid`,
-        tabname: table.alias,
-        seqno: 1
-      }
-    });
-
-    table.columns.forEach(([columnname, caption, columntype], index) => {
-      operations.push({
-        id: `create_field_${window.id}_${columnname}`,
-        op: "create_field",
-        record: {
-          tabid: `$${tabOperationId}.tabid`,
-          columnid: `$create_column_${window.table}_${columnname}.columnid`,
-          fieldname: caption,
-          fieldtype: columntype === "key" ? "text" : columntype,
-          seqno: index + 1
-        }
-      });
-    });
-
-    operations.push({
-      id: `create_menu_${window.id}`,
-      op: "create_menu",
-      record: {
-        appid: "$create_app_1.appid",
-        menuname: window.menu,
-        translate: window.menu,
-        windowid: `$${windowOperationId}.windowid`
-      }
-    });
-  }
-
-  return operations;
 }
 
 function extractCreateWindowRequest(message: string): {
@@ -1167,50 +1228,6 @@ export function sanitizeChatHistory(history: unknown): AIMessage[] {
     .filter(message => message.content.length > 0);
 }
 
-async function createFinalAnswerFromRag(
-  userMessage: string,
-  toolResults: ToolResultRecord[],
-  env: Env,
-  chatHistory: AIMessage[] = [],
-  debugSteps?: DebugStep[]
-): Promise<string> {
-  addDebugStep(debugSteps, "rag.final_answer", "start", "Tạo câu trả lời cuối từ RAG/context.", {
-    model: CHAT_MODEL,
-    tool_results: toolResults.length,
-    history_messages: chatHistory.length
-  });
-
-  const response = await runChatModel(CHAT_MODEL, {
-    max_tokens: RAG_FINAL_MAX_TOKENS,
-    temperature: 0.2,
-    messages: [
-      {
-        role: "system",
-        content: `Bạn là trợ lý Zilcode.
-Trả lời bằng cùng ngôn ngữ với người hỏi.
-Nếu người hỏi dùng tiếng Việt, toàn bộ câu trả lời phải là tiếng Việt. Không dùng heading/cụm từ tiếng Anh.
-Dữ liệu có thể gồm RAG docs và App Builder graph tool results.
-Nếu tài liệu không đủ, nói rõ phần nào chưa chắc.
-Không nhắc đến tool/function nội bộ.`
-      },
-      ...chatHistory,
-      { role: "user", content: userMessage },
-      {
-        role: "assistant",
-        content: `Context:\n${formatToolResultsForFinalAnswer(toolResults)}`
-      }
-    ]
-  }, env);
-
-  const cleanedAnswer = cleanMarkdownArtifacts(response.response?.trim() ?? "");
-  const answer = cleanedAnswer || "Không tạo được câu trả lời.";
-  addDebugStep(debugSteps, "rag.final_answer", "ok", "Đã tạo câu trả lời cuối từ RAG/context.", {
-    answer_chars: answer.length
-  });
-
-  return answer;
-}
-
 function buildComprehensionContext(toolResults: ToolResultRecord[]): string {
   const graphResult = [...toolResults]
     .reverse()
@@ -1273,7 +1290,7 @@ async function buildComprehension(
     ? comprehensionContext
     : toolContext.slice(0, COMPREHENSION_CONTEXT_MAX_CHARS);
 
-  addDebugStep(debugSteps, "pipeline.comprehension", "start", "Buoc 1: doc graph data va hieu cau truc app.", {
+  addDebugStep(debugSteps, "pipeline.comprehension", "start", "Buoc 1: doc tool/RAG/graph data va tom tat evidence.", {
     tool_context_chars: toolContext.length,
     comprehension_context_chars: inputContext.length,
     source: hasGraphData ? "graph_facts_mini" : "tool_context_fallback"
@@ -1285,24 +1302,24 @@ async function buildComprehension(
     messages: [
       {
         role: "system",
-        content: `Bạn là bộ phân tích cấu trúc App Builder.
-Nhiệm vụ: đọc graph/tool data bên dưới và tóm tắt thành prose ngắn gọn.
+        content: `Bạn là bộ phân tích context cho trợ lý Zilcode/App Builder.
+Nhiệm vụ: đọc tool/RAG/graph data bên dưới và tóm tắt thành prose ngắn gọn.
 
 Trả lời theo cấu trúc sau, viết prose thuần, không JSON, không markdown:
 
-APP & MỤC ĐÍCH: App tên gì, có bao nhiêu app, mỗi app dùng để làm gì. Nếu phải suy từ tên app/window/table thì nói rõ là suy từ tên.
+NGUỒN DỮ LIỆU: Context đến từ tài liệu RAG, graph App Builder, kết quả write/change, hay nhiều nguồn kết hợp.
 
-LUỒNG ĐÃ XÁC MINH: Chỉ nêu các luồng có trong flow_summary và verified_relations, ví dụ app -> window -> tab -> table, menu -> window, role -> app/menu/table.
+NỘI DUNG ĐÃ XÁC MINH: Những thông tin trực tiếp có trong context và liên quan tới câu hỏi.
 
-THÀNH PHẦN CHÍNH: Các window, table, menu quan trọng nhất và mối quan hệ giữa chúng.
+LIÊN KẾT/FLOW: Nếu context có graph hoặc quan hệ, nêu các luồng đã thấy như app -> window -> tab -> table, menu -> window, role -> app/menu/table. Nếu chỉ là tài liệu hướng dẫn thì nêu quy trình/khái niệm chính từ tài liệu.
 
-ĐIỂM CHƯA RÕ: Những phần graph chưa có đủ cạnh để kết luận, để bước sau không bịa.
+ĐIỂM CHƯA RÕ: Những phần context chưa đủ để kết luận, để bước sau không bịa.
 
-Chỉ dùng thông tin có trong graph/tool data. Không bịa thêm. Không giải thích định nghĩa chung.`
+Chỉ dùng thông tin có trong tool/RAG/graph data. Không bịa thêm. Chỉ dùng kiến thức chung nếu context thật sự cần diễn giải, và phải nói rõ đó là diễn giải.`
       },
       {
         role: "user",
-        content: `Dữ liệu graph App Builder:\n\n${inputContext}\n\nHãy phân tích và tóm tắt cấu trúc app theo format yêu cầu.`
+        content: `Dữ liệu tool/RAG/graph:\n\n${inputContext}\n\nHãy phân tích và tóm tắt evidence theo format yêu cầu.`
       }
     ]
   }, env);
@@ -1330,8 +1347,8 @@ async function buildReasoning(
     messages: [
       {
         role: "system",
-        content: `Bạn là bộ lập kế hoạch trả lời cho trợ lý App Builder.
-Bạn nhận được: (1) hiểu biết về app đã tóm tắt từ graph/tool data, (2) câu hỏi của user.
+        content: `Bạn là bộ lập kế hoạch trả lời cho trợ lý Zilcode/App Builder.
+Bạn nhận được: (1) hiểu biết đã tóm tắt từ tool/RAG/graph data, (2) câu hỏi của user.
 
 Nhiệm vụ: quyết định câu trả lời nên bao gồm gì. Chưa viết câu trả lời cuối.
 
@@ -1341,7 +1358,7 @@ LOẠI CÂU HỎI: flow/liên kết | đối tượng cụ thể | tổng quan |
 
 PHẦN CẦN TRẢ LỜI: Những thông tin nào từ comprehension trực tiếp trả lời câu hỏi.
 
-ĐÃ XÁC MINH: Phần nào có bằng chứng rõ trong graph/tool data.
+ĐÃ XÁC MINH: Phần nào có bằng chứng rõ trong tool/RAG/graph data.
 
 CẦN GHI CHÚ: Phần nào là suy luận, phần nào graph chưa đủ để kết luận.
 
@@ -1349,7 +1366,7 @@ CẤU TRÚC TRẢ LỜI: Nên bắt đầu bằng gì, diễn giải flow như t
       },
       {
         role: "user",
-        content: `Hiểu biết về app:\n${comprehension}\n\nCâu hỏi của user: ${userMessage}`
+        content: `Hiểu biết từ context:\n${comprehension}\n\nCâu hỏi của user: ${userMessage}`
       }
     ]
   }, env);
@@ -1378,7 +1395,7 @@ async function buildFinalAnswerFromReasoning(
     messages: [
       {
         role: "system",
-        content: `Bạn là trợ lý phân tích App Builder của Zilcode.
+        content: `Bạn là trợ lý Zilcode/App Builder.
 Trả lời bằng ngôn ngữ của user. Nếu user viết tiếng Việt, toàn bộ câu trả lời phải là tiếng Việt.
 Không dùng heading hay cụm từ tiếng Anh nếu user viết tiếng Việt.
 Không nhắc đến tool/function nội bộ.
@@ -1390,14 +1407,14 @@ Quy tắc Zilcode:
 - App Builder metadata khác runtime: SQLCloud/procedure/view là physical database, không apply được bằng App Builder metadata tool nếu không có write contract riêng.
 
 Cách viết:
-- Bắt đầu từ dữ liệu đã thấy trong graph/tool data, rồi mới diễn giải bằng kiến thức chung.
-- Được dùng kiến thức chung về no-code/app-builder/ERP/CRUD/workflow để giải thích dễ hiểu, nhưng không dùng để bịa dữ liệu graph chưa xác minh.
+- Bắt đầu từ dữ liệu đã thấy trong tool/RAG/graph data, rồi mới diễn giải bằng kiến thức chung.
+- Được dùng kiến thức chung về no-code/app-builder/ERP/CRUD/workflow để giải thích dễ hiểu, nhưng không dùng để bịa dữ liệu context chưa xác minh.
 - Phân biệt rõ phần đã xác minh với phần suy luận/khuyến nghị khi câu trả lời có cả hai.
 - Không kể lại JSON, không mở bằng danh sách dài nếu user không hỏi liệt kê.`
       },
       {
         role: "assistant",
-        content: `Tôi đã đọc graph/tool data và hiểu như sau:\n${comprehension}`
+        content: `Tôi đã đọc tool/RAG/graph data và hiểu như sau:\n${comprehension}`
       },
       {
         role: "assistant",
@@ -1508,8 +1525,25 @@ export async function runAgenticLoop(
     }, toolResults);
   }
 
-  const appOrdinal = extractAppOrdinalReference(userMessage);
-  const ordinalApp = appOrdinal && isReadOnlyAppInfoIntent(userMessage)
+  const contextualizedRequest = await contextualizeUserRequest(userMessage, chatHistory, env, debugSteps);
+  if (contextualizedRequest.needs_clarification) {
+    return {
+      answer: contextualizedRequest.clarification_question
+        ?? "Bạn có thể nói rõ đối tượng hoặc hành động bạn đang muốn nhắc tới không?",
+      toolsCalled: []
+    };
+  }
+
+  const clarifiedUserMessage = contextualizedRequest.rewritten_message || userMessage;
+  const writeShortcutAllowed = isWriteRequestAllowed(
+    userMessage,
+    clarifiedUserMessage,
+    chatHistory,
+    contextualizedRequest.resolved_references
+  );
+
+  const appOrdinal = extractAppOrdinalReference(userMessage) ?? extractAppOrdinalReference(clarifiedUserMessage);
+  const ordinalApp = appOrdinal && isReadOnlyAppInfoIntent(clarifiedUserMessage)
     ? resolveAppOrdinalFromHistory(chatHistory, appOrdinal)
     : null;
   if (ordinalApp && zilcodeSession) {
@@ -1540,12 +1574,11 @@ export async function runAgenticLoop(
     };
   }
 
-  const createAppRequest = extractCreateAppRequest(userMessage);
-  if (createAppRequest && zilcodeSession) {
+  const createAppRequest = extractCreateAppRequest(clarifiedUserMessage);
+  if (createAppRequest && zilcodeSession && writeShortcutAllowed) {
     const operations = buildCreateAppOperations(createAppRequest);
     addDebugStep(debugSteps, "agent.create_app_prepare", "start", "Phát hiện intent tạo app, tự tạo pending create_app plan.", {
       app_name: createAppRequest.appName,
-      template: createAppRequest.template,
       operations_count: operations.length
     });
 
@@ -1554,9 +1587,7 @@ export async function runAgenticLoop(
         name: "app_builder_prepare_change",
         arguments: {
           intent: "create_app",
-          summary: createAppRequest.template === "order_management"
-            ? `Tạo app "${createAppRequest.appName}" với bảng, cột, window, tab, field và menu cơ bản.`
-            : `Tạo app "${createAppRequest.appName}".`,
+          summary: `Tạo app "${createAppRequest.appName}".`,
           operations,
           max_records_per_table: "5000"
         }
@@ -1575,12 +1606,12 @@ export async function runAgenticLoop(
     }, toolResults);
   }
 
-  const renameAppIntent = isRenameAppIntent(userMessage);
-  const renameAppTarget = extractRenameAppTarget(userMessage) ?? findLatestRenameAppTarget(chatHistory);
-  const renameAppNewName = extractRenameNewName(userMessage)
+  const renameAppIntent = isRenameAppIntent(clarifiedUserMessage);
+  const renameAppTarget = extractRenameAppTarget(clarifiedUserMessage) ?? findLatestRenameAppTarget(chatHistory);
+  const renameAppNewName = extractRenameNewName(clarifiedUserMessage)
     ?? ((renameAppIntent || isPlanConfirmation(userMessage)) ? findLatestRenameAppNewName(chatHistory) : null);
 
-  if (zilcodeSession && (renameAppIntent || (renameAppTarget && renameAppNewName))) {
+  if (zilcodeSession && writeShortcutAllowed && (renameAppIntent || (renameAppTarget && renameAppNewName))) {
     if (!renameAppTarget) {
       return {
         answer: "Bạn muốn đổi tên app nào? Hãy gửi appid hoặc tên app hiện tại.",
@@ -1643,10 +1674,10 @@ export async function runAgenticLoop(
     }, toolResults);
   }
 
-  const renameWindowRequest = extractRenameWindowRequest(userMessage)
-    ?? ((normalizeVietnameseText(userMessage).includes("doi ten") || isConfirmation) ? findLatestRenameWindowRequest(chatHistory) : null);
-  if (renameWindowRequest && zilcodeSession) {
-    const appName = extractAppNameFromText(userMessage) ?? findLatestAppName(chatHistory);
+  const renameWindowRequest = extractRenameWindowRequest(clarifiedUserMessage)
+    ?? ((normalizeVietnameseText(clarifiedUserMessage).includes("doi ten") || isConfirmation) ? findLatestRenameWindowRequest(chatHistory) : null);
+  if (renameWindowRequest && zilcodeSession && writeShortcutAllowed) {
+    const appName = extractAppNameFromText(clarifiedUserMessage) ?? findLatestAppName(chatHistory);
     addDebugStep(debugSteps, "agent.rename_window_prepare", "start", "Phát hiện intent đổi tên window, tự tạo pending update_window plan.", {
       current_name: renameWindowRequest.currentName,
       new_name: renameWindowRequest.newName,
@@ -1687,11 +1718,11 @@ export async function runAgenticLoop(
     }, toolResults);
   }
 
-  const deleteWindowId = isDeleteWindowIntent(userMessage)
-    ? extractWindowDeleteIdFromText(userMessage)
+  const deleteWindowId = isDeleteWindowIntent(clarifiedUserMessage)
+    ? extractWindowDeleteIdFromText(clarifiedUserMessage)
     : null;
 
-  if (deleteWindowId && zilcodeSession) {
+  if (deleteWindowId && zilcodeSession && writeShortcutAllowed) {
     addDebugStep(debugSteps, "agent.delete_window_prepare", "start", "Phát hiện intent xóa window, tự tạo pending delete plan.", {
       windowid: deleteWindowId
     });
@@ -1728,8 +1759,8 @@ export async function runAgenticLoop(
     }, toolResults);
   }
 
-  const createWindowRequest = extractCreateWindowRequest(userMessage);
-  if (createWindowRequest && zilcodeSession) {
+  const createWindowRequest = extractCreateWindowRequest(clarifiedUserMessage);
+  if (createWindowRequest && zilcodeSession && writeShortcutAllowed) {
     addDebugStep(debugSteps, "agent.create_window_prepare", "start", "Phát hiện intent tạo window, tự tạo pending create_window plan.", {
       app_name: createWindowRequest.appName,
       window_name: createWindowRequest.windowName,
@@ -1801,37 +1832,45 @@ export async function runAgenticLoop(
   const messages: AIMessage[] = [
     {
       role: "system",
-      content: `Bạn là trợ lý AI cho Zilcode và App Builder.
-Trả lời bằng cùng ngôn ngữ với người dùng.
-Nếu người dùng viết tiếng Việt, bắt buộc trả lời tiếng Việt. Không chuyển sang tiếng Anh kể cả tiêu đề, bảng biểu, hoặc lời nhắc xác nhận.
+      content: `Bạn là executor chọn bước tiếp theo cho agent Zilcode/App Builder.
+Nhiệm vụ của bạn là dựa vào câu gốc, câu đã được làm rõ, lịch sử hội thoại và tool schema để quyết định nên gọi tool nào hoặc trả lời trực tiếp.
 
-Tools:
-- general_chat: dùng cho hội thoại thông thường, không cần RAG/Zilcode.
-- rag_search: dùng khi cần docs/guide/API contract/playbook và khi người dùng hỏi kiến thức chung về zilcode và khi không cần tương tác với hệ thống.
-- app_builder_graph_overview: dùng đầu tiên khi cần đọc App Builder hiện tại. Tool này trả skeleton graph.
-- app_builder_graph_search: tìm node app/table/window/tab/field/menu/domain theo tên/id.
-- app_builder_graph_subgraph: mở vùng graph liên quan quanh node.
-- app_builder_node_detail: lấy chi tiết node cụ thể.
-- app_builder_creation_schema: lấy quy tắc tạo/sửa và proposed plan format.
-- app_builder_prepare_change: chuẩn bị plan tạo/sửa/xóa, validate, lọc payload theo metadata thật, lưu pending plan. Chưa ghi.
-- app_builder_apply_change: chỉ gọi sau khi user xác nhận rõ ràng và có plan_id từ prepare_change.
+Ngôn ngữ:
+- Nếu cần trả lời trực tiếp, trả lời cùng ngôn ngữ với người dùng.
+- Nếu người dùng viết tiếng Việt, toàn bộ câu trả lời phải là tiếng Việt.
+- Không nhắc tên tool/function nội bộ khi không cần thiết.
 
-Graph/tool policy:
-- Nếu user hỏi tổng quan toàn hệ thống, gọi app_builder_graph_overview.
-- Nếu user nêu tên/id một app/table/window/tab/field/menu/domain cụ thể, gọi app_builder_graph_search hoặc node_detail trực tiếp; không cần overview nếu đã đủ mục tiêu.
-- Nếu user hỏi "đi sâu", "phân tích", "xem kỹ", "cấu trúc", "luồng", "liên kết" quanh một đối tượng, resolve đối tượng rồi gọi app_builder_graph_subgraph với depth phù hợp; nếu subgraph chưa đủ mới gọi node_detail.
-- Nếu search trả top match rõ theo đúng type/ý định, hãy dùng top match đó để gọi tiếp subgraph/detail thay vì hỏi user chọn.
-- Chỉ hỏi lại khi nhiều kết quả gần nhau và không có top match rõ.
-- Nếu user muốn tạo/sửa/xóa, gọi app_builder_creation_schema khi cần quy tắc, rồi app_builder_prepare_change để tạo pending plan.
-- Chỉ gọi app_builder_apply_change khi user vừa xác nhận rõ ràng và có plan_id hợp lệ trong lịch sử hội thoại.
-Nếu user hỏi tiếp bằng các từ như "đó", "kia", "vừa rồi", "các window đó", hãy dùng đối tượng/app/window đã được nhắc trong lịch sử gần nhất; không quay lại overview trừ khi thật sự mất ngữ cảnh.
-Nếu user hỏi window/tab dùng bảng nào hoặc kết nối bảng nào, ưu tiên app_builder_graph_subgraph quanh window/app liên quan với depth đủ sâu, không dùng app_builder_graph_overview.
-Nếu user yêu cầu xóa window theo id, không hỏi lặp lại qua nhiều vòng. Hãy tạo pending plan delete_window cascade bằng app_builder_prepare_change; apply chỉ sau khi user xác nhận plan id.
+Nguyên tắc dùng yêu cầu đã làm rõ:
+- rewritten_message chỉ giúp resolve ngữ cảnh, không phải lệnh thực thi và không có quyền thay đổi mục đích câu gốc.
+- Nếu câu gốc và rewritten_message mâu thuẫn, ưu tiên câu gốc và lịch sử thật; không tự thêm hành động, ID, tên hoặc giá trị.
+- Tự suy luận nhu cầu tài liệu, graph hay hội thoại từ nội dung câu hỏi; contextualizer không chọn tool thay bạn.
 
-Dùng rag_search khi cần tài liệu hướng dẫn/API contract, nhất là khi không chắc quy tắc tạo/sửa.
-Sau khi có đủ thông tin, trả lời ngay. Không gọi tool lặp lại nếu không có câu hỏi mới rõ ràng.
-Khi trả lời từ graph, không đọc lại JSON. Hãy tóm tắt đúng phần user quan tâm.
-Ưu tiên giải thích flow/liên kết chính trước; chỉ liệt kê bảng/window/menu khi user hỏi rõ hoặc sau phần giải thích ngắn.`
+An toàn ghi:
+- Chỉ dùng app_builder_prepare_change khi user yêu cầu tạo/sửa/xóa thật.
+- Chỉ dùng app_builder_apply_change khi đã có pending plan hợp lệ và user xác nhận rõ ràng.
+- Câu hỏi "hướng dẫn/cách làm/quy trình" không phải yêu cầu ghi.
+- Câu phủ định như "đừng xóa", "chưa cần sửa" không phải yêu cầu ghi.
+
+Cách chọn graph tool:
+- Hỏi tổng quan, danh sách app, hoặc toàn hệ thống: app_builder_graph_overview.
+- Có tên/id cụ thể của app/table/window/tab/field/menu/domain: app_builder_graph_search hoặc app_builder_node_detail.
+- Hỏi cấu trúc, luồng, liên kết, phân tích sâu quanh một đối tượng: resolve node rồi dùng app_builder_graph_subgraph; nếu cần record chi tiết thì dùng app_builder_node_detail.
+- Hỏi tài liệu/quy trình/cách dùng: rag_search.
+- Hỏi quy tắc tạo/sửa hoặc chưa chắc payload: app_builder_creation_schema hoặc rag_search.
+
+Sau khi đã có đủ tool result, dừng gọi thêm tool và để final-answer pipeline diễn giải. Không dump JSON thô.`
+    },
+    {
+      role: "system",
+      content: `Yêu cầu hiện tại đã được làm rõ theo lịch sử:
+${JSON.stringify({
+  original_message: userMessage,
+  rewritten_message: contextualizedRequest.rewritten_message,
+  resolved_references: contextualizedRequest.resolved_references,
+  contextualization_valid: contextualizedRequest.valid
+}, null, 2)}
+
+Hãy dùng rewritten_message để hiểu yêu cầu độc lập, nhưng luôn đối chiếu original_message và lịch sử trước khi chọn tool.`
     },
     ...chatHistory,
     { role: "user", content: userMessage }
@@ -1913,20 +1952,41 @@ Khi trả lời từ graph, không đọc lại JSON. Hãy tóm tắt đúng ph�
       };
     }
 
-    const supportedToolCalls = response.tool_calls.filter(toolCall => AVAILABLE_TOOL_NAMES.has(toolCall.name));
+    const supportedToolCalls = response.tool_calls.filter(toolCall =>
+      AVAILABLE_TOOL_NAMES.has(toolCall.name)
+      && isToolCallAllowedByPolicy(
+        toolCall.name,
+        userMessage,
+        clarifiedUserMessage,
+        chatHistory,
+        contextualizedRequest.resolved_references
+      )
+    );
     const skippedUnsupportedToolCalls = response.tool_calls
       .filter(toolCall => !AVAILABLE_TOOL_NAMES.has(toolCall.name))
+      .map(toolCall => toolCall.name);
+    const skippedPolicyToolCalls = response.tool_calls
+      .filter(toolCall => AVAILABLE_TOOL_NAMES.has(toolCall.name)
+        && !isToolCallAllowedByPolicy(
+          toolCall.name,
+          userMessage,
+          clarifiedUserMessage,
+          chatHistory,
+          contextualizedRequest.resolved_references
+        ))
       .map(toolCall => toolCall.name);
 
     if (!supportedToolCalls.length) {
       addDebugStep(debugSteps, "agent.tool_selection", "skip", "Model chọn tool không được hỗ trợ.", {
         iteration: i + 1,
         tool_calls: response.tool_calls.map(toolCall => toolCall.name),
-        skipped_tool_calls: skippedUnsupportedToolCalls
+        skipped_tool_calls: skippedUnsupportedToolCalls,
+        skipped_by_policy: skippedPolicyToolCalls
       });
 
       return {
-        answer: response.response ?? "Model đã chọn tool không còn được hỗ trợ. Hãy thử hỏi lại theo cách khác.",
+        answer: response.response
+          ?? "Yêu cầu hiện tại chưa đủ điều kiện an toàn để thực hiện thao tác ghi. Hãy nói rõ hành động bạn muốn thực hiện.",
         toolsCalled
       };
     }
@@ -1941,6 +2001,7 @@ Khi trả lời từ graph, không đọc lại JSON. Hãy tóm tắt đúng ph�
       tool_calls: response.tool_calls.map(toolCall => toolCall.name),
       executed_tool_calls: toolCallsToExecute.map(toolCall => toolCall.name),
       skipped_tool_calls: skippedUnsupportedToolCalls,
+      skipped_by_policy: skippedPolicyToolCalls,
       skipped_general_chat_because_rag: hasRagSearchCall && toolCallsToExecute.length !== supportedToolCalls.length
     });
 
@@ -2005,7 +2066,7 @@ Khi trả lời từ graph, không đọc lại JSON. Hãy tóm tắt đúng ph�
     }
 
     if (hasRagSearchResult) {
-      const finalAnswer = await createFinalAnswerFromRag(
+      const finalAnswer = await createFinalAnswerFromToolResults(
         userMessage,
         toolResults,
         env,
