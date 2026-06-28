@@ -1,8 +1,8 @@
 import { CORS, MAX_HISTORY_CONTENT_CHARS, MAX_HISTORY_MESSAGES, type Env } from "./config";
 import { addDebugStep, type DebugStep } from "./debug";
-import { runAgenticLoop } from "./agent";
+import { parseAgentMode, runAgenticLoop } from "./agent";
 import { loadZilcodeSessionFromRequestHeaders, type ZilcodeSessionState } from "./zilcode";
-import type { AgentActionState, AIMessage, ChatHistoryMessage, RagSource } from "./types";
+import type { AgentActionState, AgentMode, AIMessage, ChatHistoryMessage, RagSource } from "./types";
 
 const CONVERSATION_PREFIX = "conversation:";
 const CONVERSATION_INDEX_PREFIX = "conversation_index:";
@@ -386,10 +386,15 @@ export async function handleConversationMessage(request: Request, env: Env, conv
     return jsonResponse({ success: false, error: "Không tìm thấy đoạn chat." }, { status: 404 });
   }
 
-  const body = await readJsonBody<{ message?: string; debug?: boolean }>(request);
+  const body = await readJsonBody<{ message?: string; mode?: AgentMode; debug?: boolean }>(request);
   const message = String(body.message ?? "").trim();
   if (!message) {
     return jsonResponse({ success: false, error: "Bắt buộc phải có trường message." }, { status: 400 });
+  }
+
+  const mode = parseAgentMode(body.mode);
+  if (!mode) {
+    return jsonResponse({ success: false, error: "Mode khong hop le. Chi ho tro: default, search." }, { status: 400 });
   }
 
   const debugSteps = body.debug === true ? [] as DebugStep[] : undefined;
@@ -397,6 +402,7 @@ export async function handleConversationMessage(request: Request, env: Env, conv
 
   addDebugStep(debugSteps, "conversation.history_loaded", "ok", "Worker đã tải history server-side cho conversation.", {
     conversation_id: conversationId,
+    mode,
     history_messages: agentHistory.length,
     has_pending_action: Boolean(conversation.pending_action)
   });
@@ -408,7 +414,7 @@ export async function handleConversationMessage(request: Request, env: Env, conv
     created_at: new Date().toISOString()
   };
 
-  const result = await runAgenticLoop(message, env, agentHistory, debugSteps, context.state);
+  const result = await runAgenticLoop(message, env, agentHistory, debugSteps, context.state, mode);
 
   const assistantMessage: StoredMessage = {
     message_id: crypto.randomUUID(),

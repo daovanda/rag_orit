@@ -28,18 +28,20 @@ import {
 import type {
   AgentActionState,
   AgenticLoopResult,
+  AgentMode,
   AIMessage,
   ChatHistoryMessage,
   EmbeddingDebug,
   RagQueryDebug,
   RagSource,
+  ToolDefinition,
   ToolCall,
   ToolExecutionResult,
   ToolResultRecord
 } from "./types";
 
 const MAX_ITERATIONS = 6;
-const AVAILABLE_TOOL_NAMES = new Set<string>(TOOLS.map(tool => tool.name));
+const SEARCH_MODE_TOOL_NAMES = new Set<string>(["general_chat", "rag_search"]);
 const GRAPH_CONTINUE_TOOLS = new Set([
   "app_builder_graph_search"
 ]);
@@ -62,6 +64,19 @@ interface ContextualizedRequest {
   needs_clarification: boolean;
   clarification_question: string | null;
   resolved_references: ResolvedReference[];
+}
+
+export function parseAgentMode(value: unknown): AgentMode | null {
+  if (value == null || value === "" || value === "default") return "default";
+  if (value === "search") return "search";
+  return null;
+}
+
+function getToolsForAgentMode(mode: AgentMode): readonly ToolDefinition[] {
+  if (mode === "search") {
+    return TOOLS.filter(tool => SEARCH_MODE_TOOL_NAMES.has(tool.name));
+  }
+  return TOOLS;
 }
 
 function sanitizeResolvedReferences(value: unknown): ResolvedReference[] {
@@ -1494,17 +1509,23 @@ export async function runAgenticLoop(
   env: Env,
   chatHistory: AIMessage[] = [],
   debugSteps?: DebugStep[],
-  zilcodeSession?: ZilcodeSessionState | null
+  zilcodeSession?: ZilcodeSessionState | null,
+  mode: AgentMode = "default"
 ): Promise<AgenticLoopResult> {
+  const activeTools = getToolsForAgentMode(mode);
+  const activeToolNames = new Set<string>(activeTools.map(tool => tool.name));
+  const searchOnlyMode = mode === "search";
+
   addDebugStep(debugSteps, "agent.start", "start", "Bắt đầu agentic loop.", {
     message_chars: userMessage.length,
     history_messages: chatHistory.length,
-    tools: TOOLS.map(tool => tool.name)
+    mode,
+    tools: activeTools.map(tool => tool.name)
   });
 
   const isConfirmation = isPlanConfirmation(userMessage);
   const confirmedPlanId = isConfirmation ? findImmediatePreviousPlanId(chatHistory) : null;
-  if (confirmedPlanId && zilcodeSession) {
+  if (!searchOnlyMode && confirmedPlanId && zilcodeSession) {
     addDebugStep(debugSteps, "agent.confirmation_auto_apply", "start", "User xác nhận pending App Builder plan, tự gọi apply_change.", {
       plan_id: confirmedPlanId
     });
@@ -1540,13 +1561,13 @@ export async function runAgenticLoop(
     clarifiedUserMessage,
     chatHistory,
     contextualizedRequest.resolved_references
-  );
+  ) && !searchOnlyMode;
 
   const appOrdinal = extractAppOrdinalReference(userMessage) ?? extractAppOrdinalReference(clarifiedUserMessage);
   const ordinalApp = appOrdinal && isReadOnlyAppInfoIntent(clarifiedUserMessage)
     ? resolveAppOrdinalFromHistory(chatHistory, appOrdinal)
     : null;
-  if (ordinalApp && zilcodeSession) {
+  if (!searchOnlyMode && ordinalApp && zilcodeSession) {
     addDebugStep(debugSteps, "agent.app_ordinal_resolve", "start", "Resolve ứng dụng theo số thứ tự từ lịch sử hội thoại.", {
       ordinal: appOrdinal,
       appid: ordinalApp.appid,
@@ -1876,6 +1897,13 @@ Hãy dùng rewritten_message để hiểu yêu cầu độc lập, nhưng luôn 
     { role: "user", content: userMessage }
   ];
 
+  messages.splice(1, 0, {
+    role: "system",
+    content: mode === "search"
+      ? "Che do hien tai: search. Chi duoc dung general_chat hoac rag_search. Khong doc App Builder graph, khong prepare/apply change, khong thuc hien tao/sua/xoa."
+      : "Che do hien tai: default. Dung tool phu hop voi y dinh cua nguoi dung."
+  });
+
   const toolsCalled: string[] = [];
   const toolResults: ToolResultRecord[] = [];
   const ragSources: RagSource[] = [];
@@ -1894,7 +1922,7 @@ Hãy dùng rewritten_message để hiểu yêu cầu độc lập, nhưng luôn 
     const response = await runChatModel(CHAT_MODEL, {
       max_tokens: TOOL_SELECTION_MAX_TOKENS,
       messages,
-      tools: TOOLS
+      tools: activeTools
     }, env);
 
     if (!response.tool_calls || response.tool_calls.length === 0) {
@@ -1953,7 +1981,7 @@ Hãy dùng rewritten_message để hiểu yêu cầu độc lập, nhưng luôn 
     }
 
     const supportedToolCalls = response.tool_calls.filter(toolCall =>
-      AVAILABLE_TOOL_NAMES.has(toolCall.name)
+      activeToolNames.has(toolCall.name)
       && isToolCallAllowedByPolicy(
         toolCall.name,
         userMessage,
@@ -1963,10 +1991,10 @@ Hãy dùng rewritten_message để hiểu yêu cầu độc lập, nhưng luôn 
       )
     );
     const skippedUnsupportedToolCalls = response.tool_calls
-      .filter(toolCall => !AVAILABLE_TOOL_NAMES.has(toolCall.name))
+      .filter(toolCall => !activeToolNames.has(toolCall.name))
       .map(toolCall => toolCall.name);
     const skippedPolicyToolCalls = response.tool_calls
-      .filter(toolCall => AVAILABLE_TOOL_NAMES.has(toolCall.name)
+      .filter(toolCall => activeToolNames.has(toolCall.name)
         && !isToolCallAllowedByPolicy(
           toolCall.name,
           userMessage,

@@ -2,7 +2,7 @@
 
 import { CORS, EMBEDDING_MODEL, MAX_HISTORY_MESSAGES, type Env } from "./config";
 import { addDebugStep, type DebugStep } from "./debug";
-import { runAgenticLoop, sanitizeChatHistory } from "./agent";
+import { parseAgentMode, runAgenticLoop, sanitizeChatHistory } from "./agent";
 import { TOOLS } from "./tools";
 import {
   handleConversationMessage,
@@ -133,6 +133,13 @@ export default {
             { status: 400, headers: CORS }
           );
         }
+        const mode = parseAgentMode(body.mode);
+        if (!mode) {
+          return Response.json(
+            { success: false, error: "Mode không hợp lệ. Chỉ hỗ trợ: default, search." },
+            { status: 400, headers: CORS }
+          );
+        }
 
         const debugEnabled = body.debug === true;
         debugSteps = debugEnabled ? [] as DebugStep[] : undefined;
@@ -140,6 +147,7 @@ export default {
 
         addDebugStep(debugSteps, "request.received", "ok", "Worker nhận request /chat.", {
           message_chars: body.message.length,
+          mode,
           raw_history_messages: Array.isArray(body.history) ? body.history.length : 0,
           has_zilcode_session: Boolean(zilcodeSession)
         });
@@ -155,7 +163,8 @@ export default {
           env,
           chatHistory,
           debugSteps,
-          zilcodeSession
+          zilcodeSession,
+          mode
         );
 
         addDebugStep(debugSteps, "response.ready", "ok", "Chuẩn bị trả response về client.", {

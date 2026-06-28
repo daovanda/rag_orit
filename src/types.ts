@@ -1,5 +1,7 @@
 import type { TOOLS } from "./tools";
 
+export type ToolDefinition = (typeof TOOLS)[number];
+
 export interface ToolCall {
   id?: string;
   name: string;
@@ -61,7 +63,7 @@ export interface RagCandidate extends StoredChunk {
 
 export interface ChatModelRequest {
   messages: AIMessage[];
-  tools?: typeof TOOLS;
+  tools?: readonly ToolDefinition[];
   max_tokens?: number;
   temperature?: number;
 }
@@ -76,8 +78,11 @@ export interface ChatHistoryMessage {
   content: string;
 }
 
+export type AgentMode = "default" | "search";
+
 export interface ChatRequest {
   message: string;
+  mode?: AgentMode;
   debug?: boolean;
   history?: unknown;
 }

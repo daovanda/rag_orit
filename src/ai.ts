@@ -13,14 +13,13 @@ import {
   type Env
 } from "./config";
 import { addDebugStep, type DebugStep } from "./debug";
-import { TOOLS } from "./tools";
-import type { AIMessage, EmbeddingResult, RagCandidate, RagQueryDebug, RagSource, StoredChunk, ToolExecutionResult, VectorMatch } from "./types";
+import type { AIMessage, EmbeddingResult, RagCandidate, RagQueryDebug, RagSource, StoredChunk, ToolDefinition, ToolExecutionResult, VectorMatch } from "./types";
 
 interface ChatModelRequest {
   messages: AIMessage[];
   max_tokens?: number;
   temperature?: number;
-  tools?: typeof TOOLS;
+  tools?: readonly ToolDefinition[];
 }
 
 interface ChatModelResponse {
