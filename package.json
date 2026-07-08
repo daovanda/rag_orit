@@ -5,6 +5,7 @@
   "scripts": {
     "deploy": "wrangler deploy",
     "dev": "wrangler dev",
+    "dev:remote": "wrangler dev --remote --config wrangler.remote-dev.jsonc",
     "start": "wrangler dev",
     "test": "vitest run",
     "test:watch": "vitest",

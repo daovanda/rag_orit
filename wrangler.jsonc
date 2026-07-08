@@ -44,7 +44,31 @@
 			"binding": "CHUNKS",
 			"id": "806fc1dbdf0c4a8b90150ed6b664a200"
 		}
-	]
+	],
+
+	// Async agent production state.
+	// Full setup guide: doc/async-jobs-production-setup.md
+	// Create with: npx wrangler d1 create ragorit-agent-db
+	// Apply migration: npx wrangler d1 migrations apply ragorit-agent-db --remote
+	// Bound as env.DB for conversation/job/pending action state.
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "ragorit-agent-db",
+			"database_id": "d24f3fe5-74db-4820-a319-7150290b341e"
+		}
+	],
+
+	// Production queue for background agent jobs.
+	// Created with: npx wrangler queues create ragorit-agent-jobs
+	"queues": {
+		"producers": [
+			{ "binding": "AGENT_JOBS", "queue": "ragorit-agent-jobs" }
+		],
+		"consumers": [
+			{ "queue": "ragorit-agent-jobs", "max_batch_size": 1, "max_batch_timeout": 1 }
+		]
+	},
 
 	/**
 	 * Secrets (set via CLI, never in this file):

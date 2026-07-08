@@ -1,0 +1,54 @@
+/**
+ * Remote dev config.
+ *
+ * Wrangler 4.88 reports: "Queues are not yet supported in wrangler dev remote mode."
+ * This config intentionally omits AGENT_JOBS so /messages falls back to ctx.waitUntil
+ * while still using real remote D1/KV/Vectorize/AI bindings.
+ *
+ * Production uses wrangler.jsonc, which binds AGENT_JOBS to ragorit-agent-jobs.
+ */
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "ragorit",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-05-07",
+	"observability": {
+		"enabled": true
+	},
+	"upload_source_maps": true,
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
+	"keep_vars": true,
+
+	"vars": {
+		"ZILCODE_BASE": "https://dvnb.zilcode.vn",
+		"SESSION_TTL_SECONDS": "28800"
+	},
+
+	"ai": {
+		"binding": "AI"
+	},
+
+	"vectorize": [
+		{
+			"binding": "VECTORIZE",
+			"index_name": "zilcode-docs"
+		}
+	],
+
+	"kv_namespaces": [
+		{
+			"binding": "CHUNKS",
+			"id": "806fc1dbdf0c4a8b90150ed6b664a200"
+		}
+	],
+
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "ragorit-agent-db",
+			"database_id": "d24f3fe5-74db-4820-a319-7150290b341e"
+		}
+	]
+}

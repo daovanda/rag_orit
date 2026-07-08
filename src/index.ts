@@ -9,7 +9,12 @@ import {
   handleCreateConversation,
   handleDeleteConversation,
   handleGetConversation,
-  handleListConversations
+  handleGetJob,
+  handleGetJobEvents,
+  handleListConversations,
+  handleCancelPendingAction,
+  handleConfirmPendingAction,
+  runConversationJob
 } from "./conversations";
 import { handleZilcodeLogin, handleZilcodeLogout, handleZilcodeMe, handleZilcodeSelectRoleOrg, loadZilcodeSession } from "./zilcode";
 import type { ChatRequest } from "./types";
@@ -33,7 +38,7 @@ async function handleRoute(handler: () => Promise<Response>, fallbackMessage: st
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 
     const url = new URL(request.url);
 
@@ -100,8 +105,36 @@ export default {
     const conversationMessageMatch = url.pathname.match(/^\/conversations\/([^/]+)\/messages$/);
     if (conversationMessageMatch && request.method === "POST") {
       return handleRoute(
-        () => handleConversationMessage(request, env, decodeURIComponent(conversationMessageMatch[1])),
+        () => handleConversationMessage(request, env, decodeURIComponent(conversationMessageMatch[1]), ctx),
         "Lỗi gửi tin nhắn."
+      );
+    }
+
+    const jobEventsMatch = url.pathname.match(/^\/jobs\/([^/]+)\/events$/);
+    if (jobEventsMatch && request.method === "GET") {
+      return handleRoute(
+        () => handleGetJobEvents(request, env, decodeURIComponent(jobEventsMatch[1])),
+        "Lỗi tải sự kiện job."
+      );
+    }
+
+    const jobMatch = url.pathname.match(/^\/jobs\/([^/]+)$/);
+    if (jobMatch && request.method === "GET") {
+      return handleRoute(
+        () => handleGetJob(request, env, decodeURIComponent(jobMatch[1])),
+        "Lỗi tải trạng thái job."
+      );
+    }
+
+    const pendingActionMatch = url.pathname.match(/^\/pending-actions\/([^/]+)\/(confirm|cancel)$/);
+    if (pendingActionMatch && request.method === "POST") {
+      const actionId = decodeURIComponent(pendingActionMatch[1]);
+      const action = pendingActionMatch[2];
+      return handleRoute(
+        () => action === "confirm"
+          ? handleConfirmPendingAction(request, env, actionId, ctx)
+          : handleCancelPendingAction(request, env, actionId),
+        "Lỗi xử lý pending action."
       );
     }
 
@@ -226,6 +259,18 @@ export default {
     }
 
     return new Response("Không tìm thấy", { status: 404, headers: CORS });
+  },
+
+  async queue(batch: MessageBatch<{ job_id: string }>, env: Env): Promise<void> {
+    for (const message of batch.messages) {
+      try {
+        await runConversationJob(env, String(message.body?.job_id || ""));
+        message.ack();
+      } catch (error) {
+        console.error("Agent job failed", error);
+        message.retry();
+      }
+    }
   }
 };
 

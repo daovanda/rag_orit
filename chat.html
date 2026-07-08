@@ -839,6 +839,30 @@
     font-size: 13px;
   }
 
+  .pending-action-panel {
+    margin-top: 8px;
+    border: 0.5px solid #c7d2fe;
+    border-radius: 10px;
+    background: #eef2ff;
+    color: #1f2937;
+    padding: 10px 12px;
+    font-size: 13px;
+    display: grid;
+    gap: 8px;
+    max-width: min(100%, 640px);
+  }
+
+  .pending-action-panel strong {
+    color: #312e81;
+    font-size: 13px;
+  }
+
+  .pending-action-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
   .generated-image {
     display: block;
     max-width: 100%;
@@ -1779,6 +1803,9 @@
         message.debug_steps || []
       );
     });
+    if (data.conversation.pending_action?.status === 'waiting_confirmation') {
+      renderPendingActionControls(data.conversation.pending_action);
+    }
     renderConversationList();
     setAuthStatus(`Đã mở đoạn chat ${title}.`, true);
   }
@@ -2087,6 +2114,111 @@
     return details;
   }
 
+  function renderPendingActionControls(action) {
+    if (!action || !action.action_id) return null;
+    const container = document.getElementById('messages');
+    const msg = document.createElement('div');
+    msg.className = 'msg assistant';
+
+    const panel = document.createElement('div');
+    panel.className = 'pending-action-panel';
+
+    const title = document.createElement('strong');
+    title.textContent = 'Kế hoạch đang chờ xác nhận';
+    panel.appendChild(title);
+
+    const detail = document.createElement('div');
+    detail.textContent = `Plan ID: ${action.plan_id || '-'} · Action ID: ${action.action_id}`;
+    panel.appendChild(detail);
+
+    const actions = document.createElement('div');
+    actions.className = 'pending-action-actions';
+
+    const confirmButton = document.createElement('button');
+    confirmButton.type = 'button';
+    confirmButton.className = 'suggestion-btn';
+    confirmButton.textContent = 'Xác nhận thực hiện';
+    confirmButton.onclick = () => confirmPendingAction(action.action_id);
+    actions.appendChild(confirmButton);
+
+    const cancelButton = document.createElement('button');
+    cancelButton.type = 'button';
+    cancelButton.className = 'suggestion-btn';
+    cancelButton.textContent = 'Hủy';
+    cancelButton.onclick = () => cancelPendingAction(action.action_id);
+    actions.appendChild(cancelButton);
+
+    panel.appendChild(actions);
+    msg.appendChild(panel);
+    container.appendChild(msg);
+    container.scrollTop = container.scrollHeight;
+    return msg;
+  }
+
+  function formatWorkedTime(workedMs) {
+    if (typeof workedMs !== 'number' || !Number.isFinite(workedMs) || workedMs < 0) return '';
+    if (workedMs < 1000) return `${Math.max(1, Math.round(workedMs))}ms`;
+    return `${(workedMs / 1000).toFixed(workedMs < 10000 ? 1 : 0)}s`;
+  }
+
+  async function pollJobUntilDone(jobId, conversationId, startedAt = performance.now()) {
+    let delayMs = 1200;
+    for (let attempt = 0; attempt < 240; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+      const data = await apiFetch(`/jobs/${encodeURIComponent(jobId)}`, { method: 'GET' });
+      const job = data.job || {};
+      const status = job.status || 'unknown';
+      setAuthStatus(job.progress_text || `Job ${jobId}: ${status}`, status === 'succeeded');
+
+      if (['succeeded', 'waiting_confirmation', 'failed', 'cancelled', 'expired'].includes(status)) {
+        removeTyping();
+        await selectConversation(conversationId);
+        await loadConversationList();
+        const workedMs = performance.now() - startedAt;
+        if (status === 'waiting_confirmation') {
+          setAuthStatus(`Kế hoạch đã sẵn sàng và đang chờ xác nhận. Worked ${formatWorkedTime(workedMs)}.`, true);
+        } else if (status === 'succeeded') {
+          setAuthStatus(`Agent đã hoàn tất. Worked ${formatWorkedTime(workedMs)}.`, true);
+        } else {
+          setAuthStatus(job.error || `Job kết thúc với trạng thái ${status}.`);
+        }
+        return data;
+      }
+
+      delayMs = Math.min(5000, Math.round(delayMs * 1.15));
+    }
+    throw new Error('Job chạy quá lâu nhưng chưa có kết quả. Hãy mở lại đoạn chat hoặc thử kiểm tra trạng thái job sau.');
+  }
+
+  async function confirmPendingAction(actionId) {
+    if (!actionId) return;
+    appendTyping();
+    try {
+      const data = await apiFetch(`/pending-actions/${encodeURIComponent(actionId)}/confirm`, { method: 'POST' });
+      if (data.job_id) {
+        await pollJobUntilDone(data.job_id, data.conversation_id || currentConversationId);
+      } else {
+        removeTyping();
+        await selectConversation(currentConversationId);
+      }
+    } catch (err) {
+      removeTyping();
+      setAuthStatus(err.message || 'Không xác nhận được kế hoạch.');
+    }
+  }
+
+  async function cancelPendingAction(actionId) {
+    if (!actionId) return;
+    try {
+      await apiFetch(`/pending-actions/${encodeURIComponent(actionId)}/cancel`, { method: 'POST' });
+      await selectConversation(currentConversationId);
+      await loadConversationList();
+      setAuthStatus('Đã hủy kế hoạch đang chờ xác nhận.', true);
+    } catch (err) {
+      setAuthStatus(err.message || 'Không hủy được kế hoạch.');
+    }
+  }
+
   function appendMessage(role, content, tools = [], images = [], sources = [], embeddingDebug = null, ragQueryDebug = null, debugSteps = []) {
     const empty = document.getElementById('emptyState');
     if (empty) empty.remove();
@@ -2252,9 +2384,12 @@
 
     try {
       const conversationId = await ensureConversation();
+      const requestStartedAt = performance.now();
+      const headers = getZilcodeHeaders();
+      headers['Idempotency-Key'] = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
       const res = await fetch(getUrl() + `/conversations/${encodeURIComponent(conversationId)}/messages`, {
         method: 'POST',
-        headers: getZilcodeHeaders(),
+        headers,
         body: JSON.stringify({
           message: text,
           mode: requestMode,
@@ -2262,23 +2397,17 @@
         })
       });
 
-      removeTyping();
-
       const data = await readApiJson(res);
 
-      if (data.success) {
-        appendMessage(
-          'assistant',
-          data.answer || '',
-          data.tools_called || data.message?.tools_called || [],
-          data.images || [],
-          data.sources || [],
-          data.embedding_debug || null,
-          data.rag_query_debug || null,
-          data.debug_steps || []
-        );
+      if (data.success && data.job_id) {
+        setAuthStatus('Đã gửi yêu cầu. Agent đang chạy nền...', true);
+        await pollJobUntilDone(data.job_id, conversationId, requestStartedAt);
+      } else if (data.success) {
+        removeTyping();
+        await selectConversation(conversationId);
         await loadConversationList();
       } else {
+        removeTyping();
         const msg = document.createElement('div');
         msg.className = 'msg assistant';
         const err = document.createElement('div');
