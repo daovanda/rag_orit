@@ -381,16 +381,21 @@ async function buildAppBuilderGraphContext(
   });
 
   const context = buildGraphFromBlueprint(blueprint);
-  const expiresAt = now + GRAPH_CONTEXT_CACHE_TTL_MS;
-  graphContextCache.set(cacheKey, { expiresAt, context });
+  const shouldCache = shouldCacheGraphContext(context);
+  const expiresAt = shouldCache ? now + GRAPH_CONTEXT_CACHE_TTL_MS : now;
+  if (shouldCache) graphContextCache.set(cacheKey, { expiresAt, context });
   return {
     ...context,
     cache: {
       hit: false,
       cache_key: cacheKey,
-      expires_in_ms: GRAPH_CONTEXT_CACHE_TTL_MS
+      expires_in_ms: shouldCache ? GRAPH_CONTEXT_CACHE_TTL_MS : 0
     }
   };
+}
+
+function shouldCacheGraphContext(context: GraphContext): boolean {
+  return context.nodes.some(node => node.type === "app");
 }
 
 function buildGraphFromBlueprint(blueprint: Record<string, unknown>): GraphContext {
@@ -447,7 +452,15 @@ function buildGraphFromBlueprint(blueprint: Record<string, unknown>): GraphConte
 
   const inventory = asRecord(asRecord(blueprint.app_builder_records)?.inventory) ?? {};
   const collections = asRecord(asRecord(blueprint.app_builder_records)?.collections) ?? {};
-  const apps = toRecords(inventory.apps);
+  const inventoryApps = toRecords(inventory.apps);
+  const sessionApps = toRecords(blueprint.session_apps);
+  const apps: Record<string, unknown>[] = inventoryApps.length
+    ? inventoryApps
+    : sessionApps.map<Record<string, unknown>>(app => ({
+      ...app,
+      source: "session_apps_fallback",
+      fallback_reason: "App Builder n_app inventory was empty or unavailable; this node comes from the authenticated session apps list."
+    }));
 
   for (const app of apps) {
     const appid = stringValue(ci(app, "appid") ?? fallbackId(app, "app"));
@@ -472,7 +485,7 @@ function buildGraphFromBlueprint(blueprint: Record<string, unknown>): GraphConte
       id: appNodeId,
       type: "app",
       label: labelOf(app, ["appname", "app_name", "name", "appcode"], appNodeId),
-      summary: compactRecord(app, ["appid", "appname", "appcode", "description", "siteid", "seqno", "active", "apptype"]),
+      summary: compactRecord(app, ["appid", "appname", "app_name", "appcode", "description", "siteid", "seqno", "active", "apptype", "source", "fallback_reason"]),
       counts: {
         services: services.length,
         tables: tables.length,
@@ -1170,6 +1183,7 @@ function buildOverviewResponse(context: GraphContext, args: Record<string, unkno
     answer_facts: buildAnswerFactsFromSelection(context, overviewNodes, overviewEdges, overviewNodes.map(node => node.id)),
     apps_count: allApps.length,
     apps,
+    graph_quality: buildGraphQuality(context),
     graph_counts: graphCounts(context.nodes, context.edges),
     truncated: {
       apps: allApps.length > maxApps,
@@ -1178,6 +1192,34 @@ function buildOverviewResponse(context: GraphContext, args: Record<string, unkno
     },
     cache: context.cache,
     errors: collectErrors(context.blueprint)
+  };
+}
+
+function buildGraphQuality(context: GraphContext): Record<string, unknown> {
+  const appBuilderRecords = asRecord(context.blueprint.app_builder_records);
+  const inventory = asRecord(appBuilderRecords?.inventory);
+  const sessionApps = toRecords(context.blueprint.session_apps);
+  const inventoryApps = toRecords(inventory?.apps);
+  const graphApps = context.nodes.filter(node => node.type === "app");
+  const usedSessionAppsFallback = graphApps.some(node => asRecord(node.summary)?.source === "session_apps_fallback");
+  const errors = collectErrors(context.blueprint);
+
+  return {
+    status: graphApps.length
+      ? usedSessionAppsFallback ? "fallback_session_apps" : "ok"
+      : "incomplete_no_apps",
+    graph_apps_count: graphApps.length,
+    inventory_apps_count: inventoryApps.length,
+    session_apps_count: sessionApps.length,
+    used_session_apps_fallback: usedSessionAppsFallback,
+    cached: context.cache?.hit === true,
+    record_errors_count: errors.record_errors_count,
+    app_errors_count: errors.app_errors_count,
+    note: graphApps.length
+      ? usedSessionAppsFallback
+        ? "Không đọc được danh sách app từ App Builder n_app inventory; overview đang dùng danh sách app từ session đăng nhập nên chỉ đủ cho skeleton app, chưa đủ để kết luận chi tiết table/window/menu."
+        : "Đã đọc được app từ App Builder metadata inventory."
+      : "Không có app node trong graph; đây là kết quả không hoàn chỉnh, thường do thiếu quyền đọc App Builder metadata hoặc API metadata trả rỗng."
   };
 }
 
@@ -1309,7 +1351,7 @@ function buildCreationSchema(args: Record<string, unknown>): Record<string, unkn
     semantic_guide: ZILCODE_SEMANTIC_GUIDE,
     note: "Dùng app_builder_prepare_change để tạo pending plan. Chỉ dùng app_builder_apply_change sau khi user xác nhận rõ ràng.",
     graph_first_rule: [
-      "1. Gọi app_builder_graph_overview để nắm skeleton hệ thống.",
+      "1. Gọi app_builder_graph_overview để nắm skeleton cấp root/app và danh sách app.",
       "2. Gọi app_builder_graph_search nếu cần tìm app/table/window/tab/field hiện có.",
       "3. Gọi app_builder_graph_subgraph để mở vùng liên quan.",
       "4. Gọi app_builder_node_detail cho node cần sửa/thêm nhanh.",
@@ -1352,17 +1394,17 @@ function buildCreationSchema(args: Record<string, unknown>): Record<string, unkn
         service: ["serviceid của service hiện có hoặc create service trước"],
         appservice: ["appid", "serviceid"],
         table: ["serviceid", "tablename", "alias", "tabletype"],
-        column: ["tableid or table reference", "columnname", "datatype/columntype", "domainid/linktableid/linkcolumn when needed", "primary/display/search flags when needed"],
+        column: ["tableid hoặc table reference", "columnname", "datatype/columntype", "domainid/linktableid/linkcolumn khi cần", "các cờ primary/display/search khi cần"],
         window: ["appid", "windowname"],
         tab: ["windowid", "tableid", "tabname", "seqno"],
-        field: ["tabid", "columnid or columnname", "fieldname/label", "seqno", "controltype/datatype when needed"],
+        field: ["tabid", "columnid hoặc columnname", "fieldname/label", "seqno", "controltype/datatype khi cần"],
         menu: ["appid", "menuname", "linkwindowid", "seqno"],
-        workflow: ["workflowid/workflowname/appid; wfstep has roleid/userid/windowid/status/duration"],
-        report: ["reportid/reportname/reporttype/appid/tableid; menu can link reportid"],
-        gis: ["map/maplayer/layer metadata; menu.maplayer and table.maplayer connect UI to GIS layer"],
-        site_user_org: ["siteid scopes metadata; user/org/role bindings come from roleuser/orguser"],
-        archive: ["archive records link archive/history behavior to tableid"],
-        role_access: ["roleapp for app access", "rolemenu for menu access", "access for table permissions when needed"],
+        workflow: ["workflowid/workflowname/appid; wfstep có roleid/userid/windowid/status/duration"],
+        report: ["reportid/reportname/reporttype/appid/tableid; menu có thể link reportid"],
+        gis: ["metadata map/maplayer/layer; menu.maplayer và table.maplayer nối UI với GIS layer"],
+        site_user_org: ["siteid giới hạn phạm vi metadata; user/org/role binding đến từ roleuser/orguser"],
+        archive: ["archive record nối cấu hình archive/history với tableid"],
+        role_access: ["roleapp cho quyền vào app", "rolemenu cho quyền vào menu", "access cho quyền table khi cần"],
         cache: ["delete n_cache rows for changed app/window after UI metadata changes"]
       },
       domain_lookup: {
@@ -1622,19 +1664,19 @@ function buildFlowSummary(nodes: AppBuilderNode[], edges: AppBuilderEdge[]): str
     summary.push("Luồng quyền đã thấy: role -> roleapp -> app, role -> rolemenu -> menu, và role -> access -> table.");
   }
   if (edgeCounts.app_has_workflow || edgeCounts.tab_uses_workflow || edgeCounts.workflow_has_step) {
-    summary.push("Da thay workflow runtime: app -> workflow -> wfstep; tab co the gan workflowid va step co the gan role/user/window.");
+    summary.push("Đã thấy workflow runtime: app -> workflow -> wfstep; tab có thể gắn workflowid và step có thể gắn role/user/window.");
   }
   if (edgeCounts.app_has_report || edgeCounts.report_uses_table || edgeCounts.menu_links_report) {
-    summary.push("Da thay report runtime: app -> report; report co the dung tableid lam data source va menu co the link report qua reportid.");
+    summary.push("Đã thấy report runtime: app -> report; report có thể dùng tableid làm data source và menu có thể link report qua reportid.");
   }
   if (edgeCounts.app_builder_has_map || edgeCounts.map_has_layer || edgeCounts.layer_uses_table || edgeCounts.menu_links_layer) {
-    summary.push("Da thay GIS runtime: map -> layer; layer/menu/table co the lien ket bang maplayer/tableid/serviceid.");
+    summary.push("Đã thấy GIS runtime: map -> layer; layer/menu/table có thể liên kết bằng maplayer/tableid/serviceid.");
   }
   if (edgeCounts.table_has_archive || edgeCounts.app_has_archive) {
-    summary.push("Da thay archive metadata gan voi table; archive la cau hinh lich su/luu vet, khong phai du lieu business truc tiep.");
+    summary.push("Đã thấy archive metadata gắn với table; archive là cấu hình lịch sử/lưu vết, không phải dữ liệu nghiệp vụ trực tiếp.");
   }
   if (edgeCounts.role_has_user_binding || edgeCounts.org_has_user_binding) {
-    summary.push("Da thay identity binding: role -> roleuser -> user va org -> orguser -> user.");
+    summary.push("Đã thấy identity binding: role -> roleuser -> user và org -> orguser -> user.");
   }
 
   if (!summary.length) {
@@ -1953,6 +1995,14 @@ function buildInferredNotes(nodes: AppBuilderNode[], edges: AppBuilderEdge[]): s
   ];
   const edgeCounts = countBy(edges, edge => edge.type);
   const nodeCounts = countBy(nodes, node => node.type);
+  const usesSessionAppsFallback = nodes.some(node => asRecord(node.summary)?.source === "session_apps_fallback");
+
+  if (usesSessionAppsFallback) {
+    notes.push("Danh sách app trong phạm vi này đến từ session đăng nhập vì App Builder n_app inventory rỗng/không đọc được; chỉ coi đây là skeleton app, chưa đủ để kết luận chi tiết table/window/menu.");
+  }
+  if (!nodeCounts.app && nodeCounts.root) {
+    notes.push("Graph chỉ có root App Builder và chưa có app node; đây là kết quả không hoàn chỉnh, thường cần kiểm tra quyền role/org hoặc đọc lại App Builder metadata.");
+  }
 
   if (nodeCounts.table && !edgeCounts.service_has_table) {
     notes.push("Có table trong phạm vi này nhưng chưa thấy cạnh service_has_table; cần mở rộng subgraph nếu muốn xác minh service binding.");
@@ -1967,13 +2017,13 @@ function buildInferredNotes(nodes: AppBuilderNode[], edges: AppBuilderEdge[]): s
     notes.push("Cạnh app_has_table trong graph là tiện ích để gom bảng theo app; theo metadata Zilcode, binding đúng nên được xác minh qua n_appservice/n_service/n_table.");
   }
   if (nodeCounts.workflow && !edgeCounts.workflow_has_step) {
-    notes.push("Co workflow trong pham vi nay nhung chua thay wfstep; can mo rong detail/subgraph neu muon giai thich tung buoc BPMN.");
+    notes.push("Có workflow trong phạm vi này nhưng chưa thấy wfstep; cần mở rộng detail/subgraph nếu muốn giải thích từng bước BPMN.");
   }
   if (nodeCounts.report && !edgeCounts.report_uses_table) {
-    notes.push("Co report trong pham vi nay nhung chua thay report_uses_table; report co the thieu tableid hoac data source nam trong contentjson.");
+    notes.push("Có report trong phạm vi này nhưng chưa thấy report_uses_table; report có thể thiếu tableid hoặc data source nằm trong contentjson.");
   }
   if (nodeCounts.layer && !edgeCounts.layer_uses_table && !edgeCounts.layer_uses_service) {
-    notes.push("Co layer trong pham vi nay nhung chua thay link table/service; can kiem tra layerid/maplayer/url runtime.");
+    notes.push("Có layer trong phạm vi này nhưng chưa thấy link table/service; cần kiểm tra layerid/maplayer/url runtime.");
   }
 
   return notes;
@@ -2239,7 +2289,7 @@ function buildOperationPlanFacts(selectedNodes: AppBuilderNode[]): Record<string
   };
 
   return {
-    source: "static_plan_templates_aligned_with_app_builder_write",
+    source: "deterministic_operation_order_aligned_with_app_builder_write",
     relevant_to_scope: {
       has_app: types.has("app"),
       has_table: types.has("table"),
@@ -2366,14 +2416,14 @@ function updateImpactForNodeType(type: string): string[] {
     roleapp: ["Ảnh hưởng quyền role vào app."],
     rolemenu: ["Ảnh hưởng quyền role vào menu/navigation."],
     access: ["Ảnh hưởng quyền thao tác trên table qua các cờ noinsert/noupdate/nodelete/noselect/noexport."],
-    workflow: ["Anh huong cac tab gan workflowid va cac wfstep runtime.", "Can kiem tra wfstep role/user/window binding truoc khi sua/xoa."],
-    wfstep: ["Anh huong mot buoc trong BPMN workflow: role/user/window/status/duration."],
-    report: ["Anh huong report/analyst va menu co reportid tro toi report nay.", "Data source co the nam o tableid hoac contentjson."],
-    map: ["Anh huong cau hinh GIS map va cac layer thuoc map."],
-    layer: ["Anh huong GIS layer, menu maplayer, table maplayer va service/table binding."],
-    archive: ["Anh huong cau hinh archive/history cua table, khong phai du lieu business truc tiep."],
-    user: ["Anh huong roleuser/orguser binding va quyen truy cap thuc te cua user."],
-    org: ["Anh huong orguser binding va cay to chuc."]
+    workflow: ["Ảnh hưởng các tab gắn workflowid và các wfstep runtime.", "Cần kiểm tra wfstep role/user/window binding trước khi sửa/xóa."],
+    wfstep: ["Ảnh hưởng một bước trong BPMN workflow: role/user/window/status/duration."],
+    report: ["Ảnh hưởng report/analyst và menu có reportid trỏ tới report này.", "Data source có thể nằm ở tableid hoặc contentjson."],
+    map: ["Ảnh hưởng cấu hình GIS map và các layer thuộc map."],
+    layer: ["Ảnh hưởng GIS layer, menu maplayer, table maplayer và service/table binding."],
+    archive: ["Ảnh hưởng cấu hình archive/history của table, không phải dữ liệu nghiệp vụ trực tiếp."],
+    user: ["Ảnh hưởng roleuser/orguser binding và quyền truy cập thực tế của user."],
+    org: ["Ảnh hưởng orguser binding và cây tổ chức."]
   };
   return impacts[type] ?? ["Cần xem verified_relations/dependency_summary trước khi update để đánh giá ảnh hưởng."];
 }

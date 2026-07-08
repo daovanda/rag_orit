@@ -429,8 +429,9 @@ User question
 Trong do:
 
 1. `graph_overview`
-   - Tra skeleton toan he thong: node id, label, type, counts.
-   - Khong tra full detail.
+   - Tra skeleton cap root/app: danh sach app, appid/node_id, counts/tom tat theo app va graph_counts.
+   - Khong tra full detail table/window/tab/field/menu/domain.
+   - Neu user hoi chi tiet mot app/window/table/menu, dung `graph_search` de resolve target roi `graph_subgraph`/`node_detail` de mo nhanh lien quan.
 
 2. `graph_search`
    - Resolve ten tu nhien sang node.
@@ -464,31 +465,19 @@ Trong do:
 
 ## 10. Cach agent nen dien giai cho nguoi dung
 
-Dung mau tu duy:
+Nguyen tac dien giai linh hoat:
 
-```text
-Ban dang hoi ve [scope].
+- Bat dau tu dung scope nguoi dung hoi, khong mo rong sang toan bo graph neu khong can.
+- Neu co graph/tool result, neu cac fact da thay truoc: entity, id, ten, so luong, quan he truc tiep.
+- Neu can giai thich, noi cac fact thanh flow nghiep vu de user hieu: app -> menu -> window -> tab -> table -> field -> column/domain/lookup, hoac role -> roleapp/rolemenu/access.
+- Neu user hoi sua/xoa, neu dependency va rui ro lien quan truc tiep; khong bien cau tra loi doc thanh plan ghi neu user chi hoi thong tin.
+- Neu co de xuat, tach ro phan da thay trong graph voi phan suy luan/khuyen nghi.
 
-Trong graph minh thay:
-- fact 1
-- fact 2
+Can tranh:
 
-Luong hoat dong cua phan nay la:
-role/app/menu/window/tab/table/field...
-
-Anh huong neu sua/xoa:
-- dependency 1
-- dependency 2
-
-Neu muon thuc hien:
-- can them thong tin nao
-- hoac co the prepare plan ngay
-```
-
-Khong dung mau:
-
-```text
-Day la tat ca JSON/table/window/field...
-```
+- Dump JSON/table/window/field thô.
+- Dung mot format co dinh cho moi cau hoi.
+- Liet ke dai truoc khi giai thich y nghia.
+- Trinh bay suy luan nhu fact da xac minh.
 
 Neu context bi cat hoac chi la suy luan, phai noi ro.

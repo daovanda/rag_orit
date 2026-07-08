@@ -624,35 +624,23 @@ Ví dụ preview update:
 
 ## 16. Quy tắc phản hồi
 
-Trước khi apply thành công, không dùng các câu:
+Trước khi apply thành công:
 
-```text
-Đã sửa.
-Đã xóa.
-Đã cập nhật.
-```
-
-Trước khi apply chỉ nói:
-
-```text
-Dự kiến thay đổi...
-Tôi sẽ cập nhật...
-Bạn xác nhận...
-```
+- Không nói như thể dữ liệu đã được ghi.
+- Nêu rõ đây là preview/pending plan.
+- Nêu đối tượng, thay đổi dự kiến và yêu cầu xác nhận.
 
 Sau khi apply thành công:
 
-```text
-Đã cập nhật thành công.
-Trường A đã đổi từ "old" sang "new".
-```
+- Nêu operation đã chạy thành công.
+- Nêu field/record bị ảnh hưởng nếu tool result có dữ liệu đó.
+- Nêu bước verify/reload nếu cần.
 
 Nếu apply lỗi:
 
-```text
-Chưa có thay đổi nào được lưu.
-Lỗi xảy ra ở bước...
-```
+- Nêu bước lỗi và lỗi chính bằng ngôn ngữ dễ hiểu.
+- Nói rõ đã ghi được bước nào hay chưa ghi gì.
+- Không khuyến khích apply lại plan cũ nếu plan đã partial hoặc đã bị vô hiệu hóa.
 
 ## 17. Xử lý mơ hồ
 
@@ -688,4 +676,3 @@ Thứ tự triển khai khuyến nghị:
 16. SQL/source tools
 
 Không nên bắt đầu bằng tool ghi tổng quát hoặc SQL/source write.
-

@@ -2044,12 +2044,6 @@
     if (input) input.focus();
   }
 
-  function resetAgentMode() {
-    selectedAgentMode = 'default';
-    renderAgentModeChip();
-    closeSlashMenu();
-  }
-
   function removeLeadingSlashCommand(value) {
     return String(value || '').replace(/^\s*\/[a-zA-Z]+\s*/, '');
   }
@@ -2428,7 +2422,8 @@
     btn.disabled = true;
     input.value = '';
     input.style.height = 'auto';
-    resetAgentMode();
+    setAgentMode(requestMode);
+    closeSlashMenu();
 
     appendMessage('user', text);
     appendTyping();

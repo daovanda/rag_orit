@@ -97,6 +97,70 @@ ok(
   "plain search with no match should not continue automatically"
 );
 
+ok(
+  shouldContinueAfterToolResult(
+    "app_builder_creation_schema",
+    JSON.stringify({ mode: "creation_schema" }),
+    "hãy tạo app Quản lý kho",
+    "Tạo app Quản lý kho."
+  ),
+  "direct write requests should continue after creation_schema so the model can prepare_change"
+);
+
+ok(
+  !shouldContinueAfterToolResult(
+    "app_builder_creation_schema",
+    JSON.stringify({ mode: "creation_schema" }),
+    "hướng dẫn tôi tạo app Quản lý kho",
+    "Hướng dẫn quy trình tạo app Quản lý kho."
+  ),
+  "how-to requests should not continue from creation_schema into prepare_change"
+);
+
+ok(
+  !shouldContinueAfterToolResult(
+    "app_builder_creation_schema",
+    JSON.stringify({ mode: "creation_schema" }),
+    "đừng tạo app Quản lý kho",
+    "Không tạo app Quản lý kho."
+  ),
+  "negated write requests should not continue from creation_schema into prepare_change"
+);
+
+ok(
+  shouldContinueAfterToolResult(
+    "app_builder_creation_schema",
+    JSON.stringify({ mode: "creation_schema" }),
+    "Đổi nó thành Quản lý phòng trọ",
+    {
+      clarifiedMessage: "Đổi tên app có appid 107 thành Quản lý phòng trọ.",
+      chatHistory: [
+        { role: "assistant", content: "Đã thấy app 107: Quản lý nhà trọ." }
+      ],
+      resolvedReferences: [
+        { type: "app", id: "107", name: "Quản lý nhà trọ", source: "history" }
+      ]
+    }
+  ),
+  "contextual write with resolved reference should continue after creation_schema"
+);
+
+ok(
+  !shouldContinueAfterToolResult(
+    "app_builder_creation_schema",
+    JSON.stringify({ mode: "creation_schema" }),
+    "Quản lý phòng trọ",
+    {
+      clarifiedMessage: "Đổi tên app có appid 107 thành Quản lý phòng trọ.",
+      chatHistory: [
+        { role: "assistant", content: "Bạn muốn đổi app 107 thành tên nào?" }
+      ],
+      resolvedReferences: []
+    }
+  ),
+  "rewritten write without resolved reference should not continue after creation_schema"
+);
+
 console.log(JSON.stringify({
   ok: true,
   checks: {

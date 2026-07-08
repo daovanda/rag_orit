@@ -32,7 +32,7 @@ export const TOOLS = [
   {
     name: "app_builder_graph_overview",
     description:
-      "Trả tổng quan App Builder thật ở dạng skeleton graph: root, app, site, service/appservice, table, column, window, tab, field, menu, domain, cache, workflow/wfstep, report, map/layer, archive, user/org/role/access và các cạnh liên kết. Dùng khi user hỏi toàn hệ thống, danh sách app, số lượng hoặc cần bản đồ ban đầu.",
+      "Trả tổng quan App Builder thật ở dạng skeleton cấp root/app: danh sách app, node_id/appid, counts/tóm tắt theo app và graph_counts toàn hệ thống. Tool này KHÔNG trả detail đầy đủ table/window/tab/field/menu/domain. Dùng khi user hỏi toàn hệ thống, danh sách app, số lượng app hoặc cần bản đồ ban đầu; sau đó dùng search/subgraph/node_detail để mở vùng chi tiết.",
     parameters: {
       type: "object",
       properties: {
@@ -40,13 +40,9 @@ export const TOOLS = [
           type: "string",
           description: "Optional appid của App Builder, mặc định 1."
         },
-        max_nodes: {
+        max_apps: {
           type: "string",
-          description: "Số node skeleton tối đa trả về, mặc định 250."
-        },
-        max_edges: {
-          type: "string",
-          description: "Số edge skeleton tối đa trả về, mặc định 500."
+          description: "Số app tối đa trả trong overview, mặc định 100."
         },
         max_records_per_table: {
           type: "string",
@@ -64,7 +60,7 @@ export const TOOLS = [
       properties: {
         query: {
           type: "string",
-          description: "Tên hoặc id cần tìm, ví dụ Order Management, n_table, Customer, window Role."
+          description: "Tên, id hoặc node hint cần tìm, ví dụ app <appid>, window <windowid>, n_table, table metadata, role system."
         },
         types: {
           type: "string",
@@ -91,7 +87,7 @@ export const TOOLS = [
       properties: {
         node_id: {
           type: "string",
-          description: "Một node id từ overview/search, ví dụ app:12 hoặc table:12:34."
+          description: "Một node id từ overview/search, ví dụ app:<appid> hoặc table:<appid>:<tableid>."
         },
         node_ids: {
           type: "string",

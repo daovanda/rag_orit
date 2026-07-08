@@ -2116,7 +2116,16 @@ export async function buildZilcodeAppBuilderBlueprint(
     ? collectBlueprintDetails(appBlueprints, nodeIds, includeFields)
     : [];
   const overview = buildSystemOverview(sessionSummary, appBlueprints, graph, errors);
-  const ignoredSessionAppsCount = listSessionApplicationSummaries(session)
+  const sessionAppsSummary = listSessionApplicationSummaries(session)
+    .map(app => ({
+      appid: app.appid,
+      appname: app.app_name,
+      app_name: app.app_name,
+      appcode: app.app_code,
+      app_code: app.app_code,
+      source: "session_apps"
+    }));
+  const ignoredSessionAppsCount = sessionAppsSummary
     .filter(app => String(app.appid ?? "") !== String(appBuilderApp.appid ?? ""))
     .length;
 
@@ -2132,6 +2141,7 @@ export async function buildZilcodeAppBuilderBlueprint(
       "Graph relationships between app, service, table, column, menu, window, tab, field, domain, cache, role access and relation"
     ],
     session: sessionSummary,
+    session_apps: sessionAppsSummary,
     scan: {
       scope: "app_builder_only",
       app_builder_appid: appBuilderApp.appid,

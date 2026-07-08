@@ -23,7 +23,7 @@ Agent
   |     -> docs / guide / API contract
   |
   |-- app_builder_graph_overview
-  |     -> skeleton graph toan he thong
+  |     -> skeleton cap root/app: danh sach app, appid/node_id, counts
   |
   |-- app_builder_graph_search
   |     -> tim node
@@ -49,10 +49,10 @@ Final answer / Proposed plan / Apply result
 
 ## 2. Nguyen tac chung
 
-- Luon dung `app_builder_graph_overview` truoc khi phan tich App Builder hien tai.
-- Dung `app_builder_graph_search` de resolve ten tu nhien thanh node id.
-- Dung `app_builder_graph_subgraph` de hieu quan he quanh node.
-- Dung `app_builder_node_detail` khi can chi tiet app/table/window/tab/field/menu/domain.
+- Dung `app_builder_graph_overview` khi user hoi tong quan he thong, danh sach app, so luong app, hoac khi da mat ngu can ban. Overview chi la skeleton cap root/app; khong du de ket luan chi tiet table/window/tab/field/menu/domain.
+- Dung `app_builder_graph_search` de resolve ten tu nhien/id thanh node id khi user hoi mot app/table/window/tab/field/menu/domain cu the.
+- Dung `app_builder_graph_subgraph` de hieu quan he quanh node, nhat la cau hoi ve "co nhung gi", "hoat dong ra sao", dependency, impact, table/window/menu lien quan.
+- Dung `app_builder_node_detail` khi can chi tiet app/table/window/tab/field/menu/domain sau khi da resolve dung node.
 - Dung `app_builder_creation_schema` khi user yeu cau tao/sua/xoa.
 - Dung `app_builder_prepare_change` de tao pending plan co plan id.
 - Chi dung `app_builder_apply_change` khi user vua xac nhan ro rang, vi du: "co, thuc hien ke hoach".
@@ -61,6 +61,8 @@ Final answer / Proposed plan / Apply result
 - Neu user noi mo ho, search truoc; neu co nhieu ket qua, hoi lai.
 
 ## 3. Mo hinh graph App Builder
+
+Graph day du cua App Builder co cac nhanh sau, nhung `app_builder_graph_overview` khong tra day du nhanh nay. Overview chi tra root/app skeleton; muon mo nhanh sau thi dung search/subgraph/detail.
 
 ```text
 root:app_builder
@@ -117,7 +119,7 @@ Khong dung RAG thay cho graph khi can du lieu that hien tai. Graph la source of 
 
 Khi user yeu cau tao app moi:
 
-1. `app_builder_graph_overview`
+1. `app_builder_graph_overview` neu can danh sach app hien co hoac can tranh trung ten app.
 2. `app_builder_creation_schema` voi intent `create_app`
 3. Search ten app/app code de tranh trung.
 4. Neu du thong tin, goi `app_builder_prepare_change`.
@@ -147,8 +149,8 @@ Plan operation mau:
   "id": "create_app_1",
   "op": "create_app",
   "record": {
-    "appname": "Order Management",
-    "description": "Manage customers, products, orders and order items"
+    "appname": "<ten ung dung>",
+    "description": "<mo ta muc dich ung dung>"
   }
 }
 ```
@@ -159,8 +161,8 @@ Plan operation mau:
   "op": "create_table",
   "record": {
     "appid": "$create_app_1.appid",
-    "tablename": "orders",
-    "alias": "Orders",
+    "tablename": "<ten_bang_nghiep_vu>",
+    "alias": "<nhan hien thi bang>",
     "tabletype": "table"
   }
 }
@@ -180,7 +182,7 @@ Vi du:
   "op": "create_column",
   "record": {
     "tableid": "$create_table_1.tableid",
-    "columnname": "order_id",
+    "columnname": "<ten_cot>",
     "datatype": "int"
   }
 }
@@ -193,7 +195,7 @@ Khi nhan structured plan, tool se chuyen thanh operations va tu noi app/table/wi
 
 Quy trinh:
 
-1. Overview neu chua co graph moi.
+1. Overview chi khi can danh sach app/root hoac mat ngu can ban.
 2. Search target.
 3. Subgraph quanh target.
 4. Node detail target.
@@ -241,8 +243,8 @@ Khong xoa:
 Neu user hoi thong tin:
 
 - Tra loi dung cau hoi, khong ke lai JSON.
-- Neu hoi tong quan, chi tom tat app/table/window/menu chinh.
-- Neu hoi mot node cu the, chi noi ve node do va quan he truc tiep.
+- Neu hoi tong quan he thong, chi tom tat cac app va diem dang chu y o cap app/root.
+- Neu hoi mot app/table/window/tab/field/menu cu the, phai dung search/subgraph/detail de noi ve node do va quan he truc tiep; khong suy chi tiet tu overview.
 
 Neu user yeu cau tao/sua/xoa:
 
@@ -251,13 +253,13 @@ Neu user yeu cau tao/sua/xoa:
 - Neu du thong tin, prepare plan va tra plan id.
 - Sau apply, bao thanh cong/that bai va buoc verify.
 
-Mau cau:
+Noi dung bat buoc khi da prepare plan:
 
-```text
-Minh da chuan bi ke hoach va chua ghi du lieu vao Zilcode.
-Plan ID: ...
-Neu ban dong y, hay tra loi: "co, thuc hien ke hoach".
-```
+- Noi ro day moi la pending plan, chua ghi du lieu vao Zilcode.
+- Dua `plan_id` dung nhu tool tra ve.
+- Tom tat cac operation chinh va canh bao neu co.
+- Yeu cau user xac nhan ro rang truoc khi apply.
+- Khong them cau van co dinh neu no khong phu hop voi ngu canh hoi dap.
 
 ## 9. Quy tac an toan
 

@@ -79,6 +79,19 @@ const CREATE_REQUIRED_FIELDS: Record<string, string[]> = {
 
 const LEVEL3_COLLECTIONS = new Set(["applications", "tables", "columns", "windows", "tabs", "fields", "menus"]);
 
+const TARGET_NAME_FIELD: Record<string, string> = {
+  app: "appname",
+  application: "appname",
+  table: "tablename",
+  column: "columnname",
+  window: "windowname",
+  tab: "tabname",
+  field: "fieldname",
+  menu: "menuname",
+  domain: "domainname",
+  service: "servicename"
+};
+
 const IMPLICIT_ALLOWED_FIELDS: Record<string, string[]> = {
   services: ["siteid"],
   appservices: ["siteid"],
@@ -86,7 +99,7 @@ const IMPLICIT_ALLOWED_FIELDS: Record<string, string[]> = {
   columns: ["siteid", "domainid", "linktableid", "linkcolumn", "mapcolumn"],
   windows: ["siteid"],
   tabs: ["siteid"],
-  fields: ["siteid"],
+  fields: ["siteid", "domainid", "linktableid", "linkcolumn", "mapcolumn", "options"],
   menus: ["siteid", "menutype"],
   domains: ["appid", "siteid", "domainjson", "domaintype"],
   caches: ["siteid"],
@@ -1278,7 +1291,35 @@ function normalizeRecordAliases(
   for (const [rawKey, value] of Object.entries(record)) {
     output[normalizeRecordKey(target, rawKey, warnings)] = value;
   }
+  applyRenameAlias(target, record, output, warnings);
   return output;
+}
+
+function applyRenameAlias(
+  target: string,
+  input: Record<string, unknown>,
+  output: Record<string, unknown>,
+  warnings: string[]
+): void {
+  const nameField = TARGET_NAME_FIELD[target];
+  if (!nameField) return;
+
+  const renameEntry = Object.entries(input)
+    .map(([key, value]) => ({
+      key,
+      normalized: key
+        .replace(/([a-z])([A-Z])/g, "$1_$2")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "_")
+        .replace(/^_+|_+$/g, ""),
+      value
+    }))
+    .find(entry => ["new_name", "new_title", "new_label", "rename_to", "to_name"].includes(entry.normalized)
+      && hasUsableValue(entry.value));
+
+  if (!renameEntry) return;
+  output[nameField] = renameEntry.value;
+  warnings.push(`Chuẩn hóa field ${renameEntry.key} -> ${nameField}.`);
 }
 
 function getOperationRecordPayload(
@@ -1335,6 +1376,11 @@ function normalizeRecordKey(target: string, key: string, warnings: string[]): st
     menu_name: "menuname",
     domain_id: "domainid",
     domain_name: "domainname",
+    link_table_id: "linktableid",
+    link_column: "linkcolumn",
+    lookup_column: "linkcolumn",
+    lookup_value_column: "linkcolumn",
+    map_column: "mapcolumn",
     cache_id: "cacheid",
     role_id: "roleid",
     roleapp_id: "roleappid",
@@ -1356,9 +1402,25 @@ function normalizeRecordKey(target: string, key: string, warnings: string[]): st
     app: {
       name: "appname",
       app_name: "appname",
-      application_name: "appname"
+      application_name: "appname",
+      display_name: "appname",
+      label: "appname",
+      title: "appname",
+      new_name: "appname"
     },
     column: {
+      display_name: "alias",
+      label: "alias",
+      title: "alias",
+      new_name: "columnname",
+      domain_name: "domainname",
+      domain_ref: "domain_ref",
+      domain: "domain",
+      lookup_table: "lookup_table",
+      lookup_table_name: "lookup_table",
+      link_table: "link_table",
+      link_table_name: "link_table",
+      linked_table: "link_table",
       is_primary: "isprimarykey",
       is_primary_key: "isprimarykey",
       primary_key: "isprimarykey",
@@ -1368,6 +1430,18 @@ function normalizeRecordKey(target: string, key: string, warnings: string[]): st
       default_value: "defaultvalue"
     },
     field: {
+      display_name: "fieldname",
+      label: "fieldname",
+      title: "fieldname",
+      new_name: "fieldname",
+      domain_name: "domainname",
+      domain_ref: "domain_ref",
+      domain: "domain",
+      lookup_table: "lookup_table",
+      lookup_table_name: "lookup_table",
+      link_table: "link_table",
+      link_table_name: "link_table",
+      linked_table: "link_table",
       is_required: "isrequire",
       required: "isrequire",
       readonly: "isreadonly",
@@ -1378,6 +1452,10 @@ function normalizeRecordKey(target: string, key: string, warnings: string[]): st
       default_value: "defaultvalue"
     },
     table: {
+      display_name: "alias",
+      label: "alias",
+      title: "alias",
+      new_name: "tablename",
       table_type: "tabletype",
       display_column: "columndisplay",
       key_column: "columnkey",
@@ -1385,13 +1463,93 @@ function normalizeRecordKey(target: string, key: string, warnings: string[]): st
       find_column: "columnfind"
     },
     window: {
+      display_name: "windowname",
+      label: "windowname",
+      title: "windowname",
+      new_name: "windowname",
       window_type: "windowtype"
+    },
+    tab: {
+      display_name: "tabname",
+      label: "tabname",
+      title: "tabname",
+      new_name: "tabname"
+    },
+    menu: {
+      display_name: "menuname",
+      label: "menuname",
+      title: "menuname",
+      new_name: "menuname"
+    },
+    domain: {
+      display_name: "domainname",
+      label: "domainname",
+      title: "domainname",
+      domain_values: "values",
+      options: "values",
+      new_name: "domainname"
+    },
+    service: {
+      display_name: "servicename",
+      label: "servicename",
+      title: "servicename",
+      new_name: "servicename"
     }
   };
 
   const mapped = targetSpecific[target]?.[normalized] ?? common[normalized] ?? key;
   if (mapped !== key) warnings.push(`Chuẩn hóa field ${key} -> ${mapped}.`);
   return mapped;
+}
+
+export function __normalizeAppBuilderWriteRecordForTest(target: string, record: Record<string, unknown>): {
+  record: Record<string, unknown>;
+  warnings: string[];
+} {
+  const warnings: string[] = [];
+  return {
+    record: normalizeRecordAliases(target, record, warnings),
+    warnings
+  };
+}
+
+export function __materializeAppBuilderCreateRecordForTest(
+  collection: string,
+  record: Record<string, unknown>,
+  options: {
+    allowedColumns?: string[];
+    recordsByCollection?: Record<string, Record<string, unknown>[]>;
+    sessionUser?: Record<string, unknown>;
+  } = {}
+): {
+  record: Record<string, unknown>;
+  warnings: string[];
+} {
+  const warnings: string[] = [];
+  const target = Object.entries(TARGET_COLLECTION)
+    .find(([, mappedCollection]) => mappedCollection === collection)?.[0] ?? collection;
+  const normalizedRecord = normalizeRecordAliases(target, record, warnings);
+  const recordsByCollection = options.recordsByCollection ?? {};
+  const allowedColumns = new Set((options.allowedColumns ?? Object.keys(normalizedRecord)).map(key => key.toLowerCase()));
+  for (const implicitField of IMPLICIT_ALLOWED_FIELDS[collection] ?? []) {
+    allowedColumns.add(implicitField.toLowerCase());
+  }
+  const context: WriteContext = {
+    blueprint: {},
+    collections: {
+      [collection]: {}
+    },
+    recordsByCollection,
+    allowedColumnsByCollection: {
+      [collection]: allowedColumns
+    },
+    session: { user: options.sessionUser ?? { siteid: 1 } } as ZilcodeSession
+  };
+
+  return {
+    record: materializeCreateRecord(context, collection, normalizedRecord, warnings),
+    warnings
+  };
 }
 
 function rewriteOperationReferences(
@@ -1496,7 +1654,7 @@ function buildCreateTabWithFieldsOperations(
 
   const tableRef = record.tableid ?? record.table_ref ?? record.table_name ?? record.table ?? record.tablename;
   if (!hasUsableValue(tableRef)) {
-    throw new Error("create_tab create_fields=true can tableid/table_name de lay danh sach column.");
+    throw new Error("create_tab create_fields=true cần tableid/table_name để lấy danh sách column.");
   }
 
   const appid = record.appid ?? resolveInlineAppReference(context, record);
@@ -1548,7 +1706,7 @@ function buildCreateTabWithFieldsOperations(
     });
   });
 
-  warnings.push(`${tabOperationId}: tu tao ${operations.length - 1} field tu cac column cua table ${String(tableid)}.`);
+  warnings.push(`${tabOperationId}: tự tạo ${operations.length - 1} field từ các column của table ${String(tableid)}.`);
   return operations;
 }
 
@@ -1703,7 +1861,7 @@ function buildDeleteColumnCascadeOperations(
     .filter(field => sameId(ci(field, "columnid"), columnIdText));
 
   warnings.push(
-    `delete_column cascade columnid=${columnIdText}: se xoa ${fields.length} field dang dung column truoc khi xoa column. Khong xoa table/du lieu that.`
+    `delete_column cascade columnid=${columnIdText}: sẽ xóa ${fields.length} field đang dùng column trước khi xóa column. Không xóa table/dữ liệu thật.`
   );
 
   const operations: Record<string, unknown>[] = [];
@@ -1761,7 +1919,7 @@ function buildDeleteTableCascadeOperations(
     .filter(archive => sameId(ci(archive, "tableid"), tableIdText));
 
   warnings.push(
-    `delete_table cascade tableid=${tableIdText}: se xoa metadata lien quan (${fields.length} field, ${tabs.length} tab, ${accesses.length} access, ${archives.length} archive, ${columns.length} column) truoc khi xoa table. Khong xoa du lieu vat ly.`
+    `delete_table cascade tableid=${tableIdText}: sẽ xóa metadata liên quan (${fields.length} field, ${tabs.length} tab, ${accesses.length} access, ${archives.length} archive, ${columns.length} column) trước khi xóa table. Không xóa dữ liệu vật lý.`
   );
 
   const operations: Record<string, unknown>[] = [];
@@ -2444,6 +2602,8 @@ function materializeCreateRecord(
 
   if (collection === "columns") {
     resolveTableReference(context, record, warnings);
+    resolveDomainReference(context, record, warnings);
+    resolveLookupTableReference(context, record, warnings);
     if (!record.columnname && record.name) record.columnname = record.name;
     if (!record.caption && record.label) record.caption = record.label;
     if (!record.datatype && record.columntype) record.datatype = record.columntype;
@@ -2499,6 +2659,8 @@ function materializeCreateRecord(
   if (collection === "fields") {
     resolveTabReference(context, record, warnings);
     resolveColumnReference(context, record, warnings);
+    resolveDomainReference(context, record, warnings);
+    resolveLookupTableReference(context, record, warnings);
     const column = record.columnid ? findRecordById(context, "columns", record.columnid) : undefined;
     if (!record.fieldname && record.name) record.fieldname = record.name;
     if (!record.fieldname && record.columnname) record.fieldname = record.columnname;
@@ -2773,6 +2935,79 @@ function resolveColumnReference(
   warnings.push(`Resolve column reference ${String(columnRef)} -> columnid=${String(columnid)}.`);
 }
 
+function resolveDomainReference(
+  context: WriteContext,
+  record: Record<string, unknown>,
+  warnings: string[]
+): void {
+  const domainRef = record.domainid
+    ?? record.domain_ref
+    ?? record.domain_name
+    ?? record.domain
+    ?? record.domainname;
+
+  if (hasUsableValue(domainRef)) {
+    record.domainid = resolveExistingRecordIdOrReference(context, "domains", domainRef, "domain", {
+      appid: record.appid ?? resolveInlineAppReference(context, record)
+    });
+    warnings.push(`Resolve domain reference ${String(domainRef)} -> domainid=${String(record.domainid)}.`);
+  }
+
+  for (const key of ["domain_ref", "domain_name", "domain", "domainname"]) {
+    delete record[key];
+  }
+}
+
+function resolveLookupTableReference(
+  context: WriteContext,
+  record: Record<string, unknown>,
+  warnings: string[]
+): void {
+  const linkTableRef = record.linktableid
+    ?? record.linktable_ref
+    ?? record.link_table
+    ?? record.link_table_name
+    ?? record.linktable
+    ?? record.lookup_table
+    ?? record.lookup_table_name
+    ?? record.linked_table;
+
+  if (hasUsableValue(linkTableRef)) {
+    record.linktableid = resolveExistingRecordIdOrReference(context, "tables", linkTableRef, "lookup table", {
+      appid: record.appid ?? resolveInlineAppReference(context, record)
+    });
+    warnings.push(`Resolve lookup table reference ${String(linkTableRef)} -> linktableid=${String(record.linktableid)}.`);
+  }
+
+  for (const key of [
+    "linktable_ref",
+    "link_table",
+    "link_table_name",
+    "linktable",
+    "lookup_table",
+    "lookup_table_name",
+    "linked_table"
+  ]) {
+    delete record[key];
+  }
+}
+
+function resolveExistingRecordIdOrReference(
+  context: WriteContext,
+  collection: string,
+  value: unknown,
+  label: string,
+  filters: Record<string, unknown> = {}
+): unknown {
+  if (!hasUsableValue(value) || isReferenceValue(value)) return value;
+
+  const resolved = findUniqueRecordId(context, collection, String(value), filters);
+  if (resolved !== undefined && resolved !== null && resolved !== "") return resolved;
+
+  if (isNumericLike(value)) return value;
+  throw new Error(`Không tìm thấy ${label} theo tên/id: ${String(value)}.`);
+}
+
 function resolveWindowLinkReference(
   context: WriteContext,
   record: Record<string, unknown>,
@@ -2887,7 +3122,7 @@ function findUniqueRecordId(
       .slice(0, 5)
       .map(record => `${String(ci(record, idField))}:${String(ci(record, "appname") ?? ci(record, "tablename") ?? ci(record, "windowname") ?? ci(record, "tabname") ?? ci(record, "columnname") ?? ci(record, "fieldname") ?? ci(record, "menuname") ?? "")}`)
       .join(", ");
-    throw new Error(`Tim thay nhieu ${collection} khop "${value}": ${preview}. Hay chi ro id.`);
+    throw new Error(`Tìm thấy nhiều ${collection} khớp "${value}": ${preview}. Hãy chỉ rõ id.`);
   }
 
   return matches[0] ? ci(matches[0], idField) : undefined;
@@ -3134,6 +3369,12 @@ function isColumnAllowed(context: WriteContext, collection: string, key: string)
 
 function hasUsableValue(value: unknown): boolean {
   return value !== undefined && value !== null && value !== "";
+}
+
+function isNumericLike(value: unknown): boolean {
+  if (typeof value === "number") return Number.isFinite(value);
+  if (typeof value !== "string") return false;
+  return /^\d+$/.test(value.trim());
 }
 
 function isReferenceValue(value: unknown): boolean {

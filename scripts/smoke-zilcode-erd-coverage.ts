@@ -13,6 +13,9 @@ const root = process.cwd();
 const zilcodePath = path.join(root, "src", "zilcode.ts");
 const graphPath = path.join(root, "src", "app-builder-graph.ts");
 const coveragePath = path.join(root, "doc", "logic", "zilcode-agent-read-coverage.md");
+const createGuidePath = path.join(root, "doc", "logic", "app-builder-agent-create-guide.md");
+const operatingModelPath = path.join(root, "doc", "logic", "zilcode-agent-operating-model.md");
+const toolSafetyPath = path.join(root, "doc", "logic", "zilcode-tool-safety-rules.md");
 
 const erdTables = [
   "n_app",
@@ -152,6 +155,9 @@ async function main(): Promise<void> {
   const zilcode = read(zilcodePath);
   const graph = read(graphPath);
   const coverage = read(coveragePath);
+  const createGuide = read(createGuidePath);
+  const operatingModel = read(operatingModelPath);
+  const toolSafety = read(toolSafetyPath);
   const semanticTables = ZILCODE_SEMANTIC_GUIDE.entities.map(entity => entity.table);
   const creationSchema = await runAppBuilderGraphTool({} as never, null, "app_builder_creation_schema", {
     intent: "semantic_guide_smoke"
@@ -177,6 +183,113 @@ async function main(): Promise<void> {
       const missing = missingSnippets(coverage, erdTables.map(table => `\`${table}\``));
       check(!missing.length, `Coverage doc missing ERD table names: ${missing.join(", ")}`);
       return { required_tables: erdTables.length, missing };
+    }),
+    makeCheck("docs_state_graph_overview_is_root_app_skeleton", () => {
+      const required = [
+        {
+          name: "read_coverage",
+          text: coverage,
+          snippets: [
+            "Tra skeleton cap root/app",
+            "Khong tra full detail table/window/tab/field/menu/domain",
+            "dung `graph_search` de resolve target roi `graph_subgraph`/`node_detail`"
+          ]
+        },
+        {
+          name: "create_guide",
+          text: createGuide,
+          snippets: [
+            "skeleton cap root/app",
+            "Overview chi la skeleton cap root/app",
+            "khong du de ket luan chi tiet table/window/tab/field/menu/domain"
+          ]
+        }
+      ];
+      const missing = required.flatMap(item => missingSnippets(item.text, item.snippets).map(snippet => `${item.name}: ${snippet}`));
+      const forbidden = [
+        "skeleton graph toan he thong",
+        "Tra skeleton toan he thong",
+        "Luon dung `app_builder_graph_overview` truoc khi phan tich App Builder hien tai."
+      ];
+      const actualForbiddenHits = forbidden.filter(snippet => (createGuide + "\n" + coverage).includes(snippet));
+      check(!missing.length, `Docs missing root/app overview contract: ${missing.join(", ")}`);
+      check(!actualForbiddenHits.length, `Docs still contain obsolete overview contract: ${actualForbiddenHits.join(", ")}`);
+      return {
+        required_groups: required.map(item => item.name),
+        missing,
+        forbidden_hits: actualForbiddenHits
+      };
+    }),
+    makeCheck("docs_avoid_fixed_answer_templates", () => {
+      const docs = [
+        { name: "create_guide", text: createGuide },
+        { name: "read_coverage", text: coverage },
+        { name: "operating_model", text: operatingModel },
+        { name: "tool_safety", text: toolSafety }
+      ];
+      const required = [
+        {
+          name: "create_guide",
+          text: createGuide,
+          snippets: [
+            "Noi dung bat buoc khi da prepare plan",
+            "Khong them cau van co dinh"
+          ]
+        },
+        {
+          name: "read_coverage",
+          text: coverage,
+          snippets: [
+            "Nguyen tac dien giai linh hoat",
+            "Dung mot format co dinh cho moi cau hoi"
+          ]
+        },
+        {
+          name: "operating_model",
+          text: operatingModel,
+          snippets: [
+            "Trước khi apply, câu trả lời cần có",
+            "Sau khi apply thành công, câu trả lời cần có",
+            "Khi bị chặn, câu trả lời cần có"
+          ]
+        },
+        {
+          name: "tool_safety",
+          text: toolSafety,
+          snippets: [
+            "Không nói như thể dữ liệu đã được ghi",
+            "Nêu rõ đây là preview/pending plan",
+            "Không khuyến khích apply lại plan cũ"
+          ]
+        }
+      ];
+      const missing = required.flatMap(item => missingSnippets(item.text, item.snippets).map(snippet => `${item.name}: ${snippet}`));
+      const forbidden = [
+        "Mau cau:",
+        "Dung mau tu duy:",
+        "Khong dung mau:",
+        "Trước khi apply chỉ nói:",
+        "Dự kiến thay đổi trường A",
+        "Đã cập nhật bản ghi X",
+        "Đã sửa.\nĐã xóa.\nĐã cập nhật.",
+        "Đã cập nhật thành công.\nTrường A đã đổi",
+        "Order Management",
+        "Manage customers, products, orders and order items",
+        "Quản lý phòng trọ",
+        "Quản lý nhà trọ"
+      ];
+      const forbiddenHits = docs.flatMap(item =>
+        forbidden
+          .filter(snippet => item.text.includes(snippet))
+          .map(snippet => `${item.name}: ${snippet}`)
+      );
+      check(!missing.length, `Docs missing flexible answer guidance: ${missing.join(", ")}`);
+      check(!forbiddenHits.length, `Docs still contain fixed answer templates: ${forbiddenHits.join(", ")}`);
+      return {
+        required_groups: required.map(item => item.name),
+        missing,
+        forbidden_hits: forbiddenHits
+      };
     }),
     makeCheck("semantic_guide_covers_erd_tables", () => {
       const missing = erdTables.filter(table => !semanticTables.includes(table));

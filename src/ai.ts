@@ -1,8 +1,11 @@
 import {
   CHAT_MODEL,
+  DEFAULT_MODEL_PROVIDER,
   EMBEDDING_MODEL,
   MAX_HISTORY_CONTENT_CHARS,
   MAX_HISTORY_MESSAGES,
+  NVIDIA_DEFAULT_BASE_URL,
+  NVIDIA_DEFAULT_CHAT_MODEL,
   QUERY_REWRITE_MODEL,
   RAG_MAX_CONTEXT_CHUNKS,
   RAG_MIN_SCORE,
@@ -10,7 +13,8 @@ import {
   RAG_RERANK_MAX_TOKENS,
   RAG_RERANK_TEXT_MAX_CHARS,
   RAG_VECTOR_TOP_K,
-  type Env
+  type Env,
+  type ModelProvider
 } from "./config";
 import { addDebugStep, type DebugStep } from "./debug";
 import type { AIMessage, EmbeddingResult, RagCandidate, RagQueryDebug, RagSource, StoredChunk, ToolDefinition, ToolExecutionResult, VectorMatch } from "./types";
@@ -32,6 +36,13 @@ interface ChatModelResponse {
   model?: string;
 }
 
+type OpenAICompatibleRole = "system" | "user" | "assistant";
+
+interface OpenAICompatibleMessage {
+  role: OpenAICompatibleRole;
+  content: string;
+}
+
 function getStringArg(args: Record<string, unknown>, name: string): string {
   const value = args[name];
   return typeof value === "string" ? value.trim() : "";
@@ -45,6 +56,50 @@ function getErrorText(error: unknown): string {
   } catch {
     return String(error);
   }
+}
+
+function getModelProvider(env: Env): ModelProvider {
+  const provider = String(env.MODEL_PROVIDER ?? DEFAULT_MODEL_PROVIDER).trim().toLowerCase();
+  if (provider === "cloudflare" || provider === "cf") return "cloudflare";
+  if (provider === "nvidia") return "nvidia";
+  throw new Error(`MODEL_PROVIDER không được hỗ trợ: ${provider || "(empty)"}`);
+}
+
+function getNvidiaBaseUrl(env: Env): string {
+  return String(env.NVIDIA_BASE_URL || NVIDIA_DEFAULT_BASE_URL).replace(/\/+$/, "");
+}
+
+function getNvidiaChatModel(env: Env): string {
+  return String(env.NVIDIA_CHAT_MODEL || NVIDIA_DEFAULT_CHAT_MODEL).trim() || NVIDIA_DEFAULT_CHAT_MODEL;
+}
+
+function getNvidiaStreamValue(env: Env): boolean {
+  const value = String(env.NVIDIA_STREAM ?? "false").trim().toLowerCase();
+  return value === "true" || value === "1" || value === "yes";
+}
+
+export function getActiveChatModelDebugInfo(
+  env: Env,
+  requestedCloudflareModel = CHAT_MODEL
+): { provider: ModelProvider; model: string; requested_model?: string } {
+  const provider = getModelProvider(env);
+  if (provider === "nvidia") {
+    return {
+      provider,
+      model: getNvidiaChatModel(env),
+      requested_model: requestedCloudflareModel
+    };
+  }
+
+  return {
+    provider,
+    model: requestedCloudflareModel
+  };
+}
+
+function truncateErrorBody(text: string, maxChars = 1200): string {
+  const cleaned = text.replace(/\s+/g, " ").trim();
+  return cleaned.length <= maxChars ? cleaned : `${cleaned.slice(0, maxChars)}...`;
 }
 
 function isCloudflareNeuronQuotaResult(result: unknown): boolean {
@@ -61,25 +116,15 @@ function getRuntimeToolDescription(name: string, description: string): string {
 Bổ sung sau ingest: rag_search cũng có thể tra cứu doc/logic/*.md. Dùng nó khi cần hiểu cách Zilcode hoạt động, domain model, REST API contract, runtime architecture, window/tab/field config, tool safety rules, hoặc khi cần lấy kiến thức logic để chọn/gọi các tool Zilcode đúng hơn và kết hợp với dữ liệu thật.`;
 }
 
-function isOpenAiGptOssModel(cfModel: string): boolean {
-  return cfModel.startsWith("@cf/openai/gpt-oss-");
-}
-
-function canUseResponsesApi(cfModel: string, request: ChatModelRequest): boolean {
-  return isOpenAiGptOssModel(cfModel)
-    && !request.tools?.length
-    && !request.messages.some(message => message.role === "tool");
-}
-
-function buildCloudflareResponsesRequest(request: ChatModelRequest): Record<string, unknown> {
-  return {
-    input: request.messages.map(message => ({
-      role: message.role,
-      content: message.content ?? ""
-    })),
-    max_output_tokens: request.max_tokens,
-    temperature: request.temperature
-  };
+function buildOpenAICompatibleTools(request: ChatModelRequest): Record<string, unknown>[] | undefined {
+  return request.tools?.map(tool => ({
+    type: "function",
+    function: {
+      name: String(tool.name),
+      description: getRuntimeToolDescription(String(tool.name), String(tool.description ?? "")),
+      parameters: tool.parameters
+    }
+  }));
 }
 
 function buildCloudflareChatCompletionsRequest(request: ChatModelRequest): Record<string, unknown> {
@@ -88,26 +133,87 @@ function buildCloudflareChatCompletionsRequest(request: ChatModelRequest): Recor
       role: message.role,
       content: message.content ?? ""
     })),
-    tools: request.tools?.map(tool => ({
-      type: "function",
-      function: {
-        name: String(tool.name),
-        description: getRuntimeToolDescription(String(tool.name), String(tool.description ?? "")),
-        parameters: tool.parameters
-      }
-    })),
+    tools: buildOpenAICompatibleTools(request),
     tool_choice: request.tools ? "auto" : undefined,
     max_tokens: request.max_tokens,
     temperature: request.temperature
   };
 }
 
-function buildCloudflareChatRequest(cfModel: string, request: ChatModelRequest): Record<string, unknown> {
-  if (canUseResponsesApi(cfModel, request)) {
-    return buildCloudflareResponsesRequest(request);
+function buildCloudflareChatRequest(_cfModel: string, request: ChatModelRequest): Record<string, unknown> {
+  return buildCloudflareChatCompletionsRequest(request);
+}
+
+function appendOpenAICompatibleMessage(
+  messages: OpenAICompatibleMessage[],
+  role: OpenAICompatibleRole,
+  content: string
+): void {
+  const cleanContent = content ?? "";
+  const last = messages[messages.length - 1];
+  if (last?.role === role) {
+    last.content = [last.content, cleanContent].filter(Boolean).join("\n\n");
+    return;
   }
 
-  return buildCloudflareChatCompletionsRequest(request);
+  messages.push({ role, content: cleanContent });
+}
+
+function normalizeMessagesForNvidia(messages: AIMessage[]): OpenAICompatibleMessage[] {
+  const systemMessages: string[] = [];
+  const dialogueMessages: OpenAICompatibleMessage[] = [];
+
+  for (const message of messages) {
+    const content = message.content ?? "";
+    if (message.role === "system") {
+      systemMessages.push(content);
+      continue;
+    }
+
+    if (message.role === "tool") {
+      appendOpenAICompatibleMessage(
+        dialogueMessages,
+        "user",
+        [
+          `Kết quả công cụ ${message.tool_call_id ? `(${message.tool_call_id})` : ""}:`.trim(),
+          content
+        ].filter(Boolean).join("\n")
+      );
+      continue;
+    }
+
+    appendOpenAICompatibleMessage(
+      dialogueMessages,
+      message.role === "assistant" ? "assistant" : "user",
+      content
+    );
+  }
+
+  const normalized: OpenAICompatibleMessage[] = [];
+  if (systemMessages.length) {
+    normalized.push({
+      role: "system",
+      content: systemMessages.filter(Boolean).join("\n\n")
+    });
+  }
+  normalized.push(...dialogueMessages);
+  return normalized;
+}
+
+function buildNvidiaChatRequest(model: string, request: ChatModelRequest, env: Env): Record<string, unknown> {
+  if (getNvidiaStreamValue(env)) {
+    throw new Error("NVIDIA_STREAM=true chưa được hỗ trợ trong agent hiện tại. Hãy dùng NVIDIA_STREAM=false.");
+  }
+
+  return {
+    model,
+    messages: normalizeMessagesForNvidia(request.messages),
+    tools: buildOpenAICompatibleTools(request),
+    tool_choice: request.tools ? "auto" : undefined,
+    max_tokens: request.max_tokens,
+    temperature: request.temperature,
+    stream: false
+  };
 }
 
 function parseToolArguments(rawArguments: unknown): Record<string, unknown> {
@@ -309,11 +415,58 @@ async function callCloudflareChatModel(
   };
 }
 
+async function callNvidiaChatModel(
+  request: ChatModelRequest,
+  env: Env
+): Promise<ChatModelResponse> {
+  const apiKey = env.NVIDIA_API_KEY?.trim();
+  if (!apiKey) {
+    throw new Error("Thiếu NVIDIA_API_KEY. Hãy đặt secret/env NVIDIA_API_KEY trước khi dùng MODEL_PROVIDER=nvidia.");
+  }
+
+  const model = getNvidiaChatModel(env);
+  const url = `${getNvidiaBaseUrl(env)}/chat/completions`;
+  const payload = buildNvidiaChatRequest(model, request, env);
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+      "Accept": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+
+  const bodyText = await response.text();
+  let data: unknown = {};
+  if (bodyText) {
+    try {
+      data = JSON.parse(bodyText) as unknown;
+    } catch {
+      data = { raw_response: bodyText };
+    }
+  }
+
+  if (!response.ok) {
+    throw new Error(`NVIDIA API lỗi ${response.status}: ${truncateErrorBody(bodyText || response.statusText)}`);
+  }
+
+  return {
+    ...normalizeCloudflareChatResponse(data),
+    model
+  };
+}
+
 export async function runChatModel(
   cfModel: string,
   request: ChatModelRequest,
   env: Env
 ): Promise<ChatModelResponse> {
+  const provider = getModelProvider(env);
+  if (provider === "nvidia") {
+    return callNvidiaChatModel(request, env);
+  }
+
   return callCloudflareChatModel(cfModel, request, env);
 }
 export async function embedQuery(
@@ -408,6 +561,17 @@ function sortByVectorScore(candidates: RagCandidate[]): RagCandidate[] {
   return [...candidates].sort((a, b) => (b.vector_score ?? -Infinity) - (a.vector_score ?? -Infinity));
 }
 
+function selectRagCandidatesByVectorScore(candidates: RagCandidate[]): RagCandidate[] {
+  return sortByVectorScore(candidates)
+    .slice(0, RAG_MAX_CONTEXT_CHUNKS)
+    .map((candidate, index) => ({ ...candidate, rerank_rank: index + 1 }));
+}
+
+function shouldUseModelRerank(candidates: RagCandidate[], queryDebug: RagQueryDebug): boolean {
+  if (candidates.length <= RAG_MAX_CONTEXT_CHUNKS) return false;
+  return queryDebug.used === true;
+}
+
 function normalizeSpaces(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
@@ -498,8 +662,9 @@ async function maybeRewriteRagQuery(
   }
 
   try {
+    const modelDebug = getActiveChatModelDebugInfo(env, QUERY_REWRITE_MODEL);
     addDebugStep(debugSteps, "rag.query_rewrite", "start", "Rewrite query mơ hồ bằng history.", {
-      model: QUERY_REWRITE_MODEL,
+      ...modelDebug,
       original_query: originalQuery,
       reason,
       history_messages: chatHistory.length
@@ -537,7 +702,8 @@ Nếu câu hỏi hiện tại đã rõ sau khi xét lịch sử, vẫn viết l�
     addDebugStep(debugSteps, "rag.query_rewrite", "ok", used ? "Đã rewrite query cho retrieval." : "Model giữ nguyên query gốc.", {
       original_query: originalQuery,
       rewritten_query: rewrittenQuery,
-      used
+      used,
+      model: response.model
     });
 
     return {
@@ -547,7 +713,7 @@ Nếu câu hỏi hiện tại đã rõ sau khi xét lịch sử, vẫn viết l�
         rewritten_query: rewrittenQuery,
         used,
         reason,
-        model: QUERY_REWRITE_MODEL
+        model: response.model ?? modelDebug.model
       }
     };
   } catch (error) {
@@ -564,7 +730,7 @@ Nếu câu hỏi hiện tại đã rõ sau khi xét lịch sử, vẫn viết l�
         rewritten_query: originalQuery,
         used: false,
         reason: `rewrite lỗi, dùng query gốc: ${getErrorText(error)}`,
-        model: QUERY_REWRITE_MODEL
+        model: getActiveChatModelDebugInfo(env, QUERY_REWRITE_MODEL).model
       }
     };
   }
@@ -578,8 +744,9 @@ async function rerankRagCandidates(
 ): Promise<RagCandidate[]> {
   if (candidates.length === 0) return [];
 
+  const modelDebug = getActiveChatModelDebugInfo(env, CHAT_MODEL);
   addDebugStep(debugSteps, "rag.rerank", "start", "Bắt đầu rerank các chunk từ Vectorize.", {
-    model: CHAT_MODEL,
+    ...modelDebug,
     candidates: candidates.length,
     query
   });
@@ -621,9 +788,7 @@ Schema: {"ranked_ids":["chunk-id-1","chunk-id-2"]}`
       selected_ids: sortByVectorScore(candidates).slice(0, RAG_MAX_CONTEXT_CHUNKS).map(candidate => candidate.id)
     });
 
-    return sortByVectorScore(candidates)
-      .slice(0, RAG_MAX_CONTEXT_CHUNKS)
-      .map((candidate, index) => ({ ...candidate, rerank_rank: index + 1 }));
+    return selectRagCandidatesByVectorScore(candidates);
   }
 
   const candidateById = new Map(candidates.map(candidate => [candidate.id, candidate]));
@@ -647,7 +812,8 @@ Schema: {"ranked_ids":["chunk-id-1","chunk-id-2"]}`
     .map((candidate, index) => ({ ...candidate, rerank_rank: index + 1 }));
 
   addDebugStep(debugSteps, "rag.rerank", "ok", "Đã chọn các chunk tốt nhất sau rerank.", {
-    selected_ids: selected.map(candidate => candidate.id)
+    selected_ids: selected.map(candidate => candidate.id),
+    model: response.model
   });
 
   return selected;
@@ -754,13 +920,26 @@ export async function searchRag(
     };
   }
 
-  const reranked = await rerankRagCandidates(retrievalQuery, candidates, env, debugSteps);
+  const useModelRerank = shouldUseModelRerank(candidates, rewritten.debug);
+  const reranked = useModelRerank
+    ? await rerankRagCandidates(retrievalQuery, candidates, env, debugSteps)
+    : selectRagCandidatesByVectorScore(candidates);
+
+  if (!useModelRerank) {
+    addDebugStep(debugSteps, "rag.rerank", "skip", "Query rõ; chọn chunk theo điểm Vectorize để giảm độ trễ.", {
+      selected_ids: reranked.map(candidate => candidate.id),
+      reason: candidates.length <= RAG_MAX_CONTEXT_CHUNKS
+        ? "số chunk không vượt giới hạn context"
+        : "query không cần rewrite theo lịch sử"
+    });
+  }
+
   const content = reranked
     .map((candidate, index) => [
       `[Nguồn ${index + 1}: ${candidate.source_label}]`,
       `ID: ${candidate.id}`,
       `Điểm Vectorize: ${formatScore(candidate.vector_score)}`,
-      `Thứ hạng rerank: ${candidate.rerank_rank ?? index + 1}`,
+      `Thứ hạng chọn: ${candidate.rerank_rank ?? index + 1}`,
       "",
       candidate.text
     ].join("\n"))

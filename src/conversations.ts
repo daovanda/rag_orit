@@ -1,6 +1,6 @@
 import { CORS, MAX_HISTORY_CONTENT_CHARS, MAX_HISTORY_MESSAGES, type Env } from "./config";
 import { addDebugStep, type DebugStep } from "./debug";
-import { parseAgentMode, runAgenticLoop } from "./agent";
+import { parseAgentMode, runAgenticLoop, sanitizeHistoryContentForModel } from "./agent";
 import { loadZilcodeSessionFromRequestHeaders, type ZilcodeSessionState } from "./zilcode";
 import type { AgentActionState, AgentMode, AIMessage, ChatHistoryMessage, RagSource } from "./types";
 
@@ -211,7 +211,7 @@ async function saveConversation(env: Env, owner: ConversationOwner, conversation
 }
 
 function truncateMessageContent(content: string): string {
-  return content.trim().slice(0, MAX_HISTORY_CONTENT_CHARS);
+  return sanitizeHistoryContentForModel(content).slice(0, MAX_HISTORY_CONTENT_CHARS);
 }
 
 function buildAgentHistory(conversation: ConversationRecord): AIMessage[] {
@@ -233,7 +233,7 @@ function buildAgentHistory(conversation: ConversationRecord): AIMessage[] {
     return [
       {
         role: "assistant",
-        content: `Kế hoạch App Builder đang chờ xác nhận. Plan ID: ${pendingPlanId}. Nếu user xác nhận, hãy apply plan này.`
+        content: `Trạng thái App Builder: có pending plan đang chờ xác nhận. Plan ID: ${pendingPlanId}.`
       },
       ...messages.slice(-(MAX_HISTORY_MESSAGES - 1))
     ];
@@ -394,7 +394,7 @@ export async function handleConversationMessage(request: Request, env: Env, conv
 
   const mode = parseAgentMode(body.mode);
   if (!mode) {
-    return jsonResponse({ success: false, error: "Mode khong hop le. Chi ho tro: default, search." }, { status: 400 });
+    return jsonResponse({ success: false, error: "Mode không hợp lệ. Chỉ hỗ trợ: default, search." }, { status: 400 });
   }
 
   const debugSteps = body.debug === true ? [] as DebugStep[] : undefined;

@@ -518,23 +518,25 @@ Cần hỏi lại khi:
 
 ## 18. Nguyên tắc phản hồi
 
-Trước khi apply:
+Trước khi apply, câu trả lời cần có:
 
-```text
-Dự kiến thay đổi trường A từ "old" sang "new". Bạn xác nhận thực hiện không?
-```
+- Đối tượng sẽ thay đổi.
+- Field/giá trị cũ/giá trị mới nếu đã xác định.
+- Rủi ro hoặc dependency quan trọng nếu có.
+- Trạng thái rõ ràng là chưa ghi dữ liệu.
+- Yêu cầu xác nhận rõ trước khi ghi.
 
-Sau khi apply thành công:
+Sau khi apply thành công, câu trả lời cần có:
 
-```text
-Đã cập nhật bản ghi X. Trường A đã đổi từ "old" sang "new".
-```
+- Đối tượng đã được ghi.
+- Field/giá trị đã đổi hoặc operation đã chạy.
+- Bước verify hoặc reload/mở lại màn hình nếu cần.
 
-Khi bị chặn:
+Khi bị chặn, câu trả lời cần có:
 
-```text
-Không thể thực hiện vì tab hiện tại không cho phép sửa hoặc tài khoản hiện tại không có quyền cập nhật.
-```
+- Lý do bị chặn theo nghiệp vụ/quyền/metadata.
+- Dữ liệu đã được ghi hay chưa.
+- Thông tin còn thiếu hoặc bước xử lý tiếp theo.
 
 Không nói "đã sửa" nếu thao tác chưa được apply thành công.
 
@@ -549,4 +551,3 @@ Khi câu hỏi liên quan đến:
 - Xóa/lưu trữ: ưu tiên quy trình xóa hoặc lưu trữ.
 - Workflow/phê duyệt: ưu tiên phần workflow.
 - Field/domain/lookup/calculation: ưu tiên phần field, domain và lookup.
-
