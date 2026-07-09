@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { isWriteRequestAllowed, parseAgentMode } from "../src/agent";
+import { isWriteRequestAllowed, parseAgentMode, runAgenticLoop } from "../src/agent";
 import { runChatModel } from "../src/ai";
 import { CHAT_MODEL } from "../src/config";
 import type { AIMessage, ToolDefinition } from "../src/types";
@@ -266,6 +266,62 @@ function checkModeAndWritePolicy(): Record<string, unknown> {
   };
 }
 
+async function checkMessageAgentDoesNotExposeApplyTool(): Promise<Record<string, unknown>> {
+  let calls = 0;
+  const exposedToolNames: string[] = [];
+  const env = makeEnv(async (_model, payload) => {
+    calls++;
+    if (Array.isArray(payload.tools)) {
+      payload.tools.forEach(tool => {
+        const name = (tool as { function?: { name?: unknown }; name?: unknown }).function?.name
+          ?? (tool as { name?: unknown }).name;
+        if (typeof name === "string") exposedToolNames.push(name);
+      });
+    }
+
+    if (calls === 1) {
+      return {
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                rewritten_message: "Xác nhận kế hoạch đang chờ bằng nút xác nhận trong giao diện.",
+                needs_clarification: false,
+                clarification_question: null,
+                resolved_references: []
+              })
+            }
+          }
+        ]
+      };
+    }
+
+    return {
+      choices: [
+        {
+          message: {
+            content: "Kế hoạch đang chờ xác nhận trong giao diện. Hãy dùng nút xác nhận để thực hiện."
+          }
+        }
+      ]
+    };
+  });
+
+  const history: AIMessage[] = [
+    { role: "assistant", content: "Plan ID: 01234567-89ab-cdef-0123-456789abcdef\nKế hoạch đang chờ xác nhận." }
+  ];
+
+  const result = await runAgenticLoop("OK", env as never, history, []);
+  check(!result.toolsCalled.includes("app_builder_apply_change"), "Typed confirmation must not auto-call app_builder_apply_change.");
+  check(!exposedToolNames.includes("app_builder_apply_change"), "Message agent must not expose app_builder_apply_change to tool selection.");
+
+  return {
+    answer_chars: result.answer.length,
+    tools_called: result.toolsCalled,
+    exposed_apply_tool: exposedToolNames.includes("app_builder_apply_change")
+  };
+}
+
 function checkNoLegacyOpenRouterReferences(): Record<string, unknown> {
   const root = process.cwd();
   const files = [
@@ -402,6 +458,10 @@ async function main(): Promise<void> {
     {
       name: "mode_and_write_policy",
       evidence: checkModeAndWritePolicy()
+    },
+    {
+      name: "message_agent_no_apply_tool",
+      evidence: await checkMessageAgentDoesNotExposeApplyTool()
     },
     {
       name: "no_legacy_openrouter_references",

@@ -2194,12 +2194,22 @@
     if (!actionId) return;
     appendTyping();
     try {
-      const data = await apiFetch(`/pending-actions/${encodeURIComponent(actionId)}/confirm`, { method: 'POST' });
+      const res = await fetch(getUrl() + `/pending-actions/${encodeURIComponent(actionId)}/confirm`, {
+        method: 'POST',
+        headers: getZilcodeHeaders()
+      });
+      const data = await readApiJson(res);
       if (data.job_id) {
         await pollJobUntilDone(data.job_id, data.conversation_id || currentConversationId);
+      } else if (data.active_job?.job_id) {
+        setAuthStatus('Đoạn chat đang có job chạy. Đang theo dõi job hiện tại...', true);
+        await pollJobUntilDone(data.active_job.job_id, data.active_job.conversation_id || currentConversationId);
       } else {
         removeTyping();
         await selectConversation(currentConversationId);
+        if (data.success === false) {
+          setAuthStatus(data.error || 'Không xác nhận được kế hoạch.');
+        }
       }
     } catch (err) {
       removeTyping();
@@ -2406,6 +2416,9 @@
         removeTyping();
         await selectConversation(conversationId);
         await loadConversationList();
+      } else if (data.active_job?.job_id) {
+        setAuthStatus('Đoạn chat đang có job chạy. Đang theo dõi job hiện tại...', true);
+        await pollJobUntilDone(data.active_job.job_id, conversationId, requestStartedAt);
       } else {
         removeTyping();
         const msg = document.createElement('div');

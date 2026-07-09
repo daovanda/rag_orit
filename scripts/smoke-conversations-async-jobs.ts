@@ -1,4 +1,5 @@
 import {
+  cleanupConversationJobs,
   handleConversationMessage,
   handleCreateConversation,
   handleDeleteConversation,
@@ -39,8 +40,8 @@ class MemoryD1Statement {
   }
 
   async run(): Promise<D1Result> {
-    this.db.run(this.sql, this.values);
-    return { success: true, meta: { duration: 0 } } as D1Result;
+    const changes = this.db.run(this.sql, this.values);
+    return { success: true, meta: { duration: 0, changes } } as unknown as D1Result;
   }
 
   async first<T = Row>(): Promise<T | null> {
@@ -60,6 +61,8 @@ class MemoryD1 {
     job_events: [],
     pending_actions: []
   };
+  enforceActiveJobUniqueness = false;
+  injectActiveJobConflictOnNextJobInsert = false;
 
   prepare(sql: string): D1PreparedStatement {
     return new MemoryD1Statement(this, sql) as unknown as D1PreparedStatement;
@@ -77,13 +80,53 @@ class MemoryD1 {
     return sql.replace(/\s+/g, " ").trim().toLowerCase();
   }
 
-  run(sql: string, values: unknown[]): void {
+  private hasActiveConversationJob(userKey: unknown, conversationId: unknown): boolean {
+    return this.tables.jobs.some(row =>
+      row.user_key === userKey
+      && row.conversation_id === conversationId
+      && ["queued", "running"].includes(row.status)
+    );
+  }
+
+  private beforeInsertJob(row: Row): void {
+    if (this.injectActiveJobConflictOnNextJobInsert) {
+      this.injectActiveJobConflictOnNextJobInsert = false;
+      if (!this.hasActiveConversationJob(row.user_key, row.conversation_id)) {
+        this.tables.jobs.push({
+          job_id: "job_injected_active_conflict",
+          conversation_id: row.conversation_id,
+          user_key: row.user_key,
+          user_message_id: null,
+          assistant_message_id: null,
+          kind: "message",
+          mode: "default",
+          status: "queued",
+          stage: "queued",
+          progress_text: "queued",
+          error: null,
+          idempotency_key: null,
+          auth_context_json: "{}",
+          payload_json: "{}",
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          finished_at: null,
+          expires_at: null
+        });
+      }
+    }
+
+    if (this.enforceActiveJobUniqueness && this.hasActiveConversationJob(row.user_key, row.conversation_id)) {
+      throw new Error("UNIQUE constraint failed: idx_jobs_one_active_per_conversation");
+    }
+  }
+
+  run(sql: string, values: unknown[]): number {
     const q = this.normalized(sql);
 
     if (q.startsWith("insert into conversations")) {
       const [conversation_id, user_key, userid, sitecode, roleid, orgid, title, created_at, updated_at] = values;
       this.tables.conversations.push({ conversation_id, user_key, userid, sitecode, roleid, orgid, title, created_at, updated_at, deleted_at: null });
-      return;
+      return 1;
     }
 
     if (q.startsWith("insert into messages")) {
@@ -94,54 +137,70 @@ class MemoryD1 {
         const [message_id, conversation_id, user_key, mode, created_at] = values;
         this.tables.messages.push({ message_id, conversation_id, user_key, role: "assistant", content: "", status: "generating", mode, tools_called_json: null, sources_json: null, debug_steps_json: null, action_state_json: null, error: null, created_at, updated_at: created_at });
       }
-      return;
+      return 1;
     }
 
     if (q.startsWith("insert into jobs")) {
       if (q.includes("'apply_pending_action'")) {
         const [job_id, conversation_id, user_key, user_message_id, assistant_message_id, auth_context_json, payload_json, created_at, expires_at] = values;
-        this.tables.jobs.push({ job_id, conversation_id, user_key, user_message_id, assistant_message_id, kind: "apply_pending_action", mode: "default", status: "queued", stage: "queued", progress_text: "Job apply plan đã được đưa vào hàng chờ.", error: null, idempotency_key: null, auth_context_json, payload_json, created_at, updated_at: created_at, finished_at: null, expires_at });
+        const row = { job_id, conversation_id, user_key, user_message_id, assistant_message_id, kind: "apply_pending_action", mode: "default", status: "queued", stage: "queued", progress_text: "Job apply plan đã được đưa vào hàng chờ.", error: null, idempotency_key: null, auth_context_json, payload_json, created_at, updated_at: created_at, finished_at: null, expires_at };
+        this.beforeInsertJob(row);
+        this.tables.jobs.push(row);
       } else {
         const [job_id, conversation_id, user_key, user_message_id, assistant_message_id, mode, idempotency_key, auth_context_json, payload_json, created_at, expires_at] = values;
-        this.tables.jobs.push({ job_id, conversation_id, user_key, user_message_id, assistant_message_id, kind: "message", mode, status: "queued", stage: "queued", progress_text: "Job đã được đưa vào hàng chờ.", error: null, idempotency_key, auth_context_json, payload_json, created_at, updated_at: created_at, finished_at: null, expires_at });
+        const row = { job_id, conversation_id, user_key, user_message_id, assistant_message_id, kind: "message", mode, status: "queued", stage: "queued", progress_text: "Job đã được đưa vào hàng chờ.", error: null, idempotency_key, auth_context_json, payload_json, created_at, updated_at: created_at, finished_at: null, expires_at };
+        this.beforeInsertJob(row);
+        this.tables.jobs.push(row);
       }
-      return;
+      return 1;
     }
 
     if (q.startsWith("insert into job_events")) {
       const [event_id, job_id, user_key, seq, type, payload_json, created_at] = values;
       this.tables.job_events.push({ event_id, job_id, user_key, seq, type, payload_json, created_at });
-      return;
+      return 1;
     }
 
     if (q.startsWith("insert into pending_actions")) {
       const [action_id, conversation_id, user_key, job_id, assistant_message_id, plan_id, status, payload_json, created_at, updated_at, expires_at] = values;
       this.tables.pending_actions.push({ action_id, conversation_id, user_key, job_id, assistant_message_id, plan_id, status, payload_json, created_at, updated_at, expires_at });
-      return;
+      return 1;
     }
 
     if (q.startsWith("update conversations set deleted_at")) {
       const [deleted_at, conversation_id, user_key] = values;
       this.tables.conversations.filter(row => row.conversation_id === conversation_id && row.user_key === user_key).forEach(row => { row.deleted_at = deleted_at; row.updated_at = deleted_at; });
-      return;
+      return 1;
     }
 
     if (q.startsWith("update conversations set title")) {
       const [title, updated_at, conversation_id, user_key] = values;
       this.tables.conversations.filter(row => row.conversation_id === conversation_id && row.user_key === user_key).forEach(row => { row.title = title; row.updated_at = updated_at; });
-      return;
+      return 1;
     }
 
     if (q.startsWith("update conversations set updated_at")) {
       const [updated_at, conversation_id, user_key] = values;
       this.tables.conversations.filter(row => row.conversation_id === conversation_id && row.user_key === user_key).forEach(row => { row.updated_at = updated_at; });
-      return;
+      return 1;
+    }
+
+    if (q.startsWith("update jobs") && q.includes("where job_id = ?2") && q.includes("status = 'queued'")) {
+      const [updated_at, job_id, user_key] = values;
+      const rows = this.tables.jobs.filter(row => row.job_id === job_id && row.user_key === user_key && row.status === "queued");
+      rows.forEach(row => Object.assign(row, {
+        status: "running",
+        stage: "starting",
+        progress_text: "Agent job đang bắt đầu.",
+        updated_at
+      }));
+      return rows.length;
     }
 
     if (q.startsWith("update jobs")) {
       const [status, stage, progress_text, error, finished_at, auth_context_json, updated_at, job_id, user_key] = values;
       this.tables.jobs.filter(row => row.job_id === job_id && row.user_key === user_key).forEach(row => Object.assign(row, { status, stage, progress_text, error, finished_at, auth_context_json, updated_at }));
-      return;
+      return 1;
     }
 
     if (q.startsWith("update messages") && q.includes("status = 'completed'")) {
@@ -164,31 +223,52 @@ class MemoryD1 {
           row.updated_at = actionMaybe;
         }
       });
-      return;
+      return 1;
     }
 
     if (q.startsWith("update messages") && q.includes("status = 'failed'")) {
       const [content, error, debug_steps_json, updated_at, message_id, user_key] = values;
       this.tables.messages.filter(row => row.message_id === message_id && row.user_key === user_key).forEach(row => Object.assign(row, { content, status: "failed", error, debug_steps_json, updated_at }));
-      return;
+      return 1;
     }
 
     if (q.startsWith("update pending_actions set status = ?1")) {
       const [status, updated_at, user_key, plan_id] = values;
-      this.tables.pending_actions.filter(row => row.user_key === user_key && row.plan_id === plan_id && ["waiting_confirmation", "confirmed"].includes(row.status)).forEach(row => { row.status = status; row.updated_at = updated_at; });
-      return;
+      const rows = this.tables.pending_actions.filter(row => row.user_key === user_key && row.plan_id === plan_id && ["waiting_confirmation", "confirmed"].includes(row.status));
+      rows.forEach(row => { row.status = status; row.updated_at = updated_at; });
+      return rows.length;
     }
 
     if (q.startsWith("update pending_actions set status = 'confirmed'")) {
       const [updated_at, action_id, user_key] = values;
-      this.tables.pending_actions.filter(row => row.action_id === action_id && row.user_key === user_key).forEach(row => { row.status = "confirmed"; row.updated_at = updated_at; });
-      return;
+      const rows = this.tables.pending_actions.filter(row => row.action_id === action_id && row.user_key === user_key && row.status === "waiting_confirmation");
+      rows.forEach(row => { row.status = "confirmed"; row.updated_at = updated_at; });
+      return rows.length;
     }
 
     if (q.startsWith("update pending_actions set status = 'cancelled'")) {
-      const [updated_at, action_id, user_key] = values;
-      this.tables.pending_actions.filter(row => row.action_id === action_id && row.user_key === user_key).forEach(row => { row.status = "cancelled"; row.updated_at = updated_at; });
-      return;
+      const [updated_at, idOrConversation, user_key] = values;
+      const byConversation = q.includes("conversation_id = ?2");
+      const rows = this.tables.pending_actions.filter(row => {
+        if (row.user_key !== user_key || row.status !== "waiting_confirmation") return false;
+        return byConversation ? row.conversation_id === idOrConversation : row.action_id === idOrConversation;
+      });
+      rows.forEach(row => { row.status = "cancelled"; row.updated_at = updated_at; });
+      return rows.length;
+    }
+
+    if (q.startsWith("update pending_actions set status = 'expired'")) {
+      const [updated_at] = values;
+      const rows = this.tables.pending_actions.filter(row => row.status === "waiting_confirmation" && row.expires_at && String(row.expires_at) < String(updated_at));
+      rows.forEach(row => { row.status = "expired"; row.updated_at = updated_at; });
+      return rows.length;
+    }
+
+    if (q.startsWith("delete from job_events")) {
+      const [cutoff] = values;
+      const before = this.tables.job_events.length;
+      this.tables.job_events = this.tables.job_events.filter(row => String(row.created_at) >= String(cutoff));
+      return before - this.tables.job_events.length;
     }
 
     throw new Error(`Unhandled D1 run SQL: ${q}`);
@@ -234,6 +314,15 @@ class MemoryD1 {
       return this.tables.messages
         .filter(row => row.conversation_id === conversation_id && row.user_key === user_key && row.status === "completed" && row.content && String(row.created_at) < String(cutoff))
         .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+    }
+
+    if (q.startsWith("select * from jobs") && q.includes("expires_at < ?1")) {
+      const [now, staleRunningBefore] = values;
+      return this.tables.jobs.filter(row => {
+        if (row.status === "queued") return row.expires_at && String(row.expires_at) < String(now);
+        if (row.status === "running") return String(row.updated_at) < String(staleRunningBefore);
+        return false;
+      }).slice(0, 100);
     }
 
     if (q.startsWith("select * from jobs") && q.includes("job_id = ?1") && q.includes("user_key = ?2")) {
@@ -395,6 +484,21 @@ async function main(): Promise<void> {
   ok(failedJob.message?.status === "failed", "assistant placeholder should become failed message");
   ok(typeof failedJob.job?.error === "string" && failedJob.job.error.length > 0, "failed job should store error");
 
+  db.enforceActiveJobUniqueness = true;
+  db.injectActiveJobConflictOnNextJobInsert = true;
+  const racedMessage = await json(await handleConversationMessage(
+    request(`/conversations/${conversationId}/messages`, {
+      method: "POST",
+      headers: { "Idempotency-Key": "smoke-race" },
+      body: JSON.stringify({ message: "Race active job path", debug: true })
+    }),
+    env,
+    conversationId
+  ));
+  ok(racedMessage.success === false && racedMessage.active_job?.job_id === "job_injected_active_conflict", "message endpoint should return active_job when DB uniqueness catches a race");
+  db.tables.jobs.find(row => row.job_id === "job_injected_active_conflict")!.status = "succeeded";
+  db.enforceActiveJobUniqueness = false;
+
   db.tables.pending_actions.push({
     action_id: "act_cancel_smoke",
     conversation_id: conversationId,
@@ -412,6 +516,44 @@ async function main(): Promise<void> {
   ok(cancelled.status === "cancelled", "cancel pending action should work");
 
   db.tables.pending_actions.push({
+    action_id: "act_active_block_smoke",
+    conversation_id: conversationId,
+    user_key: conversationRow!.user_key,
+    job_id: messaged.job_id,
+    assistant_message_id: messaged.assistant_message_id,
+    plan_id: "plan_active_block_smoke",
+    status: "waiting_confirmation",
+    payload_json: "{}",
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    expires_at: null
+  });
+  db.tables.jobs.push({
+    job_id: "job_active_block_smoke",
+    conversation_id: conversationId,
+    user_key: conversationRow!.user_key,
+    user_message_id: null,
+    assistant_message_id: null,
+    kind: "message",
+    mode: "default",
+    status: "queued",
+    stage: "queued",
+    progress_text: "queued",
+    error: null,
+    idempotency_key: null,
+    auth_context_json: "{}",
+    payload_json: "{}",
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    finished_at: null,
+    expires_at: null
+  });
+  const blockedConfirm = await json(await handleConfirmPendingAction(request("/pending-actions/act_active_block_smoke/confirm", { method: "POST" }), env, "act_active_block_smoke"));
+  ok(blockedConfirm.success === false && blockedConfirm.active_job?.job_id === "job_active_block_smoke", "confirm should not queue apply while conversation has active job");
+  db.tables.jobs.find(row => row.job_id === "job_active_block_smoke")!.status = "succeeded";
+  db.tables.pending_actions.find(row => row.action_id === "act_active_block_smoke")!.status = "cancelled";
+
+  db.tables.pending_actions.push({
     action_id: "act_confirm_smoke",
     conversation_id: conversationId,
     user_key: conversationRow!.user_key,
@@ -427,6 +569,53 @@ async function main(): Promise<void> {
   const confirmed = await json(await handleConfirmPendingAction(request("/pending-actions/act_confirm_smoke/confirm", { method: "POST" }), env, "act_confirm_smoke"));
   ok(confirmed.status === "queued", "confirm pending action should queue apply job");
   ok(typeof confirmed.job_id === "string" && confirmed.job_id.startsWith("job_"), "confirm should return apply job id");
+  const confirmReplay = await handleConfirmPendingAction(request("/pending-actions/act_confirm_smoke/confirm", { method: "POST" }), env, "act_confirm_smoke");
+  ok(confirmReplay.status === 409, "confirm pending action should be single-use");
+
+  const expiredAssistantId = "msg_expired_assistant";
+  const expiredJobId = "job_expired_smoke";
+  db.tables.messages.push({
+    message_id: expiredAssistantId,
+    conversation_id: conversationId,
+    user_key: conversationRow!.user_key,
+    role: "assistant",
+    content: "",
+    status: "generating",
+    mode: "default",
+    tools_called_json: null,
+    sources_json: null,
+    debug_steps_json: null,
+    action_state_json: null,
+    error: null,
+    created_at: "2000-01-01T00:00:00.000Z",
+    updated_at: "2000-01-01T00:00:00.000Z"
+  });
+  db.tables.jobs.push({
+    job_id: expiredJobId,
+    conversation_id: conversationId,
+    user_key: conversationRow!.user_key,
+    user_message_id: null,
+    assistant_message_id: expiredAssistantId,
+    kind: "message",
+    mode: "default",
+    status: "queued",
+    stage: "queued",
+    progress_text: "queued",
+    error: null,
+    idempotency_key: null,
+    auth_context_json: "{}",
+    payload_json: "{}",
+    created_at: "2000-01-01T00:00:00.000Z",
+    updated_at: "2000-01-01T00:00:00.000Z",
+    finished_at: null,
+    expires_at: "2000-01-01T00:00:00.000Z"
+  });
+  const cleanup = await cleanupConversationJobs(env);
+  const expiredJob = db.tables.jobs.find(row => row.job_id === expiredJobId);
+  const expiredMessage = db.tables.messages.find(row => row.message_id === expiredAssistantId);
+  ok(cleanup.jobs_expired >= 1, "cleanup should expire stale queued jobs");
+  ok(expiredJob?.status === "expired", "cleanup should mark stale job as expired");
+  ok(expiredMessage?.status === "failed" && String(expiredMessage.content || "").length > 0, "cleanup should resolve stale assistant placeholder");
 
   const blockedOtherUser = await handleGetConversation(request(`/conversations/${conversationId}`, { method: "GET" }, "9999"), env, conversationId);
   ok(blockedOtherUser.status === 404, "other user should not read conversation");
@@ -445,9 +634,13 @@ async function main(): Promise<void> {
       "POST /conversations/{conversation_id}/messages returns 202-style queued job",
       "runConversationJob writes assistant message",
       "runConversationJob stores failed status and error",
+      "POST /conversations/{conversation_id}/messages handles DB active-job race",
       "GET /jobs/{job_id}",
       "POST /pending-actions/{action_id}/cancel",
+      "POST /pending-actions/{action_id}/confirm blocks when conversation has active job",
       "POST /pending-actions/{action_id}/confirm creates apply job",
+      "POST /pending-actions/{action_id}/confirm is single-use",
+      "cleanupConversationJobs expires stale jobs and placeholders",
       "ownership isolation",
       "DELETE /conversations/{conversation_id}"
     ]

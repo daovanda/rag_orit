@@ -1,10 +1,9 @@
 ﻿// src/index.ts
 
-import { CORS, EMBEDDING_MODEL, MAX_HISTORY_MESSAGES, type Env } from "./config";
-import { addDebugStep, type DebugStep } from "./debug";
-import { parseAgentMode, runAgenticLoop, sanitizeChatHistory } from "./agent";
+import { CORS, EMBEDDING_MODEL, type Env } from "./config";
 import { TOOLS } from "./tools";
 import {
+  cleanupConversationJobs,
   handleConversationMessage,
   handleCreateConversation,
   handleDeleteConversation,
@@ -16,8 +15,7 @@ import {
   handleConfirmPendingAction,
   runConversationJob
 } from "./conversations";
-import { handleZilcodeLogin, handleZilcodeLogout, handleZilcodeMe, handleZilcodeSelectRoleOrg, loadZilcodeSession } from "./zilcode";
-import type { ChatRequest } from "./types";
+import { handleZilcodeLogin, handleZilcodeLogout, handleZilcodeMe, handleZilcodeSelectRoleOrg } from "./zilcode";
 
 function routeErrorResponse(error: unknown, fallbackMessage: string): Response {
   return Response.json(
@@ -153,83 +151,12 @@ export default {
       );
     }
 
-    // ── Legacy POST /chat — kept for old standalone clients ──────────────────
+    // ── Legacy POST /chat — retired to avoid synchronous agent timeouts ───────
     if (url.pathname === "/chat" && request.method === "POST") {
-      let debugSteps: DebugStep[] | undefined;
-
-      try {
-        const body = await request.json() as ChatRequest;
-
-        if (!body.message) {
-          return Response.json(
-            { success: false, error: "Bắt buộc phải có trường message." },
-            { status: 400, headers: CORS }
-          );
-        }
-        const mode = parseAgentMode(body.mode);
-        if (!mode) {
-          return Response.json(
-            { success: false, error: "Mode không hợp lệ. Chỉ hỗ trợ: default, search." },
-            { status: 400, headers: CORS }
-          );
-        }
-
-        const debugEnabled = body.debug === true;
-        debugSteps = debugEnabled ? [] as DebugStep[] : undefined;
-        const zilcodeSession = await loadZilcodeSession(request, env);
-
-        addDebugStep(debugSteps, "request.received", "ok", "Worker nhận request /chat.", {
-          message_chars: body.message.length,
-          mode,
-          raw_history_messages: Array.isArray(body.history) ? body.history.length : 0,
-          has_zilcode_session: Boolean(zilcodeSession)
-        });
-
-        const chatHistory = sanitizeChatHistory(body.history);
-        addDebugStep(debugSteps, "history.sanitized", "ok", "Làm sạch history trước khi đưa vào model.", {
-          history_messages: chatHistory.length,
-          max_history_messages: MAX_HISTORY_MESSAGES
-        });
-
-        const { answer, toolsCalled, sources, embedding_debug, rag_query_debug } = await runAgenticLoop(
-          body.message,
-          env,
-          chatHistory,
-          debugSteps,
-          zilcodeSession,
-          mode
-        );
-
-        addDebugStep(debugSteps, "response.ready", "ok", "Chuẩn bị trả response về client.", {
-          tools_called: toolsCalled,
-          answer_chars: answer.length,
-          sources: sources?.length ?? 0
-        });
-
-        return Response.json({
-          success: true,
-          response: answer,
-          tools_called: toolsCalled,
-          sources,
-          embedding_debug,
-          rag_query_debug,
-          debug_steps: debugSteps
-        }, { headers: CORS });
-
-      } catch (error) {
-        addDebugStep(debugSteps, "response.error", "error", "Worker gặp lỗi khi xử lý /chat.", {
-          error: error instanceof Error ? error.message : "Lỗi không xác định"
-        });
-
-        return Response.json(
-          {
-            success: false,
-            error: error instanceof Error ? error.message : "Lỗi không xác định",
-            debug_steps: debugSteps
-          },
-          { status: 500, headers: CORS }
-        );
-      }
+      return Response.json({
+        success: false,
+        error: "Endpoint /chat đã ngừng dùng để tránh timeout. Hãy dùng POST /conversations/{conversation_id}/messages và poll /jobs/{job_id}."
+      }, { status: 410, headers: CORS });
     }
 
     // ── POST /embed — raw embedding ──────────────────────────────────────────
@@ -270,6 +197,15 @@ export default {
         console.error("Agent job failed", error);
         message.retry();
       }
+    }
+  },
+
+  async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext): Promise<void> {
+    try {
+      const result = await cleanupConversationJobs(env);
+      console.log("Agent job cleanup completed", result);
+    } catch (error) {
+      console.error("Agent job cleanup failed", error);
     }
   }
 };

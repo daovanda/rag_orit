@@ -42,6 +42,7 @@ import type {
 
 const MAX_ITERATIONS = 6;
 const SEARCH_MODE_TOOL_NAMES = new Set<string>(["general_chat", "rag_search"]);
+const MESSAGE_AGENT_DISABLED_TOOL_NAMES = new Set<string>(["app_builder_apply_change"]);
 const GRAPH_CONTINUE_TOOLS = new Set([
   "app_builder_graph_search"
 ]);
@@ -79,10 +80,11 @@ export function parseAgentMode(value: unknown): AgentMode | null {
 }
 
 function getToolsForAgentMode(mode: AgentMode): readonly ToolDefinition[] {
+  const availableTools = TOOLS.filter(tool => !MESSAGE_AGENT_DISABLED_TOOL_NAMES.has(tool.name));
   if (mode === "search") {
-    return TOOLS.filter(tool => SEARCH_MODE_TOOL_NAMES.has(tool.name));
+    return availableTools.filter(tool => SEARCH_MODE_TOOL_NAMES.has(tool.name));
   }
-  return TOOLS;
+  return availableTools;
 }
 
 function sanitizeResolvedReferences(value: unknown): ResolvedReference[] {
@@ -316,7 +318,7 @@ function isToolCallAllowedByPolicy(
     return isWriteRequestAllowed(originalMessage, clarifiedMessage, chatHistory, resolvedReferences);
   }
   if (toolName === "app_builder_apply_change") {
-    return isPlanConfirmation(originalMessage) && Boolean(findImmediatePreviousPlanId(chatHistory));
+    return false;
   }
   return true;
 }
@@ -1128,12 +1130,6 @@ export function isPlanConfirmation(message: string): boolean {
     && /(thuc hien|tien hanh|ke hoach|apply|chay|tao|sua|xoa|cap nhat)/.test(text);
 }
 
-function findImmediatePreviousPlanId(chatHistory: AIMessage[]): string | null {
-  const previous = [...chatHistory].reverse().find(message => message.role === "assistant" && (message.content ?? "").trim());
-  const match = previous?.content?.match(/Plan ID:\s*([0-9a-fA-F-]{16,})/);
-  return match?.[1] ?? null;
-}
-
 function normalizeVietnameseText(value: string): string {
   return value
     .normalize("NFD")
@@ -1693,29 +1689,6 @@ export async function runAgenticLoop(
     tools: activeTools.map(tool => tool.name)
   });
 
-  const isConfirmation = isPlanConfirmation(userMessage);
-  const confirmedPlanId = isConfirmation ? findImmediatePreviousPlanId(chatHistory) : null;
-  if (!searchOnlyMode && confirmedPlanId && zilcodeSession) {
-    addDebugStep(debugSteps, "agent.confirmation_auto_apply", "start", "User xác nhận pending App Builder plan, tự gọi apply_change.", {
-      plan_id: confirmedPlanId
-    });
-
-    const toolExecution = await executeTool(
-      { name: "app_builder_apply_change", arguments: { plan_id: confirmedPlanId } },
-      env,
-      chatHistory,
-      debugSteps,
-      zilcodeSession
-    );
-    const toolResults = [{ name: "app_builder_apply_change", content: toolExecution.content }];
-    const answer = await createFinalAnswerFromToolResults(userMessage, toolResults, env, chatHistory, debugSteps);
-
-    return withActionState({
-      answer,
-      toolsCalled: ["app_builder_apply_change"]
-    }, toolResults);
-  }
-
   const contextualizedRequest = await contextualizeUserRequest(userMessage, chatHistory, env, debugSteps);
   if (contextualizedRequest.needs_clarification) {
     return {
@@ -1776,7 +1749,7 @@ Nguyên tắc dùng yêu cầu đã làm rõ:
 
 An toàn ghi:
 - Chỉ dùng app_builder_prepare_change khi user yêu cầu tạo/sửa/xóa thật.
-- Chỉ dùng app_builder_apply_change khi đã có pending plan hợp lệ và user xác nhận rõ ràng.
+- Không dùng app_builder_apply_change trong message agent. Apply chỉ được thực hiện qua backend pending-action confirm endpoint.
 - Câu hỏi "hướng dẫn/cách làm/quy trình" không phải yêu cầu ghi.
 - Câu phủ định như "đừng xóa", "chưa cần sửa" không phải yêu cầu ghi.
 - Nếu user yêu cầu tạo/sửa/xóa và đã đủ thông tin tối thiểu để lập operations, phải gọi app_builder_prepare_change thay vì trả lời bằng kế hoạch văn bản.

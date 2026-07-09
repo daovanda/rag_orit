@@ -6,9 +6,11 @@ import { loadZilcodeSessionFromRequestHeaders, type ZilcodeSessionState } from "
 import type { AgentActionState, AgentMode, AIMessage, RagSource } from "./types";
 
 const MAX_STORED_MESSAGES = 200;
-const JOB_AUTH_TTL_SECONDS = 60 * 30;
+const JOB_AUTH_TTL_SECONDS = 60 * 60 * 2;
+const RUNNING_JOB_STALE_SECONDS = 60 * 60 * 2;
 const JOB_POLL_EVENT_LIMIT = 80;
 const MAX_JOB_EVENT_PAYLOAD_CHARS = 12_000;
+const JOB_EVENT_RETENTION_DAYS = 14;
 
 type JobStatus = "queued" | "running" | "waiting_confirmation" | "succeeded" | "failed" | "cancelled" | "expired";
 type MessageStatus = "completed" | "generating" | "failed";
@@ -188,6 +190,10 @@ function addSeconds(date: Date, seconds: number): string {
   return new Date(date.getTime() + seconds * 1000).toISOString();
 }
 
+function addDays(date: Date, days: number): string {
+  return new Date(date.getTime() + days * 24 * 60 * 60 * 1000).toISOString();
+}
+
 function sanitizeKeyPart(value: string): string {
   return value.trim().replace(/[^a-zA-Z0-9_.@-]/g, "_") || "unknown";
 }
@@ -344,6 +350,14 @@ async function getJobAnyOwner(db: D1Database, jobId: string): Promise<JobRow | n
   return db.prepare(`SELECT * FROM jobs WHERE job_id = ?1`).bind(jobId).first<JobRow>();
 }
 
+async function getActiveConversationJob(db: D1Database, userKey: string, conversationId: string): Promise<JobRow | null> {
+  return db.prepare(
+    `SELECT * FROM jobs
+     WHERE conversation_id = ?1 AND user_key = ?2 AND status IN ('queued', 'running')
+     ORDER BY created_at DESC LIMIT 1`
+  ).bind(conversationId, userKey).first<JobRow>();
+}
+
 async function insertJobEvent(
   db: D1Database,
   job: Pick<JobRow, "job_id" | "user_key">,
@@ -383,22 +397,41 @@ async function updateJob(
 ): Promise<void> {
   const current = await getJob(db, job.user_key, job.job_id);
   if (!current) return;
+  const has = (key: keyof typeof patch) => Object.prototype.hasOwnProperty.call(patch, key);
   await db.prepare(
     `UPDATE jobs
      SET status = ?1, stage = ?2, progress_text = ?3, error = ?4, finished_at = ?5,
          auth_context_json = ?6, updated_at = ?7
      WHERE job_id = ?8 AND user_key = ?9`
   ).bind(
-    patch.status ?? current.status,
-    patch.stage ?? current.stage,
-    patch.progress_text ?? current.progress_text,
-    patch.error ?? current.error,
-    patch.finished_at ?? current.finished_at,
+    has("status") ? patch.status : current.status,
+    has("stage") ? patch.stage : current.stage,
+    has("progress_text") ? patch.progress_text : current.progress_text,
+    has("error") ? patch.error : current.error,
+    has("finished_at") ? patch.finished_at : current.finished_at,
     patch.auth_context_json === undefined ? current.auth_context_json : patch.auth_context_json,
     nowIso(),
     job.job_id,
     job.user_key
   ).run();
+}
+
+async function claimQueuedJob(db: D1Database, job: JobRow): Promise<JobRow | null> {
+  const now = nowIso();
+  const claimed = await db.prepare(
+    `UPDATE jobs
+     SET status = 'running', stage = 'starting', progress_text = 'Agent job đang bắt đầu.', updated_at = ?1
+     WHERE job_id = ?2 AND user_key = ?3 AND status = 'queued'`
+  ).bind(now, job.job_id, job.user_key).run();
+
+  if (Number(claimed.meta?.changes ?? 0) < 1) return null;
+  return {
+    ...job,
+    status: "running",
+    stage: "starting",
+    progress_text: "Agent job đang bắt đầu.",
+    updated_at: now
+  };
 }
 
 async function setAssistantMessageFailed(
@@ -495,24 +528,31 @@ async function updateConversationActionState(
       expires_at: addSeconds(new Date(), 60 * 30)
     };
 
-    await db.prepare(
-      `INSERT INTO pending_actions (
-        action_id, conversation_id, user_key, job_id, assistant_message_id, plan_id, status,
-        payload_json, created_at, updated_at, expires_at
-      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)`
-    ).bind(
-      pendingAction.action_id,
-      pendingAction.conversation_id,
-      pendingAction.user_key,
-      pendingAction.job_id,
-      pendingAction.assistant_message_id,
-      pendingAction.plan_id,
-      pendingAction.status,
-      pendingAction.payload_json,
-      pendingAction.created_at,
-      pendingAction.updated_at,
-      pendingAction.expires_at
-    ).run();
+    await db.batch([
+      db.prepare(
+        `UPDATE pending_actions
+         SET status = 'cancelled', updated_at = ?1
+         WHERE conversation_id = ?2 AND user_key = ?3 AND status = 'waiting_confirmation'`
+      ).bind(now, job.conversation_id, job.user_key),
+      db.prepare(
+        `INSERT INTO pending_actions (
+          action_id, conversation_id, user_key, job_id, assistant_message_id, plan_id, status,
+          payload_json, created_at, updated_at, expires_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)`
+      ).bind(
+        pendingAction.action_id,
+        pendingAction.conversation_id,
+        pendingAction.user_key,
+        pendingAction.job_id,
+        pendingAction.assistant_message_id,
+        pendingAction.plan_id,
+        pendingAction.status,
+        pendingAction.payload_json,
+        pendingAction.created_at,
+        pendingAction.updated_at,
+        pendingAction.expires_at
+      )
+    ]);
 
     return serializePendingAction(pendingAction);
   }
@@ -751,7 +791,7 @@ export async function runConversationJob(env: Env, jobId: string): Promise<void>
 
   const job = await getJobAnyOwner(db, jobId);
   if (!job) throw new Error(`Không tìm thấy job ${jobId}.`);
-  if (!["queued", "running"].includes(job.status)) return;
+  if (job.status !== "queued") return;
 
   const authState = safeJsonParse<ZilcodeSessionState | null>(job.auth_context_json, null);
   if (!authState?.session?.token) {
@@ -759,25 +799,31 @@ export async function runConversationJob(env: Env, jobId: string): Promise<void>
     return;
   }
   if (job.expires_at && job.expires_at < nowIso()) {
+    const message = "Job đã hết hạn trước khi agent kịp xử lý. Hãy gửi lại yêu cầu để tạo job mới.";
+    await setAssistantMessageFailed(db, job, message);
     await updateJob(db, job, {
       status: "expired",
       stage: "expired",
       progress_text: "Job đã hết hạn trước khi chạy.",
+      error: message,
       finished_at: nowIso(),
       auth_context_json: null
     });
-    await insertJobEvent(db, job, "expired");
+    await insertJobEvent(db, job, "expired", { error: message });
     return;
   }
 
+  const claimedJob = await claimQueuedJob(db, job);
+  if (!claimedJob) return;
+
   try {
-    if (job.kind === "apply_pending_action") {
-      await runApplyPendingActionJob(db, env, job, authState);
+    if (claimedJob.kind === "apply_pending_action") {
+      await runApplyPendingActionJob(db, env, claimedJob, authState);
     } else {
-      await runMessageJob(db, env, job, authState);
+      await runMessageJob(db, env, claimedJob, authState);
     }
   } catch (error) {
-    await failJob(db, job, error);
+    await failJob(db, claimedJob, error);
   }
 }
 
@@ -936,11 +982,7 @@ export async function handleConversationMessage(
     }
   }
 
-  const activeJob = await db.prepare(
-    `SELECT * FROM jobs
-     WHERE conversation_id = ?1 AND user_key = ?2 AND status IN ('queued', 'running')
-     ORDER BY created_at DESC LIMIT 1`
-  ).bind(conversationId, context.owner.user_key).first<JobRow>();
+  const activeJob = await getActiveConversationJob(db, context.owner.user_key, conversationId);
   if (activeJob) {
     return jsonResponse({
       success: false,
@@ -954,44 +996,56 @@ export async function handleConversationMessage(
   const jobId = `job_${crypto.randomUUID()}`;
   const expiresAt = addSeconds(new Date(), JOB_AUTH_TTL_SECONDS);
 
-  await db.batch([
-    db.prepare(
-      `INSERT INTO messages (
-        message_id, conversation_id, user_key, role, content, status, mode,
-        tools_called_json, sources_json, debug_steps_json, action_state_json, error, created_at, updated_at
-      ) VALUES (?1, ?2, ?3, 'user', ?4, 'completed', ?5, NULL, NULL, NULL, NULL, NULL, ?6, ?6)`
-    ).bind(userMessageId, conversationId, context.owner.user_key, message, mode, now),
-    db.prepare(
-      `INSERT INTO messages (
-        message_id, conversation_id, user_key, role, content, status, mode,
-        tools_called_json, sources_json, debug_steps_json, action_state_json, error, created_at, updated_at
-      ) VALUES (?1, ?2, ?3, 'assistant', '', 'generating', ?4, NULL, NULL, NULL, NULL, NULL, ?5, ?5)`
-    ).bind(assistantMessageId, conversationId, context.owner.user_key, mode, now),
-    db.prepare(
-      `INSERT INTO jobs (
-        job_id, conversation_id, user_key, user_message_id, assistant_message_id, kind, mode, status,
-        stage, progress_text, error, idempotency_key, auth_context_json, payload_json,
-        created_at, updated_at, finished_at, expires_at
-      ) VALUES (?1, ?2, ?3, ?4, ?5, 'message', ?6, 'queued',
-        'queued', 'Job đã được đưa vào hàng chờ.', NULL, ?7, ?8, ?9,
-        ?10, ?10, NULL, ?11)`
-    ).bind(
-      jobId,
-      conversationId,
-      context.owner.user_key,
-      userMessageId,
-      assistantMessageId,
-      mode,
-      idempotencyKey,
-      toJson(context.state),
-      toJson({ message, debug: body.debug === true } satisfies JobPayload),
-      now,
-      expiresAt
-    ),
-    db.prepare(
-      `UPDATE conversations SET updated_at = ?1 WHERE conversation_id = ?2 AND user_key = ?3`
-    ).bind(now, conversationId, context.owner.user_key)
-  ]);
+  try {
+    await db.batch([
+      db.prepare(
+        `INSERT INTO messages (
+          message_id, conversation_id, user_key, role, content, status, mode,
+          tools_called_json, sources_json, debug_steps_json, action_state_json, error, created_at, updated_at
+        ) VALUES (?1, ?2, ?3, 'user', ?4, 'completed', ?5, NULL, NULL, NULL, NULL, NULL, ?6, ?6)`
+      ).bind(userMessageId, conversationId, context.owner.user_key, message, mode, now),
+      db.prepare(
+        `INSERT INTO messages (
+          message_id, conversation_id, user_key, role, content, status, mode,
+          tools_called_json, sources_json, debug_steps_json, action_state_json, error, created_at, updated_at
+        ) VALUES (?1, ?2, ?3, 'assistant', '', 'generating', ?4, NULL, NULL, NULL, NULL, NULL, ?5, ?5)`
+      ).bind(assistantMessageId, conversationId, context.owner.user_key, mode, now),
+      db.prepare(
+        `INSERT INTO jobs (
+          job_id, conversation_id, user_key, user_message_id, assistant_message_id, kind, mode, status,
+          stage, progress_text, error, idempotency_key, auth_context_json, payload_json,
+          created_at, updated_at, finished_at, expires_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, 'message', ?6, 'queued',
+          'queued', 'Job đã được đưa vào hàng chờ.', NULL, ?7, ?8, ?9,
+          ?10, ?10, NULL, ?11)`
+      ).bind(
+        jobId,
+        conversationId,
+        context.owner.user_key,
+        userMessageId,
+        assistantMessageId,
+        mode,
+        idempotencyKey,
+        toJson(context.state),
+        toJson({ message, debug: body.debug === true } satisfies JobPayload),
+        now,
+        expiresAt
+      ),
+      db.prepare(
+        `UPDATE conversations SET updated_at = ?1 WHERE conversation_id = ?2 AND user_key = ?3`
+      ).bind(now, conversationId, context.owner.user_key)
+    ]);
+  } catch (error) {
+    const racedActiveJob = await getActiveConversationJob(db, context.owner.user_key, conversationId);
+    if (racedActiveJob) {
+      return jsonResponse({
+        success: false,
+        error: "Đoạn chat đang có job chạy. Hãy chờ job hiện tại hoàn tất rồi gửi tiếp.",
+        active_job: serializeJob(racedActiveJob)
+      }, { status: 409 });
+    }
+    throw error;
+  }
 
   const dispatch = await dispatchJob(env, ctx, jobId);
   await insertJobEvent(db, { job_id: jobId, user_key: context.owner.user_key }, "queued", { dispatch });
@@ -1088,47 +1142,82 @@ export async function handleConfirmPendingAction(
     return jsonResponse({ success: false, error: "Pending action đã hết hạn, hãy tạo lại kế hoạch." }, { status: 409 });
   }
 
+  const activeJob = await getActiveConversationJob(db, context.owner.user_key, action.conversation_id);
+  if (activeJob) {
+    return jsonResponse({
+      success: false,
+      error: "Đoạn chat đang có job chạy. Hãy chờ job hiện tại hoàn tất rồi xác nhận lại.",
+      active_job: serializeJob(activeJob)
+    }, { status: 409 });
+  }
+
   const userContent = `Xác nhận thực hiện kế hoạch App Builder ${action.plan_id}.`;
 
-  await db.batch([
-    db.prepare(
-      `UPDATE pending_actions SET status = 'confirmed', updated_at = ?1 WHERE action_id = ?2 AND user_key = ?3`
-    ).bind(now, actionId, context.owner.user_key),
-    db.prepare(
-      `INSERT INTO messages (
-        message_id, conversation_id, user_key, role, content, status, mode,
-        tools_called_json, sources_json, debug_steps_json, action_state_json, error, created_at, updated_at
-      ) VALUES (?1, ?2, ?3, 'user', ?4, 'completed', 'default', NULL, NULL, NULL, NULL, NULL, ?5, ?5)`
-    ).bind(userMessageId, action.conversation_id, context.owner.user_key, userContent, now),
-    db.prepare(
-      `INSERT INTO messages (
-        message_id, conversation_id, user_key, role, content, status, mode,
-        tools_called_json, sources_json, debug_steps_json, action_state_json, error, created_at, updated_at
-      ) VALUES (?1, ?2, ?3, 'assistant', '', 'generating', 'default', NULL, NULL, NULL, NULL, NULL, ?4, ?4)`
-    ).bind(assistantMessageId, action.conversation_id, context.owner.user_key, now),
-    db.prepare(
-      `INSERT INTO jobs (
-        job_id, conversation_id, user_key, user_message_id, assistant_message_id, kind, mode, status,
-        stage, progress_text, error, idempotency_key, auth_context_json, payload_json,
-        created_at, updated_at, finished_at, expires_at
-      ) VALUES (?1, ?2, ?3, ?4, ?5, 'apply_pending_action', 'default', 'queued',
-        'queued', 'Job apply plan đã được đưa vào hàng chờ.', NULL, NULL, ?6, ?7,
-        ?8, ?8, NULL, ?9)`
-    ).bind(
-      jobId,
-      action.conversation_id,
-      context.owner.user_key,
-      userMessageId,
-      assistantMessageId,
-      toJson(context.state),
-      toJson({ action_id: actionId, plan_id: action.plan_id } satisfies JobPayload),
-      now,
-      addSeconds(new Date(), JOB_AUTH_TTL_SECONDS)
-    ),
-    db.prepare(
-      `UPDATE conversations SET updated_at = ?1 WHERE conversation_id = ?2 AND user_key = ?3`
-    ).bind(now, action.conversation_id, context.owner.user_key)
-  ]);
+  const claimed = await db.prepare(
+    `UPDATE pending_actions
+     SET status = 'confirmed', updated_at = ?1
+     WHERE action_id = ?2 AND user_key = ?3 AND status = 'waiting_confirmation'`
+  ).bind(now, actionId, context.owner.user_key).run();
+  if (Number(claimed.meta?.changes ?? 0) < 1) {
+    return jsonResponse({
+      success: false,
+      error: "Pending action đã được xử lý bởi request khác. Hãy tải lại đoạn chat để xem trạng thái mới nhất."
+    }, { status: 409 });
+  }
+
+  try {
+    await db.batch([
+      db.prepare(
+        `INSERT INTO messages (
+          message_id, conversation_id, user_key, role, content, status, mode,
+          tools_called_json, sources_json, debug_steps_json, action_state_json, error, created_at, updated_at
+        ) VALUES (?1, ?2, ?3, 'user', ?4, 'completed', 'default', NULL, NULL, NULL, NULL, NULL, ?5, ?5)`
+      ).bind(userMessageId, action.conversation_id, context.owner.user_key, userContent, now),
+      db.prepare(
+        `INSERT INTO messages (
+          message_id, conversation_id, user_key, role, content, status, mode,
+          tools_called_json, sources_json, debug_steps_json, action_state_json, error, created_at, updated_at
+        ) VALUES (?1, ?2, ?3, 'assistant', '', 'generating', 'default', NULL, NULL, NULL, NULL, NULL, ?4, ?4)`
+      ).bind(assistantMessageId, action.conversation_id, context.owner.user_key, now),
+      db.prepare(
+        `INSERT INTO jobs (
+          job_id, conversation_id, user_key, user_message_id, assistant_message_id, kind, mode, status,
+          stage, progress_text, error, idempotency_key, auth_context_json, payload_json,
+          created_at, updated_at, finished_at, expires_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, 'apply_pending_action', 'default', 'queued',
+          'queued', 'Job apply plan đã được đưa vào hàng chờ.', NULL, NULL, ?6, ?7,
+          ?8, ?8, NULL, ?9)`
+      ).bind(
+        jobId,
+        action.conversation_id,
+        context.owner.user_key,
+        userMessageId,
+        assistantMessageId,
+        toJson(context.state),
+        toJson({ action_id: actionId, plan_id: action.plan_id } satisfies JobPayload),
+        now,
+        addSeconds(new Date(), JOB_AUTH_TTL_SECONDS)
+      ),
+      db.prepare(
+        `UPDATE conversations SET updated_at = ?1 WHERE conversation_id = ?2 AND user_key = ?3`
+      ).bind(now, action.conversation_id, context.owner.user_key)
+    ]);
+  } catch (error) {
+    await db.prepare(
+      `UPDATE pending_actions
+       SET status = 'waiting_confirmation', updated_at = ?1
+       WHERE action_id = ?2 AND user_key = ?3 AND status = 'confirmed'`
+    ).bind(nowIso(), actionId, context.owner.user_key).run();
+    const racedActiveJob = await getActiveConversationJob(db, context.owner.user_key, action.conversation_id);
+    if (racedActiveJob) {
+      return jsonResponse({
+        success: false,
+        error: "Đoạn chat đang có job chạy. Hãy chờ job hiện tại hoàn tất rồi xác nhận lại.",
+        active_job: serializeJob(racedActiveJob)
+      }, { status: 409 });
+    }
+    throw error;
+  }
 
   const dispatch = await dispatchJob(env, ctx, jobId);
   await insertJobEvent(db, { job_id: jobId, user_key: context.owner.user_key }, "queued", { dispatch, action_id: actionId });
@@ -1162,13 +1251,73 @@ export async function handleCancelPendingAction(request: Request, env: Env, acti
     return jsonResponse({ success: false, error: `Pending action không thể hủy ở trạng thái ${action.status}.` }, { status: 409 });
   }
 
-  await dbOrResponse.prepare(
-    `UPDATE pending_actions SET status = 'cancelled', updated_at = ?1 WHERE action_id = ?2 AND user_key = ?3`
+  const cancelled = await dbOrResponse.prepare(
+    `UPDATE pending_actions
+     SET status = 'cancelled', updated_at = ?1
+     WHERE action_id = ?2 AND user_key = ?3 AND status = 'waiting_confirmation'`
   ).bind(nowIso(), actionId, context.owner.user_key).run();
+  if (Number(cancelled.meta?.changes ?? 0) < 1) {
+    return jsonResponse({
+      success: false,
+      error: "Pending action đã được xử lý bởi request khác. Hãy tải lại đoạn chat để xem trạng thái mới nhất."
+    }, { status: 409 });
+  }
 
   return jsonResponse({
     success: true,
     action_id: actionId,
     status: "cancelled"
   });
+}
+
+export async function cleanupConversationJobs(env: Env): Promise<Record<string, number>> {
+  const dbOrResponse = requireDb(env);
+  if (dbOrResponse instanceof Response) {
+    throw new Error("D1 database binding DB chưa được cấu hình.");
+  }
+
+  const db = dbOrResponse;
+  const now = nowIso();
+  const staleRunningBefore = addSeconds(new Date(), -RUNNING_JOB_STALE_SECONDS);
+  const expiredJobs = await db.prepare(
+    `SELECT * FROM jobs
+     WHERE (
+       status = 'queued' AND expires_at IS NOT NULL AND expires_at < ?1
+     ) OR (
+       status = 'running' AND updated_at < ?2
+     )
+     LIMIT 100`
+  ).bind(now, staleRunningBefore).all<JobRow>();
+
+  let jobsExpired = 0;
+  for (const job of expiredJobs.results ?? []) {
+    const message = "Job đã hết hạn trước khi agent kịp xử lý. Hãy gửi lại yêu cầu để tạo job mới.";
+    await setAssistantMessageFailed(db, job, message);
+    await updateJob(db, job, {
+      status: "expired",
+      stage: "expired",
+      progress_text: message,
+      error: message,
+      finished_at: now,
+      auth_context_json: null
+    });
+    await insertJobEvent(db, job, "expired", { cleanup: true, error: message });
+    jobsExpired++;
+  }
+
+  const expiredActions = await db.prepare(
+    `UPDATE pending_actions
+     SET status = 'expired', updated_at = ?1
+     WHERE status = 'waiting_confirmation' AND expires_at IS NOT NULL AND expires_at < ?1`
+  ).bind(now).run();
+
+  const eventsDeleted = await db.prepare(
+    `DELETE FROM job_events WHERE created_at < ?1`
+  ).bind(addDays(new Date(), -JOB_EVENT_RETENTION_DAYS)).run();
+
+  return {
+    jobs_expired: jobsExpired,
+    pending_actions_expired: Number(expiredActions.meta?.changes ?? 0),
+    job_events_deleted: Number(eventsDeleted.meta?.changes ?? 0)
+  };
 }
