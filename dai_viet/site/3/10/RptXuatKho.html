@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="vi">
+
+<head>
+  <meta charset="UTF-8">
+  <title>Bảng nhập kho</title>
+
+  <style>
+    body {
+      font-family: Arial;
+      margin: 0;
+      padding: 10px;
+      background: #f5f6f8;
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+      background: white;
+      border: 1px solid #ccc;
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      min-width: 3000px;
+    }
+
+    td.thieu {
+      background: #fef3c7;
+      color: #92400e;
+      font-weight: bold;
+      text-align: center;
+      white-space: nowrap;
+    }
+
+    th,
+    td {
+      border: 1px solid #ccc;
+      padding: 6px;
+      text-align: left;
+    }
+
+    th {
+      background: #e5e7eb;
+      font-weight: bold;
+      position: sticky;
+      top: 0;
+    }
+
+    input,
+    select {
+      width: 100%;
+      border: none;
+      outline: none;
+      background: transparent;
+      font-size: 13px;
+    }
+  </style>
+</head>
+
+<body>
+  <button onclick="exportExcel()">📤 Xuất Excel</button>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Loại nhập kho</th>
+          <th>Ngày hạch toán</th>
+          <th>Ngày chứng từ</th>
+          <th>Số chứng từ</th>
+          <th>Mã đối tượng</th>
+          <th>Tên đối tượng</th>
+          <th>Địa chỉ</th>
+          <th>Người giao</th>
+          <th>Diễn giải</th>
+          <th>Mã NVBH</th>
+
+          <th>Mã hàng</th>
+          <th>Tên hàng</th>
+          <th>Là dòng ghi chú</th>
+          <th>Hàng khuyến mại</th>
+          <th>Mã kho</th>
+          <th>TK Nợ</th>
+          <th>TK Có</th>
+          <th>ĐVT</th>
+          <th>Số lượng</th>
+          <th>Đơn giá</th>
+          <th>Thành tiền</th>
+          <th>Số LSX</th>
+          <th>Mã ĐT THCP</th>
+        </tr>
+      </thead>
+
+      <tbody id="tbody">
+      </tbody>
+    </table>
+  </div>
+  <!-- <script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script> -->
+  <script src="https://cdn.jsdelivr.net/npm/exceljs/dist/exceljs.min.js"></script>
+  <script>
+    async function exportExcel() {
+      const workbook = new ExcelJS.Workbook();
+      const worksheet = workbook.addWorksheet("Nhập Kho");
+
+      const table = document.querySelector("table");
+      const rows = table.querySelectorAll("tr");
+
+      let data = [];
+
+      rows.forEach(row => {
+        let rowData = [];
+        const cells = row.querySelectorAll("th, td");
+
+        cells.forEach(cell => {
+          let input = cell.querySelector("input, select");
+          if (input) {
+            rowData.push(input.value);
+          } else {
+            rowData.push(cell.innerText.trim());
+          }
+        });
+
+        data.push(rowData);
+      });
+
+      // add data
+      data.forEach(r => worksheet.addRow(r));
+
+      // 🎯 HEADER STYLE (Times New Roman, 12, bold)
+      const headerRow = worksheet.getRow(1);
+      headerRow.eachCell(cell => {
+        cell.font = {
+          name: 'Times New Roman',
+          size: 12,
+          bold: true
+        };
+        cell.alignment = { vertical: 'middle', horizontal: 'center' };
+        cell.fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'D9E1F2' }
+        };
+        cell.border = {
+          top: { style: 'thin' },
+          left: { style: 'thin' },
+          bottom: { style: 'thin' },
+          right: { style: 'thin' }
+        };
+      });
+
+      // 🎯 BODY STYLE (Times New Roman, 11)
+      worksheet.eachRow((row, rowNumber) => {
+        if (rowNumber > 1) {
+          row.eachCell(cell => {
+            cell.font = {
+              name: 'Times New Roman',
+              size: 11
+            };
+            cell.alignment = { vertical: 'middle', horizontal: 'left' };
+            cell.border = {
+              top: { style: 'thin' },
+              left: { style: 'thin' },
+              bottom: { style: 'thin' },
+              right: { style: 'thin' }
+            };
+          });
+        }
+      });
+
+      // 📏 AUTO WIDTH
+      worksheet.columns.forEach(column => {
+        let maxLength = 10;
+        column.eachCell({ includeEmpty: true }, cell => {
+          let length = cell.value ? cell.value.toString().length : 10;
+          if (length > maxLength) {
+            maxLength = length;
+          }
+        });
+        column.width = maxLength + 2;
+      });
+
+      // 💰 FORMAT SỐ
+      worksheet.eachRow((row, rowNumber) => {
+        if (rowNumber > 1) {
+          row.getCell(20).numFmt = '#,##0'; // Số lượng
+          row.getCell(21).numFmt = '#,##0'; // Đơn giá
+          row.getCell(22).numFmt = '#,##0'; // Thành tiền
+        }
+      });
+
+      // 📥 DOWNLOAD
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], { type: "application/octet-stream" });
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = "nhap_kho_dep.xlsx";
+      link.click();
+    }
+  </script>
+</body>
+
+</html>

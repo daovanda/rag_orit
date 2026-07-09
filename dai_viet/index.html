@@ -1,0 +1,420 @@
+﻿<!DOCTYPE HTML>
+<html class="nut-full">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1, user-scalable=no" />
+    <title>ZilCode v2.0</title>
+    <link rel="icon" type="image/png" href="favicon.ico" />
+    <script src="js/ui-theme.js?v=20260708-sidebar-min1"></script>
+    <link rel="stylesheet" type="text/css" href="img/index.css?v=20260707-audit2" />
+    <link rel="stylesheet" type="text/css" href="img/map/awb.css" />
+    <link id="cssMain" rel="stylesheet" type="text/css" />
+    <link id="cssMap" rel="stylesheet" type="text/css" />
+    <link rel="stylesheet" type="text/css" href="theme/dai-viet-ui.css?v=20260708-helper-icon1" />
+    <script src="lib/qrcode.min.js"></script>
+    <script src="datarock/lib/highcharts.js"></script>
+    <script src="datarock/lib/highcharts-more.js"></script>
+    <script src="lib/zipson.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/gh/davidshimjs/qrcodejs/qrcode.min.js"></script>
+    <script src="js/nut.js"></script>
+    <script type="module" src="js/index.js?v=20260708-sidebar-min1"></script>
+    <script id="jsMain"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <style>
+        /* Transition cho body khi panel mở/đóng */
+        body {
+            transition: padding-right 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+            box-sizing: border-box;
+            overflow-x: hidden;
+        }
+        /* Tất cả các container full-width trực tiếp trong body đều co giãn theo */
+        body > *:not(#zil-chat-panel):not(#zil-chat-fab):not(#zil-chat-overlay) {
+            box-sizing: border-box;
+            max-width: 100%;
+        }
+
+        #zil-chat-fab {
+            position: fixed;
+            bottom: 24px;
+            right: 24px;
+            z-index: 2147483647;
+            width: 52px;
+            height: 52px;
+            border-radius: 50%;
+            background: #1a1a1a;
+            border: none;
+            cursor: pointer;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.28);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.15s, transform 0.2s, right 0.25s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.2s;
+            isolation: isolate;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        }
+        html:not(.zil-chat-enabled) #zil-chat-fab,
+        html:not(.zil-chat-enabled) #zil-chat-panel,
+        html:not(.zil-chat-enabled) #zil-chat-overlay {
+            display: none !important;
+        }
+        #zil-chat-fab:hover { background: #333; transform: scale(1.07); }
+        #zil-chat-fab svg { width: 24px; height: 24px; fill: #fff; }
+
+        #zil-chat-fab .zil-badge {
+            position: absolute;
+            top: 4px;
+            right: 4px;
+            width: 10px;
+            height: 10px;
+            background: #ef4444;
+            border-radius: 50%;
+            border: 2px solid #fff;
+            display: none;
+        }
+
+        #zil-chat-panel {
+            position: fixed;
+            top: 0;
+            right: 0;
+            bottom: 0;
+            z-index: 2147483646;
+            width: 420px;
+            min-width: 280px;
+            max-width: 90vw;
+            background: #fff;
+            box-shadow: -4px 0 24px rgba(0, 0, 0, 0.13);
+            display: flex;
+            flex-direction: column;
+            transform: translateX(100%);
+            transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+            isolation: isolate;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        }
+        #zil-chat-panel.open { transform: translateX(0); }
+
+        #zil-resize-handle {
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 6px;
+            cursor: ew-resize;
+            z-index: 1;
+            background: transparent;
+            transition: background 0.15s;
+        }
+        #zil-resize-handle:hover,
+        #zil-resize-handle.dragging { background: rgba(0, 0, 0, 0.08); }
+
+        #zil-chat-panel-header {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            position: absolute;
+            top: 12px;
+            right: 14px;
+            z-index: 2;
+            padding: 0;
+            border: none;
+            background: transparent;
+            user-select: none;
+            box-sizing: border-box;
+        }
+        #zil-chat-panel-header svg,
+        #zil-chat-panel-header strong {
+            display: none;
+        }
+        #zil-chat-close {
+            width: 28px;
+            height: 28px;
+            border: none;
+            background: transparent;
+            border-radius: 6px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #888;
+            font-size: 18px;
+            line-height: 1;
+            font-family: sans-serif;
+        }
+        #zil-chat-close:hover { background: #f0f0ec; color: #1a1a1a; }
+
+        #zil-chat-iframe {
+            flex: 1;
+            border: none;
+            width: 100%;
+            min-height: 0;
+            display: block;
+        }
+
+        /* Overlay chỉ dùng trên mobile */
+        #zil-chat-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            z-index: 2147483645;
+            background: rgba(0, 0, 0, 0.3);
+        }
+        #zil-chat-overlay.open { display: block; }
+    </style>
+</head>
+
+<body class="nut-full" style="background:url('backdrop.jpg');background-size:cover" oncontextmenu="return false">
+
+    <!-- Nội dung production app của ZilCode render vào đây qua js/index.js -->
+
+    <script>
+        (function () {
+            const root = document.documentElement;
+
+            // ── Overlay (mobile) ──
+            const overlay = document.createElement('div');
+            overlay.id = 'zil-chat-overlay';
+            overlay.onclick = function () { zilChatClose(); };
+            root.appendChild(overlay);
+
+            // ── Floating button ──
+            const fab = document.createElement('button');
+            fab.id = 'zil-chat-fab';
+            fab.title = 'Mở AI Chat';
+            fab.setAttribute('aria-label', 'Mở Zilcode AI Chat');
+            fab.innerHTML = `
+                <svg viewBox="0 0 24 24">
+                    <path d="M20 2H4C2.9 2 2 2.9 2 4v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-2 12H6v-2h12v2zm0-3H6V9h12v2zm0-3H6V6h12v2z"/>
+                </svg>
+                <span class="zil-badge" id="zilChatBadge"></span>`;
+            fab.onclick = function () { zilChatToggle(); };
+            root.appendChild(fab);
+
+            // ── Sidebar panel ──
+            const panel = document.createElement('div');
+            panel.id = 'zil-chat-panel';
+            panel.setAttribute('role', 'complementary');
+            panel.setAttribute('aria-label', 'Zilcode AI Chat');
+            panel.innerHTML = `
+                <div id="zil-resize-handle" title="Kéo để thay đổi kích thước"></div>
+                <div id="zil-chat-panel-header">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="#1a1a1a">
+                        <path d="M20 2H4C2.9 2 2 2.9 2 4v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z"/>
+                    </svg>
+                    <strong>Zilcode AI</strong>
+                    <button id="zil-chat-close" onclick="zilChatClose()" title="Đóng" aria-label="Đóng chat">&#x2715;</button>
+                </div>
+                <iframe
+                    id="zil-chat-iframe"
+                    data-src="chat.html?v=agent-modes-1"
+                    title="Zilcode AI Chat"
+                    allow="clipboard-write"
+                ></iframe>`;
+            root.appendChild(panel);
+
+            function hasDaiVietLogin() {
+                return Boolean(
+                    window.n$
+                    && window.n$.user
+                    && window.n$.user.token
+                    && window.n$.user.roleid
+                );
+            }
+
+            function safeClone(value) {
+                try {
+                    return JSON.parse(JSON.stringify(value || {}));
+                } catch {
+                    return {};
+                }
+            }
+
+            function findItemById(collection, id) {
+                if (!collection || id === undefined || id === null) return null;
+                const textId = String(id);
+                return Object.values(collection).find(item => {
+                    if (!item || typeof item !== 'object') return false;
+                    return [item.id, item.roleid, item.orgid, item.userid]
+                        .some(value => value !== undefined && value !== null && String(value) === textId);
+                }) || null;
+            }
+
+            function getItemLabel(item) {
+                if (!item || typeof item !== 'object') return '';
+                return item.text || item.name || item.rolename || item.orgname || item.code || item.description || '';
+            }
+
+            function getChatTargetOrigin() {
+                return window.location.origin && window.location.origin !== 'null'
+                    ? window.location.origin
+                    : '*';
+            }
+
+            function buildDaiVietChatAuthPayload() {
+                if (!hasDaiVietLogin()) return null;
+
+                const user = safeClone(window.n$.user);
+                const role = findItemById(window.NUT && window.NUT.roles, user.roleid);
+                const org = findItemById(window.NUT && window.NUT.orgs, user.orgid);
+
+                return {
+                    source: 'dai_viet',
+                    base_url: ((window.n$ && window.n$.BASE) || '').replace(/\/$/, ''),
+                    token: user.token || '',
+                    user,
+                    roleid: user.roleid || '',
+                    role_name: getItemLabel(role),
+                    orgid: user.orgid || 0,
+                    org_name: getItemLabel(org),
+                    sitecode: user.sitecode || '',
+                    siteid: user.siteid || '',
+                    userid: user.userid || ''
+                };
+            }
+
+            function postChatAuthContext() {
+                const iframe = document.getElementById('zil-chat-iframe');
+                const payload = buildDaiVietChatAuthPayload();
+                if (!iframe || !iframe.contentWindow || !payload || !iframe.getAttribute('src')) return;
+
+                iframe.contentWindow.postMessage({
+                    type: 'zilcode-auth-context',
+                    payload
+                }, getChatTargetOrigin());
+            }
+
+            function ensureChatIframeLoaded() {
+                const iframe = document.getElementById('zil-chat-iframe');
+                if (iframe && !iframe.getAttribute('src')) {
+                    iframe.setAttribute('src', iframe.dataset.src || 'chat.html');
+                }
+            }
+
+            window.zilChatSetAvailable = function (available) {
+                if (available) {
+                    root.classList.add('zil-chat-enabled');
+                    ensureChatIframeLoaded();
+                    postChatAuthContext();
+                    return;
+                }
+
+                root.classList.remove('zil-chat-enabled');
+                window.zilChatClose();
+                const iframe = document.getElementById('zil-chat-iframe');
+                if (iframe) iframe.removeAttribute('src');
+            };
+
+            window.zilChatRefreshAuth = function () {
+                window.zilChatSetAvailable(hasDaiVietLogin());
+            };
+
+            window.addEventListener('zilcode:login-ready', function () {
+                window.zilChatSetAvailable(hasDaiVietLogin());
+            });
+
+            window.addEventListener('zilcode:logout', function () {
+                window.zilChatSetAvailable(false);
+            });
+
+            document.getElementById('zil-chat-iframe').addEventListener('load', postChatAuthContext);
+
+            // ── Push/restore body & fab ──
+            // w2layout dùng width:100% theo viewport.
+            // Giải pháp: dùng padding-right trên body — giữ các phần tử căn giữa vẫn đúng,
+            // đồng thời đẩy nội dung sang trái khỏi phần panel đè lên.
+            function pushLayout(panelWidth) {
+                const isMobile = window.innerWidth < 640;
+                fab.style.right = (!isMobile && panelWidth > 0) ? (24 + panelWidth) + 'px' : '24px';
+                if (isMobile) {
+                    document.body.style.paddingRight = '';
+                    return;
+                }
+                document.body.style.paddingRight = panelWidth > 0 ? panelWidth + 'px' : '';
+                // Trigger w2ui resize để layout_layMain tính lại kích thước
+                window.dispatchEvent(new Event('resize'));
+            }
+
+            // ── Toggle ──
+            let isOpen = false;
+
+            window.zilChatToggle = function () { isOpen ? zilChatClose() : zilChatOpen(); };
+
+            window.zilChatOpen = function () {
+                if (!root.classList.contains('zil-chat-enabled')) return;
+                ensureChatIframeLoaded();
+                postChatAuthContext();
+                isOpen = true;
+                panel.classList.add('open');
+                fab.style.opacity = '0';
+                fab.style.pointerEvents = 'none';
+                fab.style.transform = 'scale(0.7)';
+                if (window.innerWidth < 640) {
+                    overlay.classList.add('open');
+                } else {
+                    pushLayout(panel.offsetWidth);
+                }
+            };
+
+            window.zilChatClose = function () {
+                isOpen = false;
+                panel.classList.remove('open');
+                overlay.classList.remove('open');
+                fab.style.opacity = '1';
+                fab.style.pointerEvents = '';
+                fab.style.transform = '';
+                pushLayout(0);
+            };
+
+            // Cập nhật layout khi resize cửa sổ
+            window.addEventListener('resize', function () {
+                if (isOpen) pushLayout(window.innerWidth < 640 ? 0 : panel.offsetWidth);
+            });
+
+            document.addEventListener('keydown', function (e) {
+                if (e.key === 'Escape' && isOpen) zilChatClose();
+            });
+
+            window.zilChatRefreshAuth();
+
+            // ── Kéo resize panel ──
+            let dragging = false;
+            let startX, startW;
+
+            panel.addEventListener('mousedown', function (e) {
+                if (e.target.id !== 'zil-resize-handle') return;
+                dragging = true;
+                startX = e.clientX;
+                startW = panel.offsetWidth;
+                e.target.classList.add('dragging');
+                document.body.style.userSelect = 'none';
+                document.getElementById('zil-chat-iframe').style.pointerEvents = 'none';
+            });
+
+            document.addEventListener('mousemove', function (e) {
+                if (!dragging) return;
+                const delta = startX - e.clientX;
+                const newW = Math.min(Math.max(startW + delta, 280), window.innerWidth * 0.9);
+                panel.style.width = newW + 'px';
+                // Tắt transition khi đang kéo để không lag
+                document.body.style.transition = 'none';
+                fab.style.transition = 'background 0.15s, transform 0.15s';
+                pushLayout(newW);
+            });
+
+            document.addEventListener('mouseup', function () {
+                if (!dragging) return;
+                dragging = false;
+                // Khôi phục transition
+                document.body.style.transition = '';
+                fab.style.transition = '';
+                const h = document.getElementById('zil-resize-handle');
+                if (h) h.classList.remove('dragging');
+                document.body.style.userSelect = '';
+                const iframe = document.getElementById('zil-chat-iframe');
+                if (iframe) iframe.style.pointerEvents = '';
+            });
+        })();
+    </script>
+
+</body>
+</html>

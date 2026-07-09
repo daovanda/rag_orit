@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="UTF-8">
+    <title>Tem sản lượng</title>
+
+    <style>
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th,
+        td {
+            border: 1px solid #000;
+            padding: 6px;
+            text-align: center;
+        }
+
+        .no-border,
+        .no-border td {
+            border: none !important;
+        }
+
+        body {
+            font-family: 'Times New Roman', Times, serif;
+            font-size: 12px;
+        }
+
+        table, th, td {
+            font-family: inherit;
+        }
+
+        .temp-wrapper {
+            position: relative;
+        }
+
+        .qrcode-wrap {
+            position: absolute;
+            top: 0;
+            right: 0;
+            width: 80px;
+            text-align: right;
+        }
+
+        .qrcode-wrap .qrcode {
+            display: inline-block;
+        }
+
+        .sign-row td {
+            padding-top: 8px;
+            padding-bottom: 8px;
+            vertical-align: bottom;
+        }
+
+        .sign-placeholder {
+            height: 48px;
+            min-height: 48px;
+            margin-top: 4px;
+        }
+
+        @media print {
+
+            body {
+                margin: 0 !important;
+                padding: 0 !important;
+                font-family: 'Times New Roman', Times, serif !important;
+            }
+
+            @page {
+                size: A4;
+                margin: 6mm;
+            }
+
+            .page {
+                page-break-after: always;
+            }
+
+            .page:last-of-type {
+                page-break-after: auto;
+            }
+
+            .temp-wrapper {
+                height: auto;
+                min-height: 359px;
+                box-sizing: border-box;
+                padding: 4px 5mm 4px 0;
+            }
+
+            .qrcode-wrap {
+                position: absolute;
+                top: 0;
+                right: 0;
+            }
+
+            .sign-placeholder {
+                height: 52px;
+                min-height: 52px;
+            }
+        }
+
+        .cell-big {
+            height: 22px;
+            min-height: 22px;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div id="template" class="temp-wrapper">
+
+        <div style="font-weight:bold;font-size:16px;">
+            CÔNG TY TNHH SẢN XUẤT NHỰA ĐẠI VIỆT HÀ NAM
+        </div>
+
+        <h2 style="text-align:center; margin:6px 0;">TEM SẢN LƯỢNG <span id="tieude"></span></h2>
+
+        <div class="qrcode-wrap">
+            <div class="qrcode" data-qr=""></div>
+        </div>
+
+        <table class="no-border">
+            <tr>
+                <td class="no-border" id="maydun"></td>
+                <td class="no-border" id="tomay"></td>
+                <td class="no-border" id="toin"></td>
+                <td class="no-border" id="seri"></td>
+            </tr>
+            <tr>
+                <td class="no-border" id="maydun1"></td>
+                <td class="no-border" id="tomay1"></td>
+
+            </tr>
+        </table>
+
+        <table>
+            <tr>
+                <th>CA MÁY</th>
+                <th>QUY CÁCH</th>
+                <th>SỐ LƯỢNG ĐÙN(tấm)</th>
+                <th>MÀU LAM SÓNG</th>
+                <th>SỐ LƯỢNG DÁN ĐẠT(tấm)</th>
+                <th>SL phế đùn</th>
+                <th>SL PHẾ DÁN MÀNG</th>
+                <th>SỐ LƯỢNG ĐG ĐẠT(tấm)</th>
+                <th>TẤM CHUYỂN (dương/âm)</th>
+                <th>SỐ LƯỢNG PHẾ ĐG(tấm)</th>
+            </tr>
+            <tr>
+                <td id="ca">
+                    <div class="cell-big"></div>
+                </td>
+                <td>
+                    <div class="cell-big"></div>
+                </td>
+                <td>
+                    <div class="cell-big"></div>
+                </td>
+                <td>
+                    <div class="cell-big"></div>
+                </td>
+                <td>
+                    <div class="cell-big"></div>
+                </td>
+                <td>
+                    <div class="cell-big"></div>
+                </td>
+                <td>
+                    <div class="cell-big"></div>
+                </td>
+                <td>
+                    <div class="cell-big"></div>
+                </td>
+                <td>
+                    <div class="cell-big"></div>
+                </td>
+                <td>
+                    <div class="cell-big"></div>
+                </td>
+            </tr>
+            <tr>
+                <td id="ca">
+                    <div class="cell-big"></div>
+                </td>
+                <td>
+                    <div class="cell-big"></div>
+                </td>
+                <td>
+                    <div class="cell-big"></div>
+                </td>
+                <td>
+                    <div class="cell-big"></div>
+                </td>
+                <td>
+                    <div class="cell-big"></div>
+                </td>
+                <td>
+                    <div class="cell-big"></div>
+                </td>
+                <td>
+                    <div class="cell-big"></div>
+                </td>
+                <td>
+                    <div class="cell-big"></div>
+                </td>
+                <td>
+                    <div class="cell-big"></div>
+                </td>
+                <td>
+                    <div class="cell-big"></div>
+                </td>
+            </tr>
+        </table>
+
+        <table class="no-border sign-row">
+            <tr>
+                <td class="no-border" style="text-align:center; width:33%;">Xác nhận tổ trưởng đùn/ngày tháng<div class="sign-placeholder"></div></td>
+                <td class="no-border" style="text-align:center; width:34%;">Xác nhận tổ dán/ngày tháng<div class="sign-placeholder"></div></td>
+                <td class="no-border" style="text-align:center; width:33%;">Xác nhận tổ trưởng ĐG/ngày tháng<div class="sign-placeholder"></div></td>
+            </tr>
+        </table>
+    </div>
+	<script src="https://cdn.jsdelivr.net/gh/davidshimjs/qrcodejs/qrcode.min.js"></script>
+</body>
+
+</html>

@@ -1,0 +1,391 @@
+
+<!DOCTYPE html>
+<html>
+
+    <head>
+        <meta charset="UTF-8">
+        <title>Tem sản lượng</title>
+        <style>
+        body {
+            margin: 0;
+            font-family: "Times New Roman", Times, serif;
+            font-size: 11px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            table-layout: fixed;
+            position: relative;
+            bottom: 17px;
+        }
+
+        th,
+        td {
+            border: 1px solid #000;
+            padding: 3px 4px;
+            text-align: center;
+            vertical-align: middle;
+            font-weight: normal;
+        }
+
+        .temp-wrapper {
+            box-sizing: border-box;
+            padding: 0.5mm 2mm 0 2mm;        }
+
+        .top-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 2px;
+        }
+
+        .company-name {
+            font-size: 15px;
+            font-weight: bold;
+            line-height: 1.1;
+            position: relative;
+            top:10px;
+        }
+
+        .top-right {
+            text-align: center;
+            min-width: 120px;
+        }
+
+        .year-label {
+            font-weight: bold;
+            margin-top: 2px;
+            position: relative;
+            top:18px;
+        }
+
+        .header-title {
+            font-size: 15px;
+            font-weight: bold;
+            text-align: center;
+            margin: 0 0 15px 0;
+            position: relative;
+            bottom: 18px;
+        }
+
+        .section-title {
+            text-align: left;
+            font-weight: bold;
+        }
+
+        .left {
+            text-align: left;
+        }
+
+        .bold {
+            font-weight: bold;
+        }
+
+        .cell-big {
+            height: 16px;
+            min-height: 16px;
+        }
+
+        .qrcode {
+            display: inline-block;
+            position: relative;
+            top:18px;
+
+        }
+
+        .sign-outside {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr 1fr;
+            column-gap: 8px;
+           
+    margin-top: 16px;
+    margin-bottom: 16mm;
+
+            text-align: center;
+            font-weight: bold;
+            font-size: 12px;
+            position: relative;
+            bottom: 22px;
+        }
+
+      @media print {
+
+    @page {
+        size: A4;
+        margin: 4mm;
+    }
+
+    html,
+    body {
+        margin: 0;
+        padding: 0;
+    }
+
+    body {
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .temp-wrapper {
+
+        width: 100%;
+
+        height: 140mm;
+
+        box-sizing: border-box;
+        overflow: hidden;
+
+        page-break-inside: avoid;
+        break-inside: avoid;
+
+        padding: 2mm 2mm 0 2mm;
+
+        margin-bottom: 8mm;
+    }
+
+    table {
+        page-break-inside: avoid;
+    }
+
+    #qrcode img {
+        width: 68px !important;
+        height: 68px !important;
+    }
+
+    .sign-outside {
+        margin-top: 18px;
+
+        margin-bottom: 12mm;
+
+        text-align: center;
+        font-weight: bold;
+        font-size: 12px;
+    }
+}
+
+    </style>
+    </head>
+
+    <body>
+        <div id="template" class="temp-wrapper">
+            <div class="top-header">
+                <div class="company-name">CÔNG TY TNHH SẢN XUẤT NHỰA ĐẠI VIỆT
+                    NINH BÌNH</div>
+                <div class="top-right">
+                    <div id="qrcode" class="qrcode" data-qr
+                        data-qr-size="95"></div>
+                    <div class="year-label">2026</div>
+                </div>
+            </div>
+            <div class="header-title">TEM SẢN LƯỢNG <span
+                    id="tieude"></span></div>
+
+            <table>
+                <colgroup>
+                    <col style="width:6%;">
+                    <col style="width:15%;">
+                    <col style="width:7%;">
+                    <col style="width:7%;">
+                    <col style="width:12%;">
+                    <col style="width:11%;">
+                    <col style="width:9%;">
+                    <col style="width:7%;">
+                    <col style="width:6%;">
+                    <col style="width:6%;">
+                    <col style="width:6%;">
+                </colgroup>
+
+                <tr>
+                    <td colspan="2" class="section-title">I. ĐÙN</td>
+                    <td colspan="2" class="bold">Ngày đùn:</td>
+                    <td colspan="3" class="bold">Số máy:</td>
+                    <td colspan="5" class="bold">Số xe:</td>
+                </tr>
+
+                <tr>
+                    <td colspan="7" class="left bold">Người đứng máy:</td>
+                    <td colspan="5" style="color:#b30000; font-weight:bold;"
+                        class="no-border" id="seri"></td>
+                </tr>
+                <tr>
+                    <th>Ca</th>
+                    <th>Quy cách</th>
+                    <th>Số tấm đã cắt</th>
+                    <th>Số tấm lót</th>
+                    <th>TL bì xe (xe + Pallet + tấm lót)</th>
+                    <th>Tổng TL Hàng</th>
+                    <th>Chênh lệch</th>
+                    <th colspan="3">Phát sinh lớn</th>
+                    <th colspan="2">KCS xác nhận</th>
+                </tr>
+                <tr>
+                    <td id="ca"><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td colspan="3"><div class="cell-big"></div></td>
+                    <td colspan="2"><div class="cell-big"></div></td>
+
+                </tr>
+                <tr>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td colspan="3"><div class="cell-big"></div></td>
+                    <td colspan="2"><div class="cell-big"></div></td>
+                </tr>
+                <tr>
+                    <td class="left">Tổng</td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td colspan="3"><div class="cell-big"></div></td>
+                    <td colspan="2"><div class="cell-big"></div></td>
+                </tr>
+
+                <tr>
+                    <td colspan="2" class="section-title">II. IN</td>
+                    <td colspan="2" class="bold">Ngày in:</td>
+                    <td colspan="3" class="bold">Số máy:</td>
+                    <td colspan="5" class="bold">Số xe:</td>
+                </tr>
+                <tr>
+                    <th>Ca</th>
+                    <th>Quy cách</th>
+                    <th>Số tấm nhận</th>
+                    <th>Số tấm in đạt</th>
+                    <th>Số tấm phôi lỗi</th>
+                    <th>Số tấm in lỗi</th>
+                    <th>Chênh lệch</th>
+                    <th colspan="3">Phế khác</th>
+                    <th colspan="2">KCS xác nhận</th>
+                </tr>
+                <tr>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td colspan="3"><div class="cell-big"></div></td>
+                    <td colspan="2"><div class="cell-big"></div></td>
+                </tr>
+                <tr>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td colspan="3"><div class="cell-big"></div></td>
+                    <td colspan="2"><div class="cell-big"></div></td>
+                </tr>
+                <tr>
+                    <td class="left">Tổng</td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td colspan="3"><div class="cell-big"></div></td>
+                    <td colspan="2"><div class="cell-big"></div></td>
+                </tr>
+
+                <tr>
+                    <td colspan="2" class="section-title">III. Đóng gói</td>
+                    <td colspan="2" class="bold">Ngày đóng gói:</td>
+                    <td colspan="4" class="bold">Số bàn:</td>
+                    <td colspan="4" class="bold">Số xe:</td>
+                </tr>
+                <tr>
+                    <th>STT</th>
+                    <th>Quy cách</th>
+                    <th>Số tấm nhận</th>
+                    <th>Số kiện</th>
+                    <th>Số tấm lỗi</th>
+                    <th>TL bì xe</th>
+                    <th>TL hàng</th>
+                    <th>Chênh lệch</th>
+                    <th colspan="2">Tấm lẻ</th>
+                    <th>Xác nhận bàn ĐG</th>
+                    <th>KCS xác nhận</th>
+                </tr>
+                <tr>
+                    <th></th>
+                    <th></th>
+                    <th></th>
+                    <th></th>
+                    <th></th>
+                    <th></th>
+                    <th></th>
+                    <th></th>
+                    <th>-</th>
+                    <th>+</th>
+                    <th></th>
+                    <th></th>
+                </tr>
+                <tr>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                </tr>
+                <tr>
+                    <td class="left">Tổng</td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                    <td><div class="cell-big"></div></td>
+                </tr>
+            </table>
+
+            <div class="sign-outside">
+                <div>Xác nhận tổ đùn</div>
+                <div>Xác nhận tổ in</div>
+                <div>Xác nhận tổ đóng gói</div>
+                <div>Xác nhận QC</div>
+            </div>
+
+            <table style="display:none;">
+                <tr>
+                    <td id="maydun"></td>
+                    <td id="tomay"></td>
+                    <td id="toin"></td>
+                </tr>
+            </table>
+        </div>
+        <script
+            src="https://cdn.jsdelivr.net/gh/davidshimjs/qrcodejs/qrcode.min.js"></script>
+    </body>
+
+</html>

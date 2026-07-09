@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="vi">
+
+<head>
+    <meta charset="utf-8">
+
+    <style>
+        body {
+            font-family: 'Times New Roman', Times, serif;
+            font-size: 14px;
+            margin: 20px;
+            color: #111;
+        }
+
+        table {
+            border-collapse: collapse;
+            width: 100%;
+        }
+
+        th,
+        td {
+            border: 1px solid #000;
+            padding: 5px;
+            text-align: center;
+        }
+
+        th {
+            background: #f3f6fa;
+            font-weight: 600;
+        }   
+
+        h2 {
+            margin-top: 0;
+        }
+
+        .btn-export {
+            float: right;
+            border: 1px solid #444;
+            padding: 6px 10px;
+            text-decoration: none;
+            color: #111;
+            border-radius: 4px;
+            font-size: 13px;
+        }
+
+        @media print {
+            .btn-export {
+                display: none;
+            }
+        }
+    </style>
+
+</head>
+
+<body>
+
+    <h2>
+        TỔNG HỢP KHSX
+        <span id="tensp"></span>
+        <span id="thang"></span>
+    </h2>
+
+    <a class="btn-export" download="RptTongHop.xls"
+        onclick="if(!this.href)this.href='data:application/vnd.ms-excel,'+document.body.innerHTML.replace(/ /g,'%20')">
+        Xuất Excel
+    </a>
+
+    <table id="tblData">
+        <thead></thead>
+        <tbody></tbody>
+    </table>
+
+    <script>
+
+        function f(n) {
+            return Number(n || 0).toLocaleString('vi-VN');
+        }
+
+        function matchNhom(rp, codes) {
+            var t = (rp.nhomspText || "").toUpperCase().replace(/\s+/g, "");
+            var id = String(rp.nhomspId || "");
+            for (var i = 0; i < codes.length; i++) {
+                var c = String(codes[i]).toUpperCase().replace(/\s+/g, "");
+                if (t === c || t.indexOf(c) >= 0) return true;
+                if (id && String(id) === String(codes[i])) return true;
+            }
+            return false;
+        }
+
+        function renderReport() {
+
+            var data = window.data || [];
+            var rp = window.reportParams || {};
+
+            document.getElementById("tensp").innerText = rp.nhomspText || rp.nhomspId || "";
+
+            document.getElementById("thang").innerText =
+                " - Tháng " + rp.thang + "/" + rp.nam;
+
+            var thead = document.querySelector("#tblData thead");
+            var tbody = document.querySelector("#tblData tbody");
+
+            tbody.innerHTML = "";
+
+            if (!data.length) {
+                thead.innerHTML = "";
+                tbody.innerHTML = "<tr><td colspan='20'>Không có dữ liệu</td></tr>";
+                return;
+            }
+
+            /* ECO / PEN: KH – đùn – in – đóng – chênh – chưa đùn + DVC cuối kỳ, SL dư (theo view thsx_vv) */
+            if (matchNhom(rp, ["ECO", "PEN"])) {
+
+                thead.innerHTML = `
+                    <tr>
+                    <th>STT</th>
+                    <th>Số tem</th>
+                    <th>Mã sp</th>
+                    <th>Quy cách</th>
+                    <th>Tổng KH</th>
+                    <th>KL KH</th>
+                    <th>SL đùn</th>
+                    <th>KL đùn</th>
+                    <th>SL in đạt</th>
+                    <th>KL in đạt</th>
+                    <th>SL đóng</th>
+                    <th>KL đóng</th>
+                    <th>Chênh đùn-in</th>
+                    <th>Chưa đùn</th>
+                    <th>KL chưa đùn</th>
+                    <th>SL DVC CK</th>
+                    <th>SL dư</th>
+                    </tr>
+                    `;
+
+                data.forEach(function (r, i) {
+                    tbody.innerHTML += `
+                        <tr>
+                        <td>${i + 1}</td>
+                        <td>${r.sotem || ""}</td>
+                        <td>${r.mamau || ""}</td>
+                        <td>${r.quycach || ""}</td>
+                        <td>${f(r.tongsltam)}</td>
+                        <td>${f(r.kltongkhsx)}</td>
+                        <td>${f(r.sltamdun)}</td>
+                        <td>${f(r.kltamdun)}</td>
+                        <td>${f(r.slindat)}</td>
+                        <td>${f(r.klindat)}</td>
+                        <td>${f(r.sldongdat)}</td>
+                        <td>${f(r.kldongdat)}</td>
+                        <td>${f(r.slchenhindun)}</td>
+                        <td>${f(r.slchuadun)}</td>
+                        <td>${f(r.klchuadun)}</td>
+                        <td>${f(r.soluongdvccuoiky)}</td>
+                        <td>${f(r.sldu)}</td>
+                        </tr>
+                        `;
+                });
+
+            }
+
+            /* LUX / LUX_E+: dán, chưa dán, mét film, tồn phôi (theo view) */
+            else if (matchNhom(rp, ["LUX_E+", "LUX"])) {
+
+                thead.innerHTML = `
+                    <tr>
+                    <th>STT</th>
+                    <th>Số tem</th>
+                    <th>Mã sp</th>
+                    <th>Quy cách</th>
+                    <th>Tổng KH</th>
+                    <th>SL đùn</th>
+                    <th>SL dán</th>
+                    <th>Dán mặt1</th>
+                    <th>Dán mặt2</th>
+                    <th>Chưa dán m1</th>
+                    <th>Chưa dán m2</th>
+                    <th>Mét film chưa dán m1</th>
+                    <th>Mét film chưa dán m2</th>
+                    <th>Tồn phôi (tấm)</th>
+                    <th>KL tồn phôi</th>
+                    <th>SL DVC CK</th>
+                    <th>SL dư</th>
+                    </tr>
+                    `;
+
+                data.forEach(function (r, i) {
+                    tbody.innerHTML += `
+                        <tr>
+                        <td>${i + 1}</td>
+                        <td>${r.sotem || ""}</td>
+                        <td>${r.mamau || ""}</td>
+                        <td>${r.quycach || ""}</td>
+                        <td>${f(r.tongsltam)}</td>
+                        <td>${f(r.sltamdun)}</td>
+                        <td>${f(r.sotamdan)}</td>
+                        <td>${f(r.sldanmat1)}</td>
+                        <td>${f(r.sldanmat2)}</td>
+                        <td>${f(r.slchuadanmat1)}</td>
+                        <td>${f(r.slchuadanmat2)}</td>
+                        <td>${f(r.metfilmchuadanmat1)}</td>
+                        <td>${f(r.metfilmchuadanmat2)}</td>
+                        <td>${f(r.tonphoichuadan)}</td>
+                        <td>${f(r.kltonphoichuadan)}</td>
+                        <td>${f(r.soluongdvccuoiky)}</td>
+                        <td>${f(r.sldu)}</td>
+                        </tr>
+                        `;
+                });
+
+            }
+
+            /* Mặc định (khác nhóm…): cột chung + DVC, dư */
+            else {
+
+                thead.innerHTML = `
+                    <tr>
+                    <th>STT</th>
+                    <th>Số tem</th>
+                    <th>Mã sp</th>
+                    <th>Quy cách</th>
+                    <th>Tổng KH</th>
+                    <th>SL đùn</th>
+                    <th>Chưa đùn</th>
+                    <th>SL đóng</th>
+                    <th>KL đóng</th>
+                    <th>SL DVC CK</th>
+                    <th>SL dư</th>
+                    </tr>
+                    `;
+
+                data.forEach(function (r, i) {
+                    tbody.innerHTML += `
+                        <tr>
+                        <td>${i + 1}</td>
+                        <td>${r.sotem || ""}</td>
+                        <td>${r.mamau || ""}</td>
+                        <td>${r.quycach || ""}</td>
+                        <td>${f(r.tongsltam)}</td>
+                        <td>${f(r.sltamdun)}</td>
+                        <td>${f(r.slchuadun)}</td>
+                        <td>${f(r.sldongdat)}</td>
+                        <td>${f(r.kldongdat)}</td>
+                        <td>${f(r.soluongdvccuoiky)}</td>
+                        <td>${f(r.sldu)}</td>
+                        </tr>
+                        `;
+                });
+
+            }
+
+        }
+
+        window.renderReport = renderReport;
+
+        window.onload = function () {
+            if (window.data && window.data.length && window.reportParams) {
+                renderReport();
+            }
+        };
+
+    </script>
+
+</body>
+
+</html>

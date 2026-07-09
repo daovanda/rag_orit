@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="vi">
+
+<head>
+    <meta charset="utf-8">
+    <style>
+        body {
+            font-family: 'Times New Roman', Times, serif;
+            font-size: 14px;
+            background-color: #fff;
+            margin: 20px;
+            color: #111;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 10px;
+            position: relative;
+        }
+
+        .header img {
+            width: 120px;
+            float: left;
+        }
+
+        .header h1 {
+            font-size: 20px;
+            margin: 0;
+            letter-spacing: 0.4px;
+        }
+
+        .header h2 {
+            font-size: 18px;
+            margin: 4px 0;
+        }
+
+        td[colspan] {
+            text-align: left;
+        }
+
+
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            margin-top: 10px;
+        }
+
+        th,
+        td {
+            border: 1px solid #000;
+            padding: 5px;
+            text-align: center;
+            vertical-align: middle;
+        }
+
+        th {
+            background: #f3f6fa;
+            font-weight: 700;
+        }
+
+        td[colspan] {
+            text-align: left;
+            font-weight: 600;
+            background: #fafafa;
+        }
+
+        .btn-export {
+            float: right;
+            border: 1px solid #444;
+            padding: 6px 10px;
+            text-decoration: none;
+            color: #111;
+            border-radius: 4px;
+            margin-bottom: 6px;
+            font-size: 13px;
+        }
+
+        @media print {
+            .btn-export {
+                display: none;
+            }
+
+            body {
+                margin: 8mm;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="header">
+        <img src="logo.png" alt="Logo">
+        <h1>BẢNG THEO DÕI KHỐI LƯỢNG IN</h1>
+    </div>
+
+    <a class="btn-export" download="RptIn.xls"
+        onclick="if(!this.href)this.href='data:application/vnd.ms-excel,'+document.body.innerHTML.replace(/ /g, '%20')">Kết
+        xuất Excel</a>
+
+    <table id="tblData" border="1">
+        <tr>
+            <td colspan="3">NGÀY: </td>
+            <td colspan="2">CA SẢN XUẤT: </td>
+            <td colspan="2">TỔ IN: </td>
+            <td colspan="5">TÊN TỔ TRƯỞNG:</td>
+            <td colspan="4">KÝ TÊN XÁC NHẬN:</td>
+        </tr>
+
+        <tr>
+            <th rowspan="2">Số tt</th>
+            <th rowspan="2">Mã hàng</th>
+            <th rowspan="2">Tỉ trọng</th>
+            <th rowspan="2">Số seri tem</th>
+            <th rowspan="2">Số xe mang in</th>
+            <th rowspan="2">Số tấm phôi mang in</th>
+            <th rowspan="2">Số tấm in đạt</th>
+            <th rowspan="2">Kl đạt</th>
+            <th rowspan="2">Số xe thành phẩm</th>
+            <th colspan="2">Số tấm lỗi</th>
+            <th rowspan="2">Tên tổ máy có phôi lỗi</th>
+            <th rowspan="2">Định mức in uv</th>
+            <th rowspan="2">Ghi chú</th>
+        </tr>
+        <tr>
+            <th>Lỗi do đùn</th>
+            <th>Lỗi do in</th>
+        </tr>
+
+    </table>
+</body>
+
+</html>

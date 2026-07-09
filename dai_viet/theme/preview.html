@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html class="nut-full">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Dai Viet UI Preview</title>
+	<script src="../js/ui-theme.js?v=20260708-sidebar-min1"></script>
+	<script>
+		document.write('<link id="cssMain" rel="stylesheet" href="../lib/' + DaiVietUI.currentTheme() + '.css">');
+	</script>
+	<link rel="stylesheet" href="dai-viet-ui.css?v=20260708-helper-icon1">
+	<style>
+		html,
+		body {
+			width: 100%;
+			height: 100%;
+			margin: 0;
+		}
+
+		.preview-frame {
+			width: 100%;
+			height: 100%;
+			display: grid;
+			grid-template-rows: var(--dv-topbar-height) 1fr;
+			background: var(--dv-bg);
+			color: var(--dv-text);
+			overflow: hidden;
+		}
+
+		.preview-body {
+			display: grid;
+			grid-template-columns: minmax(96px, 240px) minmax(0, 1fr);
+			min-height: 0;
+		}
+
+		.preview-main {
+			min-width: 0;
+			padding: 12px 10px;
+			overflow-y: auto;
+			overflow-x: hidden;
+		}
+
+		.preview-grid {
+			height: 168px;
+			margin-bottom: 8px;
+		}
+
+		.dv-theme-preview #divLeft .w2ui-sidebar,
+		.dv-theme-preview .w2ui-grid,
+		.dv-theme-preview .w2ui-grid-box,
+		.dv-theme-preview .w2ui-grid-toolbar,
+		.dv-theme-preview .w2ui-grid-body,
+		.dv-theme-preview .w2ui-form,
+		.dv-theme-preview .w2ui-form .w2ui-page {
+			position: static !important;
+			inset: auto !important;
+			height: auto !important;
+			overflow: visible !important;
+		}
+
+		.dv-theme-preview #divLeft .w2ui-sidebar {
+			height: 100% !important;
+		}
+
+		.dv-theme-preview #divLeft .w2ui-sidebar > div {
+			position: relative !important;
+			width: 100% !important;
+			height: 100% !important;
+			overflow: hidden !important;
+		}
+
+		.dv-theme-preview .preview-grid,
+		.dv-theme-preview .preview-grid .w2ui-grid-box {
+			min-height: 168px;
+		}
+
+		.dv-theme-preview .w2ui-grid-body table {
+			position: static !important;
+			width: 100% !important;
+			border-collapse: collapse;
+			table-layout: fixed;
+		}
+
+		.dv-theme-preview .w2ui-grid-body table tr {
+			height: 24px !important;
+		}
+
+		.dv-theme-preview .w2ui-grid-body table td {
+			position: static !important;
+			display: table-cell !important;
+			padding: 0 !important;
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+
+		.dv-theme-preview .w2ui-grid-body table td > div {
+			padding: 4px 6px !important;
+		}
+
+		.dv-theme-preview .w2ui-form .w2ui-column {
+			min-width: 0;
+		}
+
+		.preview-actions {
+			position: fixed;
+			right: 14px;
+			bottom: 14px;
+			z-index: 20;
+			display: flex;
+			gap: 6px;
+		}
+
+		.preview-actions .w2ui-btn {
+			min-width: 64px !important;
+		}
+
+		@media (max-width: 760px) {
+			.preview-frame {
+				grid-template-rows: var(--dv-topbar-height) 1fr;
+			}
+
+			.preview-body {
+				grid-template-columns: 1fr;
+			}
+
+			#divLeft {
+				display: none;
+			}
+
+			.preview-main {
+				padding: 8px;
+			}
+
+			.preview-actions {
+				right: 8px;
+				bottom: 8px;
+			}
+		}
+	</style>
+</head>
+<body class="dv-theme-preview">
+	<div class="preview-frame">
+		<div id="divTop">
+			<div class="w2ui-toolbar">
+				<div class="w2ui-scroll-wrapper">
+					<div class="w2ui-tb-html">
+						<table width="170">
+							<tr>
+								<td><img id="imgAppLogo" height="24" src="../logo.png" alt=""></td>
+								<td>
+									<div id="divAppNames"><b>VATM ASRCC</b><br><i>CMS</i></div>
+								</td>
+							</tr>
+						</table>
+					</div>
+					<div class="w2ui-tb-spacer"></div>
+					<div class="w2ui-tb-button"><span class="w2ui-tb-text">Home</span></div>
+					<div class="w2ui-tb-button"><span class="w2ui-tb-text">User name</span></div>
+					<div class="w2ui-tb-button"><span class="w2ui-tb-text">Apps</span></div>
+				</div>
+			</div>
+		</div>
+
+		<div class="preview-body">
+			<div id="divLeft">
+				<div class="w2ui-sidebar">
+					<div>
+						<div class="w2ui-sidebar-top">
+							<div class="dv-sidebar-search"><input class="w2ui-input" placeholder="Search %"></div>
+							<div class="w2ui-flat w2ui-flat-left"></div>
+						</div>
+						<div class="w2ui-sidebar-body">
+							<div class="w2ui-node"><span class="w2ui-node-text">Site</span></div>
+							<div class="w2ui-node"><span class="w2ui-node-text">Data service</span></div>
+							<div class="w2ui-node"><span class="w2ui-node-text">User</span></div>
+							<div class="w2ui-node-group">Application</div>
+							<div class="w2ui-node w2ui-selected"><span class="w2ui-node-text">SET</span></div>
+							<div class="w2ui-node"><span class="w2ui-node-text">CBN</span></div>
+						</div>
+					</div>
+				</div>
+			</div>
+
+			<main id="divMain" class="preview-main">
+				<div class="w2ui-tabs">
+					<div class="w2ui-scroll-wrapper">
+						<div class="w2ui-tab">Application</div>
+						<div class="w2ui-tab active">Window</div>
+						<div class="w2ui-tab">Menu</div>
+						<div class="w2ui-tab">Map</div>
+						<div class="w2ui-tab">Report</div>
+						<div class="w2ui-tab">Workflow</div>
+					</div>
+				</div>
+
+				<div class="w2ui-grid preview-grid">
+					<div class="w2ui-grid-box">
+						<div class="w2ui-grid-toolbar">
+							<div class="w2ui-toolbar">
+								<div class="w2ui-scroll-wrapper">
+									<div class="w2ui-tb-button"><span class="w2ui-tb-text">Cache Window</span></div>
+									<div class="w2ui-tb-button"><span class="w2ui-tb-text">Build Tabs</span></div>
+									<div class="w2ui-tb-button"><span class="w2ui-tb-text">Preview Window</span></div>
+								</div>
+							</div>
+						</div>
+						<div class="w2ui-grid-body">
+							<table width="100%">
+								<tr>
+									<td class="w2ui-head"><div class="w2ui-resizer"></div><div class="w2ui-col-header">Window ID</div></td>
+									<td class="w2ui-head"><div class="w2ui-resizer"></div><div class="w2ui-col-header">Window name</div></td>
+									<td class="w2ui-head"><div class="w2ui-resizer"></div><div class="w2ui-col-header">Window type</div></td>
+									<td class="w2ui-head"><div class="w2ui-resizer"></div><div class="w2ui-col-header">Translate</div></td>
+									<td class="w2ui-head"><div class="w2ui-resizer"></div><div class="w2ui-col-header">Application</div></td>
+								</tr>
+								<tr class="w2ui-record w2ui-odd">
+									<td class="w2ui-grid-data"><div>1,126</div></td>
+									<td class="w2ui-grid-data"><div>Project</div></td>
+									<td class="w2ui-grid-data"><div>Window</div></td>
+									<td class="w2ui-grid-data"><div>-</div></td>
+									<td class="w2ui-grid-data"><div>Time Sheet HL</div></td>
+								</tr>
+								<tr class="w2ui-record w2ui-even">
+									<td class="w2ui-grid-data"><div>1,127</div></td>
+									<td class="w2ui-grid-data"><div>Users</div></td>
+									<td class="w2ui-grid-data"><div>Window</div></td>
+									<td class="w2ui-grid-data"><div>-</div></td>
+									<td class="w2ui-grid-data"><div>Time Sheet HL</div></td>
+								</tr>
+							</table>
+						</div>
+					</div>
+				</div>
+
+				<div class="w2ui-form">
+					<div class="w2ui-page">
+						<div class="w2ui-tabs">
+							<div class="w2ui-scroll-wrapper">
+								<div class="w2ui-tab active">Tab</div>
+								<div class="w2ui-tab">Field</div>
+								<div class="w2ui-tab">Tool</div>
+							</div>
+						</div>
+						<div class="w2ui-toolbar">
+							<div class="w2ui-scroll-wrapper">
+								<div class="w2ui-tb-button"><span class="w2ui-tb-text">Add</span></div>
+								<div class="w2ui-tb-button"><span class="w2ui-tb-text">Save</span></div>
+								<div class="w2ui-tb-button"><span class="w2ui-tb-text">Find</span></div>
+							</div>
+						</div>
+						<div class="w2ui-column-container">
+							<div class="w2ui-column col-0">
+								<div class="w2ui-field w2ui-required"><label>Tab name</label><div><input value="CTTTHT Line"></div></div>
+								<div class="w2ui-field w2ui-required"><label>Tab level</label><div><input value="0"></div></div>
+								<div class="w2ui-field w2ui-required"><label>Table ID</label><div><select><option>CTTTHT_Line</option></select></div></div>
+								<div class="w2ui-field w2ui-required"><label>Link child field</label><div><input value="-"></div></div>
+								<div class="w2ui-field"><label></label><div><label class="w2ui-box-label"><input type="radio"> <span>Is View Only</span></label> <label class="w2ui-box-label"><input type="radio" checked> <span>Is View Only</span></label></div></div>
+							</div>
+							<div class="w2ui-column col-1">
+								<div class="w2ui-field"><label>Translate</label><div><input value="-"></div></div>
+								<div class="w2ui-field w2ui-required"><label>Seq no</label><div><input value="0"></div></div>
+								<div class="w2ui-field"><label>Where clause</label><div><input value="-"></div></div>
+								<div class="w2ui-field"><label>Filter default</label><div><input value="0"></div></div>
+								<div class="w2ui-field w2ui-required"><label>Window ID</label><div><select><option>Data Service</option></select></div></div>
+							</div>
+							<div class="w2ui-column col-2">
+								<div class="w2ui-field"><label>Layout cols</label><div><input value="0"></div></div>
+								<div class="w2ui-field"><label>Parent tab ID</label><div><select><option>-</option></select></div></div>
+								<div class="w2ui-field"><label>Order by</label><div><input value="-"></div></div>
+								<div class="w2ui-field"><label>Label span</label><div><input value="-"></div></div>
+							</div>
+						</div>
+
+						<div class="w2ui-group-title">Advanced</div>
+						<div class="w2ui-group-fields">
+							<div class="w2ui-column-container">
+								<div class="w2ui-column col-0">
+									<div class="w2ui-field"><label>Link child field</label><div><input value="-"></div></div>
+									<div class="w2ui-field"><label>Link table ID</label><div><select><option>-</option></select></div></div>
+									<div class="w2ui-field"><label>Link parent field</label><div><input value="-"></div></div>
+								</div>
+								<div class="w2ui-column col-1">
+									<div class="w2ui-field"><label>Relate table ID</label><div><select><option>-</option></select></div></div>
+									<div class="w2ui-field"><label>Relate child field</label><div><input value="-"></div></div>
+									<div class="w2ui-field"><label>Relate parent field</label><div><input value="-"></div></div>
+								</div>
+							</div>
+						</div>
+					</div>
+				</div>
+			</main>
+		</div>
+	</div>
+
+	<div class="preview-actions">
+		<button class="w2ui-btn" onclick="cssMain.href='../lib/sp.css'; DaiVietUI.applyTheme('sp', { persist: true })">Light</button>
+		<button class="w2ui-btn" onclick="cssMain.href='../lib/sp-dark.css'; DaiVietUI.applyTheme('sp-dark', { persist: true })">Dark</button>
+	</div>
+</body>
+</html>
