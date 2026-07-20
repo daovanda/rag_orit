@@ -54,7 +54,12 @@ describe("app builder postcondition verifier", () => {
   });
 
   it("marks API success as verification_failed when graph has no entity", async () => {
-    const graphTool = vi.fn(async () => ({ mode: "search", matches_count: 0, matches: [] }));
+    const graphTool = vi.fn(async () => ({
+      mode: "search",
+      matches_count: 0,
+      matches: [],
+      read_completeness: { authoritative: true }
+    }));
     const report = await verifyAppBuilderWriteResult(env, session, {
       ok: true,
       expected_operations: [{
@@ -87,7 +92,12 @@ describe("app builder postcondition verifier", () => {
   });
 
   it("verifies delete only when exact target is absent", async () => {
-    const graphTool = vi.fn(async () => ({ mode: "search", matches_count: 0, matches: [] }));
+    const graphTool = vi.fn(async () => ({
+      mode: "search",
+      matches_count: 0,
+      matches: [],
+      read_completeness: { authoritative: true }
+    }));
     const report = await verifyAppBuilderWriteResult(env, session, {
       ok: true,
       expected_operations: [{
@@ -102,6 +112,43 @@ describe("app builder postcondition verifier", () => {
 
     expect(report.ok).toBe(true);
     expect(report.operation_results[0]).toMatchObject({ status: "passed", observed_state: "absent" });
+  });
+
+  it("does not treat an empty incomplete graph as a successful delete", async () => {
+    const graphTool = vi.fn(async () => ({
+      mode: "search",
+      matches_count: 0,
+      matches: [],
+      graph_quality: { status: "degraded", errors_count: 1 },
+      read_completeness: {
+        authoritative: false,
+        collection: "applications",
+        collection_loaded: false,
+        reason: "Search is not reliable enough to prove that an entity is absent."
+      },
+      errors: {
+        record_errors: [{ key: "applications", error: "Too many subrequests" }]
+      }
+    }));
+    const report = await verifyAppBuilderWriteResult(env, session, {
+      ok: false,
+      status: "partial_success",
+      expected_operations: [{
+        operation_id: "delete_app_109",
+        action: "delete",
+        target: "app",
+        collection: "applications",
+        id_field: "appid",
+        id_value: 109
+      }]
+    }, { graph_tool: graphTool as never });
+
+    expect(report.ok).toBe(false);
+    expect(report.status).toBe("partial_failure_verified");
+    expect(report.operation_results[0]).toMatchObject({
+      status: "inconclusive",
+      observed_state: "unknown"
+    });
   });
 
   it("normalizes numeric and boolean metadata values without hiding real mismatches", () => {

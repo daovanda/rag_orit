@@ -4,6 +4,7 @@ const fixture = vi.hoisted(() => ({
   contractSource: "live_schema" as "live_schema" | "metadata_fallback",
   storedPlans: new Map<string, string>(),
   apiCalls: [] as Array<{ endpoint: string; options: Record<string, unknown> }>,
+  contractLoads: 0,
   nextIds: new Map<string, number>(),
   failEndpointContains: ""
 }));
@@ -102,25 +103,28 @@ vi.mock("../src/app-builder-contracts", async importOriginal => {
   const actual = await importOriginal<typeof import("../src/app-builder-contracts")>();
   return {
     ...actual,
-    loadDynamicMetadataContractRegistry: vi.fn(async () => ({
-      contracts: Object.fromEntries(Object.entries(COLLECTION_COLUMNS).map(([collection, fields]) => [collection, {
-        collection,
-        table_name: `n_${collection}`,
-        schema_endpoint: `rest/applicationjs_nut/dbo/column/n_${collection}`,
-        source: fixture.contractSource,
-        columns: Object.fromEntries(fields.map(name => [name, {
-          name,
-          nullable: true,
-          identity: false,
-          required: false
+    loadDynamicMetadataContractRegistry: vi.fn(async () => {
+      fixture.contractLoads += 1;
+      return {
+        contracts: Object.fromEntries(Object.entries(COLLECTION_COLUMNS).map(([collection, fields]) => [collection, {
+          collection,
+          table_name: `n_${collection}`,
+          schema_endpoint: `rest/applicationjs_nut/dbo/column/n_${collection}`,
+          source: fixture.contractSource,
+          columns: Object.fromEntries(fields.map(name => [name, {
+            name,
+            nullable: true,
+            identity: false,
+            required: false
+          }])),
+          required_fields: [],
+          warnings: [],
+          fetched_at: new Date().toISOString()
         }])),
-        required_fields: [],
         warnings: [],
-        fetched_at: new Date().toISOString()
-      }])),
-      warnings: [],
-      loaded_at: new Date().toISOString()
-    }))
+        loaded_at: new Date().toISOString()
+      };
+    })
   };
 });
 
@@ -247,6 +251,7 @@ describe("mocked Zilcode prepare integration", () => {
     fixture.contractSource = "live_schema";
     fixture.storedPlans.clear();
     fixture.apiCalls.length = 0;
+    fixture.contractLoads = 0;
     fixture.nextIds.clear();
     fixture.failEndpointContains = "";
   });
@@ -268,6 +273,51 @@ describe("mocked Zilcode prepare integration", () => {
       })
     ]);
     expect(fixture.storedPlans.has(`app_builder_change:${String(result.plan_id)}`)).toBe(true);
+  });
+
+  it("applies a delete from the prepared execution snapshot without reloading live contracts", async () => {
+    const env = envFixture();
+    const prepared = await runAppBuilderWriteTool(env, session, "app_builder_prepare_change", {
+      intent: "delete_app",
+      operations: [{
+        id: "delete_app_109",
+        op: "delete_app",
+        id_value: 109,
+        record: { appid: 109 }
+      }]
+    });
+
+    expect(prepared).toMatchObject({ valid: true, status: "ready_for_confirmation" });
+    expect(fixture.contractLoads).toBe(0);
+
+    const stored = JSON.parse(fixture.storedPlans.get(`app_builder_change:${String(prepared.plan_id)}`) || "{}");
+    expect(stored).toMatchObject({
+      operations_expanded: true,
+      execution_context: {
+        collections: {
+          applications: {
+            source_table: expect.objectContaining({ urledit: "rest/applicationjs_nut/dbo/data/n_applications" })
+          }
+        }
+      }
+    });
+
+    const applied = await runAppBuilderWriteTool(
+      env,
+      session,
+      "app_builder_apply_change",
+      { plan_id: prepared.plan_id },
+      { retain_pending_plan: true }
+    );
+
+    expect(applied).toMatchObject({ ok: true, status: "success", applied_count: 1 });
+    expect(fixture.contractLoads).toBe(0);
+    expect(fixture.apiCalls).toEqual([
+      expect.objectContaining({
+        endpoint: expect.stringContaining("n_applications?where=appid%3D109"),
+        options: expect.objectContaining({ method: "DELETE" })
+      })
+    ]);
   });
 
   it("prepares a full multi-table/window metadata chain as a phased DAG", async () => {

@@ -334,7 +334,12 @@ async function persistVerificationJournal(
   for (const result of report.operation_results) {
     await db.prepare(
       `UPDATE operation_journal
-       SET status = ?1, postcondition_json = ?2, updated_at = ?3
+       SET status = CASE
+             WHEN status IN ('failed', 'skipped') THEN status
+             ELSE ?1
+           END,
+           postcondition_json = ?2,
+           updated_at = ?3
        WHERE run_id = ?4 AND plan_id = ?5 AND operation_id = ?6 AND attempt = ?7`
     ).bind(
       result.status === "passed" ? "succeeded" : "verification_failed",
@@ -1649,7 +1654,11 @@ async function executeVerifiedApplyAttempt(
     attempt,
     ok: writeResult.ok,
     status: writeResult.status,
-    plan_id: writeResult.plan_id
+    plan_id: writeResult.plan_id,
+    applied_count: Number(writeResult.applied_count ?? 0),
+    failed_count: Number(writeResult.failed_count ?? 0),
+    skipped_count: Number(writeResult.skipped_count ?? 0),
+    failed_operation: writeResult.failed_operation
   });
 
   await updateJob(db, job, {

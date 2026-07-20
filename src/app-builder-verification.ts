@@ -209,9 +209,28 @@ async function verifyOperation(
 
     const match = findExactMatch(toArrayValues(search.matches), operation, graphType);
     if (!match) {
+      const completeness = asRecord(search.read_completeness);
+      if (completeness?.authoritative !== true) {
+        return baseResult(operation, "inconclusive", "unknown", {
+          error: "Không thể chứng minh entity không tồn tại vì nguồn graph không đầy đủ hoặc bị giới hạn.",
+          evidence: {
+            query,
+            graph_type: graphType,
+            matches_count: Number(search.matches_count ?? 0),
+            read_completeness: completeness,
+            graph_quality: search.graph_quality,
+            errors: search.errors
+          }
+        });
+      }
       return operation.action === "delete"
         ? baseResult(operation, "passed", "absent", {
-          evidence: { query, graph_type: graphType, matches_count: Number(search.matches_count ?? 0) }
+          evidence: {
+            query,
+            graph_type: graphType,
+            matches_count: Number(search.matches_count ?? 0),
+            read_completeness: completeness
+          }
         })
         : baseResult(operation, "failed", "absent", {
           error: "Không tìm thấy entity sau apply.",

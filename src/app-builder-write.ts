@@ -163,11 +163,20 @@ export interface PendingChange {
   created_at: string;
   user_summary?: string;
   operations: PreparedOperation[];
+  operations_expanded?: boolean;
+  execution_context?: PendingExecutionContext;
   warnings: string[];
   specification?: Record<string, unknown>;
   phases?: SpecificationPhasePlan[];
   verification_targets?: Array<Record<string, unknown>>;
   approved_change_envelope?: ApprovedChangeEnvelope;
+}
+
+interface PendingExecutionContext {
+  collections: Record<string, {
+    source_table: Record<string, unknown>;
+  }>;
+  affected_window_ids: string[];
 }
 
 interface ApplyState {
@@ -310,12 +319,26 @@ export function buildPendingChangeVerificationInput(
   };
 }
 
+function prepareRequiresLiveContracts(args: Record<string, unknown>): boolean {
+  if (getApplicationSpecificationInput(args)) return true;
+
+  const operations = getRawOperations(args);
+  if (!operations.length) return true;
+
+  return operations.some(operation => {
+    const action = getAction(getOperationName(operation));
+    return action === "create" || action === "update";
+  });
+}
+
 async function prepareChange(
   env: Env,
   session: ZilcodeSession,
   args: Record<string, unknown>
 ): Promise<Record<string, unknown>> {
-  const context = await loadWriteContext(env, session, args);
+  const context = await loadWriteContext(env, session, args, {
+    loadDynamicContracts: prepareRequiresLiveContracts(args)
+  });
   const intent = getStringArg(args, "intent") || "change_app_builder";
   const userSummary = getStringArg(args, "summary") || getStringArg(args, "user_request");
   const warnings: string[] = [...context.contractWarnings];
@@ -434,6 +457,8 @@ async function prepareChange(
     created_at: new Date().toISOString(),
     user_summary: userSummary || undefined,
     operations,
+    operations_expanded: true,
+    execution_context: buildPendingExecutionContext(context, operations),
     warnings,
     specification,
     phases: compiledSpecification?.phases,
@@ -491,8 +516,13 @@ async function applyChange(
   }
 
   const plan = JSON.parse(raw) as PendingChange;
-  const context = await loadWriteContext(env, session, args);
-  const operationsToApply = expandPreparedOperationsForApply(context, plan.operations, plan.warnings);
+  const snapshotContext = buildWriteContextFromPendingPlan(plan, session);
+  const context = snapshotContext ?? await loadWriteContext(env, session, args, {
+    loadDynamicContracts: false
+  });
+  const operationsToApply = plan.operations_expanded === true
+    ? plan.operations
+    : expandPreparedOperationsForApply(context, plan.operations, plan.warnings);
   const results: Record<string, unknown>[] = [];
   const state: ApplyState = { refs: {} };
   const attempt = Math.max(1, Number(executionOptions.attempt || 1));
@@ -628,7 +658,10 @@ async function applyChange(
   }
 
   if (!failed) {
-    const affectedWindowIds = collectAffectedWindowIds(context, operationsToApply, state);
+    const affectedWindowIds = [...new Set([
+      ...(plan.execution_context?.affected_window_ids ?? []),
+      ...collectAffectedWindowIds(context, operationsToApply, state)
+    ])];
     await emitOperationJournalEvent(executionOptions.on_operation_event, {
       stage: "before",
       plan_id: planId,
@@ -640,7 +673,13 @@ async function applyChange(
       expected_effect: { postcondition: "window_cache_readable", window_ids: affectedWindowIds }
     });
     try {
-      const cacheDeploy = await deployAffectedWindowCaches(env, context, operationsToApply, state);
+      const cacheDeploy = await deployAffectedWindowCaches(
+        env,
+        context,
+        operationsToApply,
+        state,
+        affectedWindowIds
+      );
       if (cacheDeploy.deployed_count) {
         results.push({ operation_id: "auto_deploy_window_cache", ok: true, result: cacheDeploy });
       }
@@ -904,10 +943,70 @@ function hasDeleteAppCascadeOperation(operations: PreparedOperation[], appId: un
   });
 }
 
+function buildPendingExecutionContext(
+  context: WriteContext,
+  operations: PreparedOperation[]
+): PendingExecutionContext {
+  const collections = Object.fromEntries(
+    Object.entries(context.collections).map(([collection, metadata]) => {
+      const sourceTable = asRecord(metadata.source_table) ?? {};
+      return [collection, {
+        source_table: compactRecord(sourceTable, [
+          "tableid", "tablename", "alias", "urlview", "urledit", "columnkey", "columndisplay"
+        ])
+      }];
+    })
+  );
+
+  return {
+    collections,
+    affected_window_ids: collectAffectedWindowIds(context, operations, { refs: {} })
+  };
+}
+
+function buildWriteContextFromPendingPlan(
+  plan: PendingChange,
+  session: ZilcodeSession
+): WriteContext | undefined {
+  const snapshot = plan.execution_context;
+  if (!snapshot || !snapshot.collections || plan.operations_expanded !== true) return undefined;
+
+  const requiredCollections = new Set(plan.operations.map(operation => operation.collection));
+  for (const collection of requiredCollections) {
+    const sourceTable = asRecord(snapshot.collections[collection]?.source_table);
+    if (!sourceTable || !String(sourceTable.urledit ?? sourceTable.urlview ?? "").trim()) {
+      return undefined;
+    }
+  }
+
+  const collections: Record<string, Record<string, unknown>> = {};
+  const recordsByCollection: Record<string, Record<string, unknown>[]> = {};
+  const allowedColumnsByCollection: Record<string, Set<string>> = {};
+  for (const [collection, metadata] of Object.entries(snapshot.collections)) {
+    collections[collection] = {
+      source_table: { ...(metadata.source_table ?? {}) },
+      records: []
+    };
+    recordsByCollection[collection] = [];
+    allowedColumnsByCollection[collection] = new Set<string>();
+  }
+
+  return {
+    blueprint: {},
+    collections,
+    recordsByCollection,
+    allowedColumnsByCollection,
+    contractsByCollection: {},
+    contractWarnings: [],
+    session
+  };
+}
+
 async function loadWriteContext(
   env: Env,
   session: ZilcodeSession,
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
+  options: { loadDynamicContracts?: boolean } = {}
 ): Promise<WriteContext> {
   const blueprint = await buildZilcodeAppBuilderBlueprint(env, session, {
     appid: getStringArg(args, "app_builder_appid") || "1",
@@ -964,12 +1063,14 @@ async function loadWriteContext(
     allowedColumnsByCollection[key] = allowed;
   }
 
-  const contractRegistry = await loadDynamicMetadataContractRegistry(
-    env,
-    session,
-    collections,
-    CREATE_REQUIRED_FIELDS
-  );
+  const contractRegistry = options.loadDynamicContracts === false
+    ? { contracts: {}, warnings: [], loaded_at: new Date().toISOString() }
+    : await loadDynamicMetadataContractRegistry(
+      env,
+      session,
+      collections,
+      CREATE_REQUIRED_FIELDS
+    );
   for (const [collection, contract] of Object.entries(contractRegistry.contracts)) {
     if (contract.source !== "live_schema") continue;
     const liveColumns = Object.keys(contract.columns);
@@ -1571,9 +1672,10 @@ async function deployAffectedWindowCaches(
   env: Env,
   context: WriteContext,
   operations: PreparedOperation[],
-  state: ApplyState
+  state: ApplyState,
+  knownWindowIds?: string[]
 ): Promise<Record<string, unknown>> {
-  const windowIds = collectAffectedWindowIds(context, operations, state);
+  const windowIds = knownWindowIds ?? collectAffectedWindowIds(context, operations, state);
   const deployed: Record<string, unknown>[] = [];
 
   for (const windowId of windowIds) {
@@ -1595,17 +1697,29 @@ function collectAffectedWindowIds(
   state: ApplyState
 ): string[] {
   const output = new Set<string>();
+  const deletedWindowIds = new Set(
+    operations
+      .filter(operation => operation.collection === "windows" && operation.action === "delete")
+      .map(operation => stringId(operation.id_value))
+      .filter((value): value is string => Boolean(value))
+  );
 
   for (const operation of operations) {
     if (operation.collection === "applications") continue;
     if (operation.collection === "caches") continue;
     if (operation.collection === "windows" && operation.action === "delete") continue;
 
-    const windowId = getAffectedWindowId(context, operation, state);
+    let windowId: string | undefined;
+    try {
+      windowId = getAffectedWindowId(context, operation, state);
+    } catch {
+      // Operation references are only resolvable after their dependencies run.
+      continue;
+    }
     if (windowId) output.add(windowId);
   }
 
-  return [...output];
+  return [...output].filter(windowId => !deletedWindowIds.has(windowId));
 }
 
 function getAffectedWindowId(

@@ -127,6 +127,34 @@ const CHILD_KEYS = new Set([
 const GRAPH_CONTEXT_CACHE_TTL_MS = 90 * 1000;
 const graphContextCache = new Map<string, { expiresAt: number; context: GraphContext }>();
 
+const COLLECTION_BY_GRAPH_TYPE: Record<string, string> = {
+  app: "applications",
+  service: "services",
+  appservice: "appservices",
+  table: "tables",
+  column: "columns",
+  window: "windows",
+  tab: "tabs",
+  field: "fields",
+  menu: "menus",
+  domain: "domains",
+  cache: "caches",
+  roleapp: "roleapps",
+  rolemenu: "rolemenus",
+  access: "accesses",
+  archive: "archives",
+  workflow: "workflows",
+  wfstep: "wfsteps",
+  report: "reports",
+  map: "maps",
+  layer: "layers",
+  role: "roles",
+  user: "users",
+  roleuser: "roleusers",
+  org: "orgs",
+  orguser: "orgusers"
+};
+
 const WRITE_ENTITY_CONTRACTS: Record<string, Record<string, unknown>> = {
   app: {
     metadata_table: "n_app",
@@ -1259,8 +1287,63 @@ function buildSearchResponse(context: GraphContext, args: Record<string, unknown
     matches_count: matches.length,
     matches,
     graph_counts: graphCounts(context.nodes, context.edges),
+    graph_quality: buildGraphQuality(context),
+    read_completeness: buildSearchReadCompleteness(context, [...types]),
+    errors: collectErrors(context.blueprint),
     cache: context.cache,
     hint: "Dùng node_id trong matches để gọi app_builder_graph_subgraph hoặc app_builder_node_detail."
+  };
+}
+
+function buildSearchReadCompleteness(
+  context: GraphContext,
+  requestedTypes: string[]
+): Record<string, unknown> {
+  const uniqueTypes = [...new Set(requestedTypes.filter(Boolean))];
+  if (uniqueTypes.length !== 1) {
+    return {
+      authoritative: false,
+      reason: uniqueTypes.length
+        ? "Search spans multiple entity types."
+        : "Search does not constrain an entity type."
+    };
+  }
+
+  const graphType = uniqueTypes[0];
+  const collectionName = COLLECTION_BY_GRAPH_TYPE[graphType];
+  if (!collectionName) {
+    return {
+      authoritative: false,
+      graph_type: graphType,
+      reason: "No collection mapping is available for authoritative absence verification."
+    };
+  }
+
+  const appBuilderRecords = asRecord(context.blueprint.app_builder_records);
+  const collections = asRecord(appBuilderRecords?.collections);
+  const collection = asRecord(collections?.[collectionName]);
+  const allErrors = collectErrors(context.blueprint);
+  const recordErrors = toRecords(allErrors.record_errors);
+  const relevantErrors = recordErrors.filter(error => String(ci(error, "key") ?? "") === collectionName);
+  const appErrorsCount = Number(allErrors.app_errors_count ?? 0);
+  const maybeTruncated = collection?.maybe_truncated === true;
+  const authoritative = Boolean(collection)
+    && !maybeTruncated
+    && relevantErrors.length === 0
+    && appErrorsCount === 0;
+
+  return {
+    authoritative,
+    graph_type: graphType,
+    collection: collectionName,
+    collection_loaded: Boolean(collection),
+    records_count: collection?.records_count,
+    maybe_truncated: maybeTruncated,
+    relevant_errors: relevantErrors.map(error => truncateDebugText(error)),
+    app_errors_count: appErrorsCount,
+    reason: authoritative
+      ? "Collection loaded without relevant errors or record truncation."
+      : "Search is not reliable enough to prove that an entity is absent."
   };
 }
 
