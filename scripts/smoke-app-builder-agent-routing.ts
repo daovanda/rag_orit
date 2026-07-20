@@ -1,172 +1,68 @@
-import { inferGraphQuestionIntent, shouldContinueAfterToolResult } from "../src/agent";
+import { hasReachedRequiredOutcome, parseContextualizedRequest } from "../src/agent";
+import { createAgentRunState, inspectToolResult, recordToolOutcome, updateRunContext } from "../src/agent-run-state";
 
 function ok(condition: unknown, message: string): void {
   if (!condition) throw new Error(message);
 }
 
-function searchResult(score = 100): string {
-  return JSON.stringify({
-    mode: "search",
-    query: "QUAN LY THIET BI",
-    matches_count: 5,
-    matches: [
-      {
-        id: "app:22",
-        type: "app",
-        label: "QUAN LY THIET BI",
-        score,
-        summary: { appid: 22, appname: "QUAN LY THIET BI" },
-        counts: { tables: 13, windows: 1, menus: 1 }
-      },
-      {
-        id: "app:14",
-        type: "app",
-        label: "Time Sheet",
-        score: 25,
-        summary: { appid: 14, appname: "Time Sheet" }
-      }
-    ]
-  });
-}
+const readContract = parseContextualizedRequest(JSON.stringify({
+  rewritten_message: "Phân tích cấu trúc ứng dụng hiện tại.",
+  needs_clarification: false,
+  clarification_question: null,
+  resolved_references: [],
+  request_kind: "read",
+  required_outcome: "answer"
+}));
+ok(readContract?.request_kind === "read", "Contextualizer contract must preserve a read goal.");
+ok(readContract?.required_outcome === "answer", "A read goal must finish with an answer.");
 
-function emptySearchResult(): string {
-  return JSON.stringify({
-    mode: "search",
-    query: "Time Sheet",
-    matches_count: 0,
-    matches: []
-  });
-}
+const writeContract = parseContextualizedRequest(JSON.stringify({
+  rewritten_message: "Cập nhật metadata của app mục tiêu.",
+  needs_clarification: false,
+  clarification_question: null,
+  resolved_references: [{ type: "app", id: "target-app", source: "current request" }],
+  request_kind: "prepare_change",
+  required_outcome: "pending_confirmation"
+}));
+ok(writeContract?.request_kind === "prepare_change", "Contextualizer contract must preserve a write goal.");
 
-ok(inferGraphQuestionIntent("Hệ thống của tôi đang có những gì") === "overview", "overview intent should be detected");
-ok(inferGraphQuestionIntent("hãy đi sâu vào ứng dụng Quản lý thiết bị") === "deep_dive", "deep dive intent should be detected");
-ok(inferGraphQuestionIntent("phân tích luồng window tab field column") === "relationship", "relationship intent should be detected");
-ok(inferGraphQuestionIntent("app này có bao nhiêu window") === "count", "count intent should be detected");
+const state = createAgentRunState("Cập nhật metadata", { run_id: "smoke_goal_contract" });
+updateRunContext(state, writeContract?.rewritten_message ?? "", [], {
+  request_kind: writeContract?.request_kind ?? "unknown",
+  required_outcome: writeContract?.required_outcome ?? "answer"
+});
+ok(!hasReachedRequiredOutcome("pending_confirmation", state), "A write goal must not finish before prepare succeeds.");
 
-ok(
-  shouldContinueAfterToolResult(
-    "app_builder_graph_search",
-    searchResult(100),
-    "hãy đi sâu vào ứng dụng Quản lý thiết bị"
-  ),
-  "deep-dive search with strong top match should continue to model for subgraph/detail"
+const invalidPrepare = JSON.stringify({ status: "invalid", valid: false, blocking_errors: [{ field: "target" }] });
+recordToolOutcome(
+  state,
+  "app_builder_prepare_change",
+  { operations: [] },
+  inspectToolResult("app_builder_prepare_change", invalidPrepare)
 );
+ok(state.terminal_status === "repairing", "Invalid prepare must remain repairable.");
+ok(!hasReachedRequiredOutcome("pending_confirmation", state), "Invalid prepare must not satisfy the goal.");
 
-ok(
-  shouldContinueAfterToolResult(
-    "app_builder_graph_search",
-    searchResult(100),
-    "phân tích liên kết của ứng dụng Quản lý thiết bị"
-  ),
-  "relationship search with strong top match should continue"
+const validPrepare = JSON.stringify({
+  status: "ready_for_confirmation",
+  valid: true,
+  plan_id: "smoke-plan",
+  operations: [{ op: "update_app" }]
+});
+recordToolOutcome(
+  state,
+  "app_builder_prepare_change",
+  { operations: [{ op: "update_app" }] },
+  inspectToolResult("app_builder_prepare_change", validPrepare)
 );
-
-ok(
-  shouldContinueAfterToolResult(
-    "app_builder_graph_search",
-    searchResult(100),
-    "app Quản lý thiết bị có bao nhiêu window"
-  ),
-  "count search with strong top match should continue so final answer can use tool result"
-);
-
-ok(
-  !shouldContinueAfterToolResult(
-    "app_builder_graph_search",
-    searchResult(20),
-    "tìm app quản lý"
-  ),
-  "plain ambiguous search should not continue automatically"
-);
-
-ok(
-  shouldContinueAfterToolResult(
-    "app_builder_graph_search",
-    emptySearchResult(),
-    "hay di sau vao ung dung Time Sheet"
-  ),
-  "deep-dive search with no match should get one extra model pass for fallback search/detail strategy"
-);
-
-ok(
-  !shouldContinueAfterToolResult(
-    "app_builder_graph_search",
-    emptySearchResult(),
-    "tim app Time Sheet"
-  ),
-  "plain search with no match should not continue automatically"
-);
-
-ok(
-  shouldContinueAfterToolResult(
-    "app_builder_creation_schema",
-    JSON.stringify({ mode: "creation_schema" }),
-    "hãy tạo app Quản lý kho",
-    "Tạo app Quản lý kho."
-  ),
-  "direct write requests should continue after creation_schema so the model can prepare_change"
-);
-
-ok(
-  !shouldContinueAfterToolResult(
-    "app_builder_creation_schema",
-    JSON.stringify({ mode: "creation_schema" }),
-    "hướng dẫn tôi tạo app Quản lý kho",
-    "Hướng dẫn quy trình tạo app Quản lý kho."
-  ),
-  "how-to requests should not continue from creation_schema into prepare_change"
-);
-
-ok(
-  !shouldContinueAfterToolResult(
-    "app_builder_creation_schema",
-    JSON.stringify({ mode: "creation_schema" }),
-    "đừng tạo app Quản lý kho",
-    "Không tạo app Quản lý kho."
-  ),
-  "negated write requests should not continue from creation_schema into prepare_change"
-);
-
-ok(
-  shouldContinueAfterToolResult(
-    "app_builder_creation_schema",
-    JSON.stringify({ mode: "creation_schema" }),
-    "Đổi nó thành Quản lý phòng trọ",
-    {
-      clarifiedMessage: "Đổi tên app có appid 107 thành Quản lý phòng trọ.",
-      chatHistory: [
-        { role: "assistant", content: "Đã thấy app 107: Quản lý nhà trọ." }
-      ],
-      resolvedReferences: [
-        { type: "app", id: "107", name: "Quản lý nhà trọ", source: "history" }
-      ]
-    }
-  ),
-  "contextual write with resolved reference should continue after creation_schema"
-);
-
-ok(
-  !shouldContinueAfterToolResult(
-    "app_builder_creation_schema",
-    JSON.stringify({ mode: "creation_schema" }),
-    "Quản lý phòng trọ",
-    {
-      clarifiedMessage: "Đổi tên app có appid 107 thành Quản lý phòng trọ.",
-      chatHistory: [
-        { role: "assistant", content: "Bạn muốn đổi app 107 thành tên nào?" }
-      ],
-      resolvedReferences: []
-    }
-  ),
-  "rewritten write without resolved reference should not continue after creation_schema"
-);
+ok(state.terminal_status === "waiting_confirmation", "Valid prepare must wait for the UI button.");
+ok(hasReachedRequiredOutcome("pending_confirmation", state), "Pending confirmation must satisfy the message-agent goal.");
 
 console.log(JSON.stringify({
   ok: true,
   checks: {
-    overview: inferGraphQuestionIntent("Hệ thống của tôi đang có những gì"),
-    deep_dive: inferGraphQuestionIntent("hãy đi sâu vào ứng dụng Quản lý thiết bị"),
-    relationship: inferGraphQuestionIntent("phân tích luồng window tab field column"),
-    count: inferGraphQuestionIntent("app này có bao nhiêu window")
+    read_contract: readContract?.request_kind,
+    write_contract: writeContract?.request_kind,
+    final_status: state.terminal_status
   }
 }, null, 2));

@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   __materializeAppBuilderCreateRecordForTest,
-  __normalizeAppBuilderWriteRecordForTest
+  __normalizeAppBuilderWriteRecordForTest,
+  __summarizeOperationForTest,
+  buildPlannedOperationJournalEvents
 } from "../src/app-builder-write";
 
 describe("app builder write record normalization", () => {
@@ -145,5 +147,87 @@ describe("app builder write record normalization", () => {
     expect(record.linkcolumn).toBe("customer_name");
     expect(record.domainname).toBeUndefined();
     expect(record.lookup_table).toBeUndefined();
+  });
+
+  it("returns exact non-secret values for confirmation while redacting credentials", () => {
+    const summary = __summarizeOperationForTest({
+      id: "create_service",
+      action: "create",
+      target: "service",
+      collection: "services",
+      label: "ERP service",
+      record: {
+        servicename: "ERP service",
+        url: "https://erp.example.test",
+        credential: "top-secret"
+      }
+    });
+
+    expect(summary.record_preview).toEqual({
+      servicename: "ERP service",
+      url: "https://erp.example.test",
+      credential: "<redacted>"
+    });
+  });
+
+  it("builds the complete pending journal before the first write attempt", () => {
+    const events = buildPlannedOperationJournalEvents("plan_journal", [
+      {
+        id: "create_app",
+        action: "create",
+        target: "app",
+        collection: "applications",
+        label: "Create app",
+        record: { appname: "Journal fixture" },
+        phase: "app_service"
+      },
+      {
+        id: "create_window",
+        action: "create",
+        target: "window",
+        collection: "windows",
+        label: "Create window",
+        record: { appid: "$create_app.appid", windowname: "Main" },
+        depends_on: ["create_app"],
+        phase: "window_tab_field"
+      }
+    ], 1);
+
+    expect(events).toHaveLength(2);
+    expect(events.every(event => event.stage === "planned" && event.status === "pending")).toBe(true);
+    expect(events[1]).toMatchObject({
+      plan_id: "plan_journal",
+      operation_id: "create_window",
+      precondition: {
+        condition: "dependencies_resolved_and_no_known_duplicate",
+        depends_on: ["create_app"]
+      },
+      expected_effect: {
+        postcondition: "target_present_with_expected_values",
+        expected_record: { appid: "$create_app.appid", windowname: "Main" }
+      }
+    });
+  });
+
+  it("redacts credentials from the operation journal before persistence callbacks", () => {
+    const [event] = buildPlannedOperationJournalEvents("plan_secret", [{
+      id: "create_service",
+      action: "create",
+      target: "service",
+      collection: "services",
+      label: "Create service",
+      record: {
+        servicename: "ERP",
+        credential: "must-not-be-journaled",
+        max_tokens: 2048
+      },
+      phase: "app_service"
+    }], 1);
+
+    expect(event.expected_effect?.expected_record).toEqual({
+      servicename: "ERP",
+      credential: "<redacted>",
+      max_tokens: 2048
+    });
   });
 });

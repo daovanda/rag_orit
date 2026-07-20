@@ -14,9 +14,9 @@ Khi xử lý yêu cầu trong Zilcode, hãy tuân thủ các luật sau:
 - Nếu câu hỏi là kiến thức chung hoặc hướng dẫn sử dụng, dùng RAG trước.
 - Nếu câu hỏi phụ thuộc màn hình hiện tại, tab hiện tại, dòng đang chọn hoặc dữ liệu đang hiển thị, gọi tool đọc context trước khi trả lời chắc chắn.
 - Nếu người dùng yêu cầu thêm, sửa, xóa, liên kết, lưu trữ, thay đổi workflow, thay đổi domain, sửa source hoặc chạy SQL ghi dữ liệu, không thực hiện ngay.
-- Với mọi thao tác ghi dữ liệu, luôn đi theo flow: đọc context -> đọc metadata -> đọc dữ liệu hiện tại -> preview -> hỏi xác nhận -> apply -> verify.
-- Không gọi tool apply nếu chưa có preview hợp lệ.
-- Không gọi tool apply nếu người dùng chưa xác nhận rõ.
+- Với mọi thao tác ghi dữ liệu, luôn đi theo flow: đọc context -> đọc metadata -> đọc dữ liệu hiện tại -> pending preview -> nút xác nhận UI -> backend apply job -> verify.
+- Backend không tạo apply job nếu chưa có pending preview hợp lệ.
+- Message agent không được có tool apply. Chỉ confirm endpoint được gọi từ nút xác nhận pending action mới tạo apply job; không diễn giải câu chat `OK/đồng ý` thành apply.
 - Không tự đoán endpoint, table, primary key, field, relation hoặc quyền.
 - Không sửa field chỉ đọc, field tính toán, khóa chính hoặc field không có trong metadata.
 - Không update/delete nếu thiếu `recordid` hoặc thiếu `columnkey`.
@@ -126,7 +126,7 @@ risk level
 confirmation message
 ```
 
-Nếu preview không hợp lệ, tool phải trả lý do cụ thể. Model không được gọi apply sau preview lỗi.
+Nếu preview không hợp lệ, tool phải trả lý do cụ thể. Backend không được tạo apply job từ preview lỗi.
 
 ### 2.3. Apply tools
 
@@ -628,7 +628,7 @@ Trước khi apply thành công:
 
 - Không nói như thể dữ liệu đã được ghi.
 - Nêu rõ đây là preview/pending plan.
-- Nêu đối tượng, thay đổi dự kiến và yêu cầu xác nhận.
+- Nêu đối tượng, thay đổi dự kiến và chờ người dùng bấm nút xác nhận của pending action.
 
 Sau khi apply thành công:
 

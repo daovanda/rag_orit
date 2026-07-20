@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { isWriteRequestAllowed, parseAgentMode, runAgenticLoop } from "../src/agent";
+import { parseAgentMode, parseContextualizedRequest, runAgenticLoop } from "../src/agent";
 import { runChatModel } from "../src/ai";
 import { CHAT_MODEL } from "../src/config";
 import type { AIMessage, ToolDefinition } from "../src/types";
@@ -235,34 +235,35 @@ async function checkNvidiaChatCompletionsPayload(): Promise<Record<string, unkno
   }
 }
 
-function checkModeAndWritePolicy(): Record<string, unknown> {
-  const history: AIMessage[] = [
-    { role: "user", content: "đổi tên app 107 thành Quản lý nhà trọ" }
-  ];
-  const resolvedReferences = [
-    { type: "app", id: "107", name: "Quản lý nhà trọ", source: "history" }
-  ];
-
-  const explicitGuide = isWriteRequestAllowed("hướng dẫn tôi xóa app", "Xóa app 107", [], []);
-  const contextualRename = isWriteRequestAllowed(
-    "đổi nó thành Quản lý phòng trọ",
-    "Đổi tên app có appid 107 thành Quản lý phòng trọ",
-    history,
-    resolvedReferences
-  );
-  const negated = isWriteRequestAllowed("đừng xóa nó", "Xóa app 107", history, resolvedReferences);
-
+function checkModeAndRequestContract(): Record<string, unknown> {
   check(parseAgentMode("default") === "default", "parseAgentMode default lỗi.");
   check(parseAgentMode("search") === "search", "parseAgentMode search lỗi.");
   check(parseAgentMode("invalid") === null, "parseAgentMode phải từ chối mode không hợp lệ.");
-  check(explicitGuide === false, "Câu hỏi hướng dẫn không được coi là write request.");
-  check(contextualRename === true, "Write request theo ngữ cảnh đã resolve phải được cho phép.");
-  check(negated === false, "Câu phủ định không được coi là write request.");
+
+  const knowledge = parseContextualizedRequest(JSON.stringify({
+    rewritten_message: "Hướng dẫn quy trình xóa app.",
+    needs_clarification: false,
+    clarification_question: null,
+    resolved_references: [],
+    request_kind: "knowledge",
+    required_outcome: "answer"
+  }));
+  const write = parseContextualizedRequest(JSON.stringify({
+    rewritten_message: "Cập nhật app mục tiêu.",
+    needs_clarification: false,
+    clarification_question: null,
+    resolved_references: [{ type: "app", id: "target" }],
+    request_kind: "prepare_change",
+    required_outcome: "pending_confirmation"
+  }));
+  check(knowledge?.required_outcome === "answer", "How-to request phải có answer outcome.");
+  check(write?.required_outcome === "pending_confirmation", "Write request phải chờ pending confirmation.");
 
   return {
-    explicit_guide_allowed: explicitGuide,
-    contextual_rename_allowed: contextualRename,
-    negated_allowed: negated
+    knowledge_kind: knowledge?.request_kind,
+    knowledge_outcome: knowledge?.required_outcome,
+    write_kind: write?.request_kind,
+    write_outcome: write?.required_outcome
   };
 }
 
@@ -288,7 +289,9 @@ async function checkMessageAgentDoesNotExposeApplyTool(): Promise<Record<string,
                 rewritten_message: "Xác nhận kế hoạch đang chờ bằng nút xác nhận trong giao diện.",
                 needs_clarification: false,
                 clarification_question: null,
-                resolved_references: []
+                resolved_references: [],
+                request_kind: "conversation",
+                required_outcome: "answer"
               })
             }
           }
@@ -456,8 +459,8 @@ async function main(): Promise<void> {
       evidence: await checkNvidiaChatCompletionsPayload()
     },
     {
-      name: "mode_and_write_policy",
-      evidence: checkModeAndWritePolicy()
+      name: "mode_and_request_contract",
+      evidence: checkModeAndRequestContract()
     },
     {
       name: "message_agent_no_apply_tool",

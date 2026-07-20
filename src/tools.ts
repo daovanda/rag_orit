@@ -1,3 +1,5 @@
+import { RAG_TOOL_ROUTING_GUIDANCE } from "./rag-knowledge";
+
 export const TOOLS = [
   {
     name: "general_chat",
@@ -17,13 +19,13 @@ export const TOOLS = [
   {
     name: "rag_search",
     description:
-      "Tìm trong Vector DB/KV docs các tài liệu Zilcode, App Builder guide, API contract, domain model và playbook tạo/sửa app. Dùng khi cần quy tắc hoặc thông tin tài liệu ngoài graph hiện tại và dùng khi user hỏi cách làm, hướng dẫn, quy tắc, API contract, logic Zilcode, hoặc cần kiến thức nền về zilcode.",
+      `Tìm trong Vector DB/KV các tài liệu đã được quản lý trong corpus. ${RAG_TOOL_ROUTING_GUIDANCE}`,
     parameters: {
       type: "object",
       properties: {
         query: {
           type: "string",
-          description: "Câu truy vấn tài liệu. Giữ các thuật ngữ Zilcode/App Builder quan trọng."
+          description: "Câu truy vấn tài liệu độc lập. Giữ nguyên tên sản phẩm, phân hệ, bộ phận, chức năng và thuật ngữ Zilcode/App Builder/Đại Việt quan trọng."
         }
       },
       required: ["query"]
@@ -159,7 +161,7 @@ export const TOOLS = [
   {
     name: "app_builder_prepare_change",
     description:
-      "Chuẩn bị kế hoạch tạo/sửa/xóa App Builder để user xác nhận. Tool validate, lọc field không tồn tại theo metadata thật, resolve structured plan thành operations và lưu pending plan. Xóa app/window nên dùng cascade để dọn field/tab/menu/cache/role access trước. Chưa ghi dữ liệu.",
+      "Chuẩn bị kế hoạch tạo/sửa/xóa App Builder để user xác nhận. Tool đọc live metadata schema, materialize default đã chứng minh, resolve reference, validate dependency/semantic và compile application_specification thành operation DAG. Field không tồn tại hoặc field bắt buộc không suy ra được sẽ tạo structured blocking_errors, không bị âm thầm bỏ. Update/delete phải dùng metadata ID chính xác; xóa dependency dùng chung chỉ hợp lệ khi operation có allow_shared_dependency_delete=true theo xác nhận rõ ràng. Tool lưu pending plan nhưng chưa ghi Zilcode.",
     parameters: {
       type: "object",
       properties: {
@@ -173,33 +175,48 @@ export const TOOLS = [
         },
         operations: {
           type: "array",
-          description: "Danh sách operation. Mỗi operation có op/action và record/id_value/where. Có thể dùng reference như $create_app_1.appid để nối output bước trước.",
+          description: "Danh sách operation mức thấp. Mỗi operation cần id duy nhất, op như create_window/update_window/delete_window, record hoặc id_value chính xác, depends_on nếu có. Có thể dùng reference như $create_app_1.appid. Không dùng where hàng loạt cho update/delete. allow_shared_dependency_delete chỉ được đặt true khi user đã xác nhận xóa dependency dùng chung.",
           items: {
             type: "object",
             additionalProperties: true
           }
         },
+        application_specification: {
+          type: "object",
+          description: "Specification khai báo app metadata đích. Ưu tiên dạng này khi tạo app nhiều thành phần; backend validate và compile deterministic theo phase.",
+          properties: {
+            app: { type: "object", additionalProperties: true },
+            services: { type: "array", items: { type: "object", additionalProperties: true } },
+            appservices: { type: "array", items: { type: "object", additionalProperties: true } },
+            service_bindings: { type: "array", items: { type: "object", additionalProperties: true } },
+            tables: {
+              type: "array",
+              description: "Table metadata; mỗi table có thể chứa columns[]. Dùng service_ref để nối service trong cùng specification.",
+              items: { type: "object", additionalProperties: true }
+            },
+            domains: { type: "array", items: { type: "object", additionalProperties: true } },
+            relations: {
+              type: "array",
+              description: "Patch relation có target=column hoặc target=tab và *_ref tới entity đã khai báo.",
+              items: { type: "object", additionalProperties: true }
+            },
+            windows: {
+              type: "array",
+              description: "Window metadata; mỗi window có thể chứa tabs[], mỗi tab có fields[]. Dùng table_ref, column_ref, parenttab_ref, domain_ref và lookup_table để nối theo tên/ref.",
+              items: { type: "object", additionalProperties: true }
+            },
+            menus: { type: "array", items: { type: "object", additionalProperties: true } },
+            roleapps: { type: "array", items: { type: "object", additionalProperties: true } },
+            rolemenus: { type: "array", items: { type: "object", additionalProperties: true } },
+            accesses: { type: "array", items: { type: "object", additionalProperties: true } }
+          },
+          additionalProperties: false
+        },
         max_records_per_table: {
           type: "string",
           description: "Số record tối đa đọc từ mỗi bảng App Builder metadata, mặc định 1000."
         }
-      },
-      required: ["operations"]
-    }
-  },
-  {
-    name: "app_builder_apply_change",
-    description:
-      "Thực thi pending plan đã tạo bởi app_builder_prepare_change. Chỉ dùng sau khi user xác nhận rõ ràng và có plan_id hợp lệ. Ghi vào Zilcode qua REST API và dừng ở bước lỗi đầu tiên.",
-    parameters: {
-      type: "object",
-      properties: {
-        plan_id: {
-          type: "string",
-          description: "Plan ID từ app_builder_prepare_change."
-        }
-      },
-      required: ["plan_id"]
+      }
     }
   }
 ] as const;

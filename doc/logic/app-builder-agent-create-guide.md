@@ -6,8 +6,9 @@ Trang thai tool hien tai:
 
 - Read tools: doc/RAG va App Builder graph.
 - Planning tool: `app_builder_prepare_change` de validate va luu pending plan.
-- Apply tool: `app_builder_apply_change` de ghi vao Zilcode sau khi user xac nhan ro rang.
-- Agent khong duoc noi "da tao/da sua/da xoa" tru khi `app_builder_apply_change` tra thanh cong.
+- Apply executor la backend-only, khong nam trong tool registry cua message agent.
+- Prepare thanh cong se tao pending action va giao dien tu hien nut xac nhan. Chi confirm endpoint tu nut nay moi tao apply job.
+- Agent khong duoc noi "da tao/da sua/da xoa" tru khi backend apply job da verify thanh cong.
 
 ## 1. Tool flow bat buoc
 
@@ -40,8 +41,11 @@ Agent
   |-- app_builder_prepare_change
   |     -> validate + pending plan
   |
-  |-- app_builder_apply_change
-        -> chi apply sau user xac nhan
+  v
+UI confirmation button
+  |
+  v
+Backend apply job -> verify
   |
   v
 Final answer / Proposed plan / Apply result
@@ -55,7 +59,8 @@ Final answer / Proposed plan / Apply result
 - Dung `app_builder_node_detail` khi can chi tiet app/table/window/tab/field/menu/domain sau khi da resolve dung node.
 - Dung `app_builder_creation_schema` khi user yeu cau tao/sua/xoa.
 - Dung `app_builder_prepare_change` de tao pending plan co plan id.
-- Chi dung `app_builder_apply_change` khi user vua xac nhan ro rang, vi du: "co, thuc hien ke hoach".
+- Message agent khong duoc goi apply. Tin nhan chat nhu "co", "OK" hoac "thuc hien ke hoach" khong kich hoat apply.
+- Nguoi dung phai bam nut xac nhan cua pending action; backend confirm endpoint se tao apply job.
 - Khong lap plan dua tren tri nho neu chua doc graph.
 - Khong tao trung app/table/window/menu/field neu graph cho thay node da ton tai.
 - Neu user noi mo ho, search truoc; neu co nhieu ket qua, hoi lai.
@@ -124,8 +129,8 @@ Khi user yeu cau tao app moi:
 3. Search ten app/app code de tranh trung.
 4. Neu du thong tin, goi `app_builder_prepare_change`.
 5. Tra plan id va tom tat buoc se ghi.
-6. Sau khi user xac nhan, goi `app_builder_apply_change`.
-7. Sau apply, goi graph/search/detail de verify neu user yeu cau hoac neu can bao cao day du.
+6. Frontend hien nut xac nhan cho pending action.
+7. Sau khi user bam nut, backend tao apply job va bat buoc verify graph/detail/cache.
 
 Thu tu branch tao app:
 
@@ -201,9 +206,9 @@ Quy trinh:
 4. Node detail target.
 5. Lap operation update/delete/create lien quan.
 6. `app_builder_prepare_change`
-7. Doi user xac nhan.
-8. `app_builder_apply_change`
-9. Verify bang graph.
+7. Doi user bam nut xac nhan pending action.
+8. Backend apply job.
+9. Backend verify bang graph.
 
 Vi du them field vao window:
 
@@ -215,8 +220,8 @@ Vi du them field vao window:
 5. Detail window/tab de biet tabid
 6. Neu column chua co, prepare plan tao column truoc
 7. Prepare plan tao field map toi column
-8. Apply sau xac nhan
-9. Verify bang node detail/subgraph
+8. Frontend hien nut xac nhan; backend apply job chi chay sau khi user bam nut
+9. Backend verify bang node detail/subgraph
 ```
 
 ## 7. Xoa
@@ -227,7 +232,7 @@ Xoa la thao tac rui ro cao. Mac dinh agent phai:
 - Liet ke dependency truc tiep.
 - De xuat disable/hide neu phu hop thay vi delete.
 - Chi prepare delete khi user yeu cau ro.
-- Chi apply delete sau xac nhan ro rang.
+- Delete chi duoc backend apply sau khi user bam nut xac nhan pending action.
 
 Khong xoa:
 
@@ -258,7 +263,7 @@ Noi dung bat buoc khi da prepare plan:
 - Noi ro day moi la pending plan, chua ghi du lieu vao Zilcode.
 - Dua `plan_id` dung nhu tool tra ve.
 - Tom tat cac operation chinh va canh bao neu co.
-- Yeu cau user xac nhan ro rang truoc khi apply.
+- Tao pending action va cho nut xac nhan UI; khong nhan xac nhan bang chat tu do.
 - Khong them cau van co dinh neu no khong phu hop voi ngu canh hoi dap.
 
 ## 9. Quy tac an toan

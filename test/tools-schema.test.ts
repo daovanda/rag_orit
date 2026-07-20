@@ -22,6 +22,19 @@ describe("tool schema descriptions", () => {
     expect(findTool("app_builder_node_detail")?.description).toContain("record chi tiết");
   });
 
+  it("exposes prepare to the model but keeps apply backend-only", () => {
+    expect(findTool("app_builder_prepare_change")).toBeDefined();
+    expect(findTool("app_builder_apply_change")).toBeUndefined();
+  });
+
+  it("routes Dai Viet usage and business-process questions to the RAG corpus", () => {
+    const ragSearch = findTool("rag_search");
+
+    expect(ragSearch?.description).toContain("Phần mềm Quản lý Sản xuất Nhựa Đại Việt");
+    expect(ragSearch?.description).toContain("phải dùng rag_search");
+    expect(ragSearch?.parameters.properties.query.description).toContain("Đại Việt");
+  });
+
   it("does not bias model with business-specific sample app names", () => {
     const schemaText = JSON.stringify(TOOLS).toLowerCase();
 

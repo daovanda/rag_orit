@@ -16,6 +16,7 @@ import {
   type Env,
   type ModelProvider
 } from "./config";
+import { RAG_KNOWLEDGE_SCOPE, RAG_TOOL_ROUTING_GUIDANCE } from "./rag-knowledge";
 import { addDebugStep, type DebugStep } from "./debug";
 import type { AIMessage, EmbeddingResult, RagCandidate, RagQueryDebug, RagSource, StoredChunk, ToolDefinition, ToolExecutionResult, VectorMatch } from "./types";
 
@@ -113,7 +114,7 @@ function getRuntimeToolDescription(name: string, description: string): string {
 
   return `${description}
 
-Bổ sung sau ingest: rag_search cũng có thể tra cứu doc/logic/*.md. Dùng nó khi cần hiểu cách Zilcode hoạt động, domain model, REST API contract, runtime architecture, window/tab/field config, tool safety rules, hoặc khi cần lấy kiến thức logic để chọn/gọi các tool Zilcode đúng hơn và kết hợp với dữ liệu thật.`;
+${RAG_TOOL_ROUTING_GUIDANCE}`;
 }
 
 function buildOpenAICompatibleTools(request: ChatModelRequest): Record<string, unknown>[] | undefined {
@@ -676,10 +677,11 @@ async function maybeRewriteRagQuery(
       messages: [
         {
           role: "system",
-          content: `Bạn là bộ rewrite query cho hệ thống RAG tài liệu Zilcode.
+          content: `Bạn là bộ rewrite query cho hệ thống RAG tài liệu Zilcode và Phần mềm Quản lý Sản xuất Nhựa Đại Việt.
 Nhiệm vụ: dựa vào lịch sử hội thoại và câu hỏi hiện tại, viết lại thành một truy vấn tìm kiếm độc lập, rõ nghĩa.
 Chỉ trả về đúng một câu truy vấn, không giải thích, không markdown, không JSON.
-Giữ thuật ngữ Zilcode quan trọng như App Builder, SQL Cloud, User, Role, Organization, Application, Window, Tab, Field, Workflow nếu có.
+Phạm vi corpus: ${RAG_KNOWLEDGE_SCOPE}.
+Giữ nguyên tên sản phẩm, bộ phận, quy trình và thuật ngữ quan trọng như Đại Việt, App Builder, SQL Cloud, User, Role, Organization, Application, Window, Tab, Field, Workflow nếu có.
 Nếu câu hỏi hiện tại đã rõ sau khi xét lịch sử, vẫn viết lại thành câu truy vấn ngắn gọn và đầy đủ ngữ cảnh.`
         },
         {
@@ -690,7 +692,7 @@ Nếu câu hỏi hiện tại đã rõ sau khi xét lịch sử, vẫn viết l�
             "",
             `Câu hỏi/query hiện tại: ${originalQuery}`,
             "",
-            "Truy vấn tìm kiếm độc lập cho tài liệu Zilcode:"
+            "Truy vấn tìm kiếm độc lập cho corpus tài liệu:"
           ].join("\n")
         }
       ]
@@ -764,9 +766,9 @@ async function rerankRagCandidates(
     messages: [
       {
         role: "system",
-        content: `Bạn là bộ rerank tài liệu cho chatbot RAG Zilcode.
+        content: `Bạn là bộ rerank tài liệu cho chatbot RAG Zilcode và Phần mềm Quản lý Sản xuất Nhựa Đại Việt.
 Nhiệm vụ: xếp hạng các chunk theo mức liên quan với câu hỏi người dùng.
-Ưu tiên chunk trả lời trực tiếp câu hỏi, đúng đối tượng người dùng/quản trị, và có nội dung thao tác cụ thể.
+Ưu tiên chunk trả lời trực tiếp câu hỏi, đúng sản phẩm/phân hệ/bộ phận, đúng đối tượng người dùng/quản trị, và có nội dung thao tác cụ thể. Không ưu tiên tài liệu Zilcode chung khi câu hỏi đang hỏi quy trình Đại Việt và ngược lại.
 Chỉ trả về JSON hợp lệ, không giải thích thêm.
 Schema: {"ranked_ids":["chunk-id-1","chunk-id-2"]}`
       },

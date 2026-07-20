@@ -1349,7 +1349,7 @@ function buildCreationSchema(args: Record<string, unknown>): Record<string, unkn
     intent,
     status: "prepare_then_apply",
     semantic_guide: ZILCODE_SEMANTIC_GUIDE,
-    note: "Dùng app_builder_prepare_change để tạo pending plan. Chỉ dùng app_builder_apply_change sau khi user xác nhận rõ ràng.",
+    note: "Dùng app_builder_prepare_change để tạo pending plan. Apply chỉ do backend chạy sau khi người dùng bấm nút xác nhận trên giao diện.",
     graph_first_rule: [
       "1. Gọi app_builder_graph_overview để nắm skeleton cấp root/app và danh sách app.",
       "2. Gọi app_builder_graph_search nếu cần tìm app/table/window/tab/field hiện có.",
@@ -1488,7 +1488,7 @@ function buildCreationSchema(args: Record<string, unknown>): Record<string, unkn
       source_of_truth: ["api.json", "dai_viet/js", "dai_viet/sqlcloud", "dai_viet/sourceeditor", "dai_viet/bpmnwf", "dai_viet/htmlreport"],
       app_builder_metadata_layer: [
         "n_app/n_service/n_appservice/n_table/n_column/n_window/n_tab/n_field/n_menu/n_domain/n_roleapp/n_rolemenu/n_access",
-        "Safe core write path is app_builder_prepare_change -> app_builder_apply_change."
+        "Safe core write path is app_builder_prepare_change -> UI confirmation -> backend apply job."
       ],
       physical_runtime_layer: [
         "SQLCloud table/view/procedure/query/column alter endpoints affect physical database schema or SQL execution.",
@@ -2200,7 +2200,7 @@ function buildWriteContractSummary(selectedNodes: AppBuilderNode[]): Record<stri
     contracts: Object.fromEntries(priorityTypes.map(type => [type, WRITE_ENTITY_CONTRACTS[type]])),
     always_filtered_by_metadata: true,
     apply_requires_confirmation: true,
-    unsupported_without_prepare_change: "Không gọi API ghi trực tiếp từ agent final answer; phải tạo pending plan qua app_builder_prepare_change rồi app_builder_apply_change sau xác nhận."
+    unsupported_without_prepare_change: "Không gọi API ghi trực tiếp từ agent final answer; phải tạo pending plan qua app_builder_prepare_change rồi chờ nút xác nhận để backend tạo apply job."
   };
 }
 
@@ -2312,7 +2312,7 @@ function buildOperationPlanFacts(selectedNodes: AppBuilderNode[]): Record<string
       "Resolve existing node before create to avoid duplicates.",
       "Use dependency_summary before delete/update destructive fields.",
       "Payload must be filtered by actual metadata columns before prepare result is considered valid.",
-      "app_builder_apply_change only after explicit user confirmation with a valid plan_id."
+      "Apply is backend-only after the user confirms a valid pending plan with the UI button."
     ],
     post_apply_verification: [
       "invalidate graph cache",

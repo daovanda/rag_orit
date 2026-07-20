@@ -9,8 +9,18 @@ import {
   TOOL_SELECTION_MAX_TOKENS,
   type Env
 } from "./config";
+import { RAG_KNOWLEDGE_SCOPE, RAG_TOOL_ROUTING_GUIDANCE } from "./rag-knowledge";
 import { getActiveChatModelDebugInfo, runChatModel, searchRag } from "./ai";
 import { addDebugStep, type DebugStep } from "./debug";
+import {
+  blockAgentRun,
+  createAgentRunState,
+  guardToolExecution,
+  inspectToolResult,
+  recordToolOutcome,
+  setAgentRunTerminalStatus,
+  updateRunContext
+} from "./agent-run-state";
 import { TOOLS } from "./tools";
 import { asRecord, getStringArg, toArrayValues } from "./utils";
 import {
@@ -18,7 +28,6 @@ import {
   runAppBuilderGraphTool
 } from "./app-builder-graph";
 import {
-  isAppBuilderWriteTool,
   runAppBuilderWriteTool
 } from "./app-builder-write";
 import {
@@ -27,6 +36,10 @@ import {
 } from "./zilcode";
 import type {
   AgentActionState,
+  AgentRunOptions,
+  AgentRunState,
+  AgentRequestKind,
+  AgentRequiredOutcome,
   AgenticLoopResult,
   AgentMode,
   AIMessage,
@@ -40,12 +53,7 @@ import type {
   ToolResultRecord
 } from "./types";
 
-const MAX_ITERATIONS = 6;
 const SEARCH_MODE_TOOL_NAMES = new Set<string>(["general_chat", "rag_search"]);
-const MESSAGE_AGENT_DISABLED_TOOL_NAMES = new Set<string>(["app_builder_apply_change"]);
-const GRAPH_CONTINUE_TOOLS = new Set([
-  "app_builder_graph_search"
-]);
 const COMPREHENSION_CONTEXT_MAX_CHARS = 12000; // old 4000: GLM đọc được context dài hơn, giảm mất evidence graph/RAG.
 const FINAL_ANSWER_ARRAY_LIMIT = 24; // old 16: compact giữ thêm item quan trọng trong summary.
 const FINAL_ANSWER_OBJECT_KEY_LIMIT = 36; // old 28: compact giữ thêm key metadata khi phân tích node/detail.
@@ -65,12 +73,8 @@ interface ContextualizedRequest {
   needs_clarification: boolean;
   clarification_question: string | null;
   resolved_references: ResolvedReference[];
-}
-
-interface ToolContinuationContext {
-  clarifiedMessage?: string;
-  chatHistory?: AIMessage[];
-  resolvedReferences?: ResolvedReference[];
+  request_kind: AgentRequestKind;
+  required_outcome: AgentRequiredOutcome;
 }
 
 export function parseAgentMode(value: unknown): AgentMode | null {
@@ -80,11 +84,10 @@ export function parseAgentMode(value: unknown): AgentMode | null {
 }
 
 function getToolsForAgentMode(mode: AgentMode): readonly ToolDefinition[] {
-  const availableTools = TOOLS.filter(tool => !MESSAGE_AGENT_DISABLED_TOOL_NAMES.has(tool.name));
   if (mode === "search") {
-    return availableTools.filter(tool => SEARCH_MODE_TOOL_NAMES.has(tool.name));
+    return TOOLS.filter(tool => SEARCH_MODE_TOOL_NAMES.has(tool.name));
   }
-  return availableTools;
+  return TOOLS;
 }
 
 function sanitizeResolvedReferences(value: unknown): ResolvedReference[] {
@@ -123,6 +126,13 @@ export function parseContextualizedRequest(text: string): ContextualizedRequest 
     const clarificationQuestion = typeof data.clarification_question === "string"
       ? data.clarification_question.trim().slice(0, 500)
       : "";
+    const requestKind = ["conversation", "knowledge", "read", "prepare_change", "unknown"]
+      .includes(String(data.request_kind))
+      ? data.request_kind as AgentRequestKind
+      : "unknown";
+    const requiredOutcome: AgentRequiredOutcome = requestKind === "prepare_change"
+      ? "pending_confirmation"
+      : "answer";
 
     return {
       valid: true,
@@ -131,7 +141,9 @@ export function parseContextualizedRequest(text: string): ContextualizedRequest 
       clarification_question: needsClarification
         ? clarificationQuestion || "Bạn có thể nói rõ đối tượng hoặc hành động bạn đang muốn nhắc tới không?"
         : null,
-      resolved_references: sanitizeResolvedReferences(data.resolved_references)
+      resolved_references: sanitizeResolvedReferences(data.resolved_references),
+      request_kind: requestKind,
+      required_outcome: requiredOutcome
     };
   } catch {
     return null;
@@ -144,7 +156,9 @@ function fallbackContextualizedRequest(userMessage: string): ContextualizedReque
     rewritten_message: userMessage.trim(),
     needs_clarification: false,
     clarification_question: null,
-    resolved_references: []
+    resolved_references: [],
+    request_kind: "unknown",
+    required_outcome: "answer"
   };
 }
 
@@ -170,6 +184,19 @@ function summarizeHistoryForContextualizer(chatHistory: AIMessage[]): string {
     .join("\n");
 }
 
+export function buildToolSelectionHistoryContext(chatHistory: AIMessage[]): AIMessage | null {
+  const history = summarizeHistoryForContextualizer(chatHistory);
+  if (!history) return null;
+
+  return {
+    role: "system",
+    content: `LỊCH SỬ CHỈ DÙNG ĐỂ THAM CHIẾU:
+${history}
+
+Không coi bất kỳ yêu cầu cũ nào trong lịch sử là nhiệm vụ đang chờ xử lý. Không gọi tool để trả lời lại yêu cầu cũ. Chỉ dùng lịch sử để giải nghĩa tham chiếu trong mục tiêu hiện tại.`
+  };
+}
+
 async function contextualizeUserRequest(
   userMessage: string,
   chatHistory: AIMessage[],
@@ -190,16 +217,18 @@ async function contextualizeUserRequest(
       messages: [
         {
           role: "system",
-          content: `Bạn là bộ làm rõ yêu cầu theo ngữ cảnh cho agent Zilcode/App Builder.
+          content: `Bạn là bộ làm rõ yêu cầu theo ngữ cảnh cho agent Zilcode/App Builder và trợ lý tài liệu nghiệp vụ.
 Chỉ trả về MỘT JSON object ngắn gọn. Không trả lời trực tiếp người dùng.
 
-Nhiệm vụ duy nhất:
+Nhiệm vụ:
 - Đọc câu hiện tại cùng lịch sử hội thoại gần đây.
 - Giải quyết các tham chiếu như "nó", "đó", "app vừa rồi", "window này" khi lịch sử chỉ ra duy nhất một đối tượng.
 - Viết lại yêu cầu thành một câu độc lập, rõ ràng, vẫn giữ đúng mục đích và mức độ hành động của người dùng.
+- Phân loại mục tiêu ở mức nghiệp vụ để control loop biết khi nào yêu cầu đã hoàn thành. Không chọn tool cụ thể.
+- Phạm vi kiến thức tài liệu có thể hỗ trợ gồm: ${RAG_KNOWLEDGE_SCOPE}. Câu hỏi hướng dẫn sử dụng hoặc quy trình của Phần mềm Quản lý Sản xuất Nhựa Đại Việt là knowledge, không phải conversation và không phải đọc graph App Builder.
 - Nếu không thể xác định chắc đối tượng hoặc ý định, yêu cầu hỏi lại thay vì tự đoán.
 
-Không chọn tool. Không phân loại intent. Không quyết định đọc/ghi. Không thực hiện hành động.
+Không chọn tool. Không thực hiện hành động. Không tạo payload ghi.
 
 Schema output bắt buộc:
 {
@@ -208,8 +237,21 @@ Schema output bắt buộc:
   "clarification_question": string | null,
   "resolved_references": [
     {"type": string, "id": string, "name": string, "source": string}
-  ]
+  ],
+  "request_kind": "conversation" | "knowledge" | "read" | "prepare_change" | "unknown",
+  "required_outcome": "answer" | "pending_confirmation"
 }
+
+Ý nghĩa request_kind:
+- conversation: hội thoại thông thường, không cần kiến thức Zilcode hay dữ liệu hệ thống hiện tại.
+- knowledge: hỏi tài liệu, cách làm, khái niệm hoặc hướng dẫn; không yêu cầu thay đổi hệ thống thật.
+- read: yêu cầu đọc, tìm, đếm, phân tích hoặc giải thích dữ liệu Zilcode/App Builder hiện tại.
+- prepare_change: yêu cầu thực sự tạo, sửa, xóa hoặc chuẩn bị kế hoạch thay đổi metadata trong hệ thống.
+- unknown: chưa đủ căn cứ để chọn một loại trên.
+
+Ý nghĩa required_outcome:
+- answer: hoàn thành bằng câu trả lời.
+- pending_confirmation: chỉ dùng cho prepare_change; chỉ hoàn thành khi backend đã tạo pending plan chờ người dùng bấm nút xác nhận.
 
 Quy tắc bắt buộc:
 - Không thêm ID, tên, đối tượng, giá trị mới hoặc hành động không có căn cứ trong câu hiện tại/lịch sử.
@@ -219,6 +261,10 @@ Quy tắc bắt buộc:
 - resolved_references chỉ chứa đối tượng thực sự lấy được từ câu hiện tại hoặc lịch sử. source phải nói ngắn gọn căn cứ lấy thông tin.
 - Khi needs_clarification=false, clarification_question phải là null.
 - Khi needs_clarification=true, clarification_question phải là một câu hỏi cụ thể và rewritten_message phải mô tả trung lập phần đã hiểu, không tự chọn một khả năng.
+- Với câu hỏi hướng dẫn/cách làm, dùng request_kind=knowledge và required_outcome=answer dù câu có chứa động từ tạo/sửa/xóa.
+- Với câu phủ định hoặc yêu cầu không thực hiện thay đổi, không dùng prepare_change.
+- Với yêu cầu thay đổi hệ thống thật, dùng request_kind=prepare_change và required_outcome=pending_confirmation. Không coi câu trả lời mô tả kế hoạch là đã hoàn thành.
+- Nếu request_kind khác prepare_change thì required_outcome phải là answer.
 
 Ví dụ:
 - Lịch sử nói app có appid <appid> là "Tên cũ", user nói "đổi nó thành Tên mới" -> rewritten_message: "Đổi tên app có appid <appid> từ Tên cũ thành Tên mới"; resolve app đó từ lịch sử.
@@ -242,6 +288,8 @@ Ví dụ:
       rewritten_message_chars: contextualized.rewritten_message.length,
       needs_clarification: contextualized.needs_clarification,
       resolved_references: contextualized.resolved_references,
+      request_kind: contextualized.request_kind,
+      required_outcome: contextualized.required_outcome,
       model: response.model
     });
     return contextualized;
@@ -255,196 +303,6 @@ Ví dụ:
     });
     return contextualized;
   }
-}
-
-function isInstructionalRequest(message: string): boolean {
-  const text = normalizeVietnameseText(message);
-  return /(huong dan|chi toi cach|cho toi biet cach|cach de|lam sao|lam the nao|quy trinh|can lam gi|how to)/.test(text);
-}
-
-function hasNegatedWriteRequest(message: string): boolean {
-  const text = normalizeVietnameseText(message);
-  return /(dung|khong|chua|khong duoc|khong can)\s+(?:\S+\s+){0,4}(tao|them|sua|doi|doi ten|chuyen|dat ten|cap nhat|xoa|delete|remove|rename|update|create|add|apply|thuc hien|tien hanh)/.test(text);
-}
-
-function hasContextualWriteRequest(message: string): boolean {
-  const text = normalizeVietnameseText(message);
-  if (!text || isInstructionalRequest(message) || hasNegatedWriteRequest(message)) return false;
-
-  const hasWriteVerb = /(tao|them|sua|doi|chuyen|dat ten|cap nhat|xoa|delete|remove|rename|update|create|add|apply|thuc hien|tien hanh)/.test(text);
-  if (!hasWriteVerb) return false;
-
-  return /(no|do|nay|kia|muc nay|doi tuong nay|app|ung dung|window|cua so|table|bang|field|truong|menu|domain)/.test(text)
-    || /(thanh|sang|vao)\s+["']?[\w\s-]+/.test(text);
-}
-
-export function isExplicitWriteRequest(message: string): boolean {
-  const text = normalizeVietnameseText(message);
-  if (!text || isInstructionalRequest(message) || hasNegatedWriteRequest(message)) return false;
-
-  const hasWriteVerb = /(tao|them|sua|doi ten|cap nhat|xoa|delete|remove|rename|update|create|add|apply|thuc hien|tien hanh)/.test(text);
-  if (!hasWriteVerb) return false;
-
-  return /^(?:(?:bay gio|xin|ban|hay|vui long|giup toi|thu|ban co the)\s+)*(tao|them|sua|doi ten|cap nhat|xoa|delete|remove|rename|update|create|add|apply|thuc hien|tien hanh)/.test(text)
-    || /(toi|minh)\s+(muon|can|yeu cau|nho)\s+(?:\S+\s+){0,4}(tao|them|sua|doi ten|cap nhat|xoa|delete|remove|rename|update|create|add|apply|thuc hien|tien hanh)/.test(text)
-    || isPrepareChangeRequest(message);
-}
-
-export function isWriteRequestAllowed(
-  originalMessage: string,
-  clarifiedMessage: string,
-  chatHistory: AIMessage[],
-  resolvedReferences: ResolvedReference[] = []
-): boolean {
-  if (isInstructionalRequest(originalMessage) || hasNegatedWriteRequest(originalMessage)) return false;
-  if (isExplicitWriteRequest(originalMessage)) return true;
-  if (!isExplicitWriteRequest(clarifiedMessage)) return false;
-  if (resolvedReferences.length === 0) return false;
-  if (hasContextualWriteRequest(originalMessage)) return true;
-
-  return chatHistory
-    .slice(-6)
-    .some(message => message.role === "user" && isExplicitWriteRequest(message.content ?? ""));
-}
-
-function isToolCallAllowedByPolicy(
-  toolName: string,
-  originalMessage: string,
-  clarifiedMessage: string,
-  chatHistory: AIMessage[],
-  resolvedReferences: ResolvedReference[]
-): boolean {
-  if (toolName === "app_builder_prepare_change") {
-    return isWriteRequestAllowed(originalMessage, clarifiedMessage, chatHistory, resolvedReferences);
-  }
-  if (toolName === "app_builder_apply_change") {
-    return false;
-  }
-  return true;
-}
-
-function isZilcodeKnowledgeRequest(message: string): boolean {
-  const text = normalizeVietnameseText(message);
-  const hasSpecificZilcodeTerm = /(zilcode|app builder|appbuilder|metadata|appid|windowid|tableid|tabid|fieldid|menuid|domainid|window|cua so|tab|field|truong|table|bang|column|cot|menu|domain|lookup|role|quyen|access|workflow|report|gis|sqlcloud|source|api contract|urledit|urlview)/.test(text);
-  const hasAppBuilderScopedApp = /(\bapp\b|ung dung).*(zilcode|app builder|appbuilder|metadata|appid|window|cua so|tab|field|table|bang|menu|domain|role|quyen|access|he thong|du an|hien tai|hien co|dang co|dang quan ly|cua toi)/.test(text);
-  const hasAppBuilderAction = /(tao|them|sua|doi|cap nhat|xoa|huong dan|cach|quy trinh).*(\bapp\b|ung dung|window|cua so|table|bang|field|truong|menu|domain)/.test(text);
-  return hasSpecificZilcodeTerm || hasAppBuilderScopedApp || hasAppBuilderAction;
-}
-
-function isCurrentAppBuilderReadRequest(message: string): boolean {
-  const text = normalizeVietnameseText(message);
-  const hasMetadataId = /(appid|windowid|tableid|tabid|fieldid|menuid|domainid)/.test(text);
-  const hasCurrentScope = /(he thong|du an|app builder|appbuilder|metadata|hien tai|hien co|dang co|dang quan ly|cua toi|trong he thong)/.test(text);
-  const asksAppList = /(ung dung nao|app nao|danh sach app|cac app|nhung app|danh sach ung dung|cac ung dung|nhung ung dung)/.test(text);
-  const asksCurrentOverview = /(co nhung gi|dang co nhung gi|tong quan|cau truc tong quan|bao gom nhung gi|gom nhung gi)/.test(text);
-  return hasMetadataId
-    || (hasCurrentScope && (asksAppList || asksCurrentOverview))
-    || /(app|ung dung|window|cua so|table|bang|menu)\s+.+(co gi|co nhung gi|gom|lien ket|hoat dong|dung bang|bang nao)/.test(text);
-}
-
-function inferCreationSchemaIntent(message: string): string {
-  const text = normalizeVietnameseText(message);
-  if (/(tao|them|create|add)/.test(text) && /(app|ung dung)/.test(text)) return "create_app";
-  if (/(tao|them|create|add)/.test(text) && /(table|bang)/.test(text)) return "add_table";
-  if (/(tao|them|create|add)/.test(text) && /(window|cua so)/.test(text)) return "add_window";
-  if (/(tao|them|create|add)/.test(text) && /(field|truong)/.test(text)) return "add_field";
-  if (/(sua|doi|cap nhat|rename|update)/.test(text)) return "update_node";
-  return "general";
-}
-
-export function selectEvidenceToolForDirectAnswer(
-  originalMessage: string,
-  clarifiedMessage: string,
-  mode: AgentMode = "default"
-): ToolCall | null {
-  const combined = `${originalMessage}\n${clarifiedMessage}`;
-  const graphIntent = inferGraphQuestionIntent(clarifiedMessage);
-  const asksForHowToOrRules = isInstructionalRequest(originalMessage)
-    || /(tai lieu|docs|quy tac|contract|api|playbook|cach dung|logic|kien thuc|giai thich|la gi)/.test(normalizeVietnameseText(combined));
-  const originalBlocksWrite = isInstructionalRequest(originalMessage) || hasNegatedWriteRequest(originalMessage);
-  const explicitWrite = !originalBlocksWrite
-    && (isExplicitWriteRequest(originalMessage) || isExplicitWriteRequest(clarifiedMessage) || isPrepareChangeRequest(originalMessage));
-
-  if (mode === "search") {
-    return explicitWrite || isZilcodeKnowledgeRequest(combined) || asksForHowToOrRules
-      ? { name: "rag_search", arguments: { query: clarifiedMessage || originalMessage } }
-      : null;
-  }
-
-  if (asksForHowToOrRules && isZilcodeKnowledgeRequest(combined)) {
-    return { name: "rag_search", arguments: { query: clarifiedMessage || originalMessage } };
-  }
-
-  if (explicitWrite) {
-    return { name: "app_builder_creation_schema", arguments: { intent: inferCreationSchemaIntent(clarifiedMessage || originalMessage) } };
-  }
-
-  if (graphIntent === "overview" && isCurrentAppBuilderReadRequest(combined)) {
-    return { name: "app_builder_graph_overview", arguments: {} };
-  }
-
-  if (graphIntent === "search_only" && isZilcodeKnowledgeRequest(combined)) {
-    return { name: "app_builder_graph_search", arguments: { query: clarifiedMessage || originalMessage } };
-  }
-
-  if (["deep_dive", "relationship", "detail", "count"].includes(graphIntent) && (isCurrentAppBuilderReadRequest(combined) || isZilcodeKnowledgeRequest(combined))) {
-    return {
-      name: graphIntent === "detail" ? "app_builder_node_detail" : "app_builder_graph_subgraph",
-      arguments: {
-        query: clarifiedMessage || originalMessage,
-        depth: graphIntent === "relationship" || graphIntent === "deep_dive" ? "2" : "1",
-        max_nodes: "160"
-      }
-    };
-  }
-
-  return null;
-}
-
-export function shouldFetchEvidenceToolForDirectAnswer(
-  toolResults: readonly ToolResultRecord[],
-  evidenceToolCall: ToolCall | null
-): evidenceToolCall is ToolCall {
-  if (!evidenceToolCall) return false;
-  return !toolResults.some(result => result.name === evidenceToolCall.name);
-}
-
-export function shouldOverrideGeneralChatWithEvidenceTool(
-  toolCalls: readonly ToolCall[],
-  toolResults: readonly ToolResultRecord[],
-  evidenceToolCall: ToolCall | null
-): evidenceToolCall is ToolCall {
-  return toolCalls.length > 0
-    && toolCalls.every(toolCall => toolCall.name === "general_chat")
-    && shouldFetchEvidenceToolForDirectAnswer(toolResults, evidenceToolCall);
-}
-
-export function selectToolCallsToExecute(toolCalls: readonly ToolCall[]): ToolCall[] {
-  const hasSpecificTool = toolCalls.some(toolCall => toolCall.name !== "general_chat");
-  return hasSpecificTool
-    ? toolCalls.filter(toolCall => toolCall.name !== "general_chat")
-    : [...toolCalls];
-}
-
-export function shouldRequirePrepareChangeAfterCreationSchema(
-  toolResults: readonly ToolResultRecord[],
-  originalMessage: string,
-  clarifiedMessage: string,
-  chatHistory: AIMessage[],
-  resolvedReferences: ResolvedReference[]
-): boolean {
-  const hasCreationSchema = toolResults.some(result => result.name === "app_builder_creation_schema");
-  const hasWriteResult = toolResults.some(result => result.name === "app_builder_prepare_change" || result.name === "app_builder_apply_change");
-  return hasCreationSchema
-    && !hasWriteResult
-    && isWriteRequestAllowed(originalMessage, clarifiedMessage, chatHistory, resolvedReferences);
-}
-
-export function isLikelyClarificationAnswer(answer: string): boolean {
-  const text = normalizeVietnameseText(answer);
-  return text.includes("?")
-    || /(hay|vui long|ban can|ban muon|cho toi biet|cho minh biet|noi ro|lam ro|xac nhan|thieu|chua ro|can them)\b/.test(text)
-    || /(ten app|ten ung dung|ten bang|ten table|ten window|target|doi tuong|gia tri|field|truong nao)/.test(text);
 }
 
 async function executeTool(
@@ -529,8 +387,7 @@ Không nhắc đến tool/function nội bộ.`
       return { content: JSON.stringify(result, null, 2) };
     }
 
-    case "app_builder_prepare_change":
-    case "app_builder_apply_change": {
+    case "app_builder_prepare_change": {
       if (!zilcodeSession) return noZilcodeSessionResult();
 
       addDebugStep(debugSteps, `tool.${tool.name}`, "start", `Gọi ${tool.name}.`, {
@@ -916,14 +773,13 @@ function summarizeFactLabels(records: Record<string, unknown>[], limit: number):
 }
 
 function createDeterministicChangeAnswer(toolResults: ToolResultRecord[]): string | null {
-  const last = [...toolResults].reverse().find(result => isAppBuilderWriteTool(result.name));
+  const last = [...toolResults].reverse().find(result => result.name === "app_builder_prepare_change");
   if (!last) return null;
 
   try {
     const data = JSON.parse(last.content) as Record<string, unknown>;
-    if (last.name === "app_builder_prepare_change") {
-      if (data.valid === false || data.status === "invalid") {
-        const errors = Array.isArray(data.blocking_errors) ? data.blocking_errors : [];
+    if (data.valid === false || data.status === "invalid") {
+      const errors = Array.isArray(data.blocking_errors) ? data.blocking_errors : [];
       return [
         "Kế hoạch chưa hợp lệ nên tôi chưa ghi dữ liệu vào Zilcode.",
         "",
@@ -932,111 +788,53 @@ function createDeterministicChangeAnswer(toolResults: ToolResultRecord[]): strin
         "",
         "Hãy bổ sung thông tin hoặc cho phép tôi lập lại plan với cấu trúc rõ hơn."
       ].join("\n").trim();
-      }
-
-      const operations = Array.isArray(data.operations)
-        ? data.operations.filter((operation): operation is Record<string, unknown> => Boolean(operation) && typeof operation === "object")
-        : [];
-      const warnings = Array.isArray(data.warnings) ? data.warnings : [];
-
-      return [
-        "Tôi đã chuẩn bị kế hoạch App Builder và chưa ghi dữ liệu vào hệ thống.",
-        `Plan ID: ${String(data.plan_id ?? "")}`,
-        `Tổng số bước: ${operations.length}.`,
-        "",
-        "Các bước sẽ thực hiện:",
-        ...operations.slice(0, 12).map((operation, index) => `${index + 1}. ${String(operation.label ?? operation.id ?? "operation")}`),
-        operations.length > 12 ? `... và ${operations.length - 12} bước nữa.` : "",
-        warnings.length ? "" : "",
-        warnings.length ? "Lưu ý:" : "",
-        ...warnings.slice(0, 6).map(warning => `- ${String(warning)}`),
-        "",
-        "Nếu bạn đồng ý, hãy trả lời: \"có, thực hiện kế hoạch\"."
-      ].filter(Boolean).join("\n");
     }
 
-    if (last.name === "app_builder_apply_change") {
-      if (data.ok === true) {
-        return [
-          "Đã thực hiện xong kế hoạch App Builder.",
-          `Plan ID: ${String(data.plan_id ?? "")}`,
-          `Số bước đã ghi: ${String(data.applied_count ?? 0)}.`,
-          "",
-          "Bước tiếp theo nên làm là đọc lại App Builder graph để kiểm tra thay đổi đã đúng."
-        ].join("\n");
-      }
+    const operations = Array.isArray(data.operations)
+      ? data.operations.filter((operation): operation is Record<string, unknown> => Boolean(operation) && typeof operation === "object")
+      : [];
+    const warnings = Array.isArray(data.warnings) ? data.warnings : [];
 
-      const results = Array.isArray(data.results)
-        ? data.results.filter((result): result is Record<string, unknown> => Boolean(result) && typeof result === "object")
-        : [];
-      const failedOperation = data.failed_operation && typeof data.failed_operation === "object" && !Array.isArray(data.failed_operation)
-        ? data.failed_operation as Record<string, unknown>
-        : undefined;
-      const failed = failedOperation ?? results.find(result => result.ok === false);
-      const appliedOperations = Array.isArray(data.applied_operations)
-        ? data.applied_operations.filter((operation): operation is Record<string, unknown> => Boolean(operation) && typeof operation === "object")
-        : [];
-      const skippedOperations = Array.isArray(data.skipped_operations)
-        ? data.skipped_operations.filter((operation): operation is Record<string, unknown> => Boolean(operation) && typeof operation === "object")
-        : [];
-
-      return [
-        "Kế hoạch chưa được thực hiện thành công.",
-        `Đã ghi được: ${String(data.applied_count ?? 0)} bước.`,
-        `Số bước lỗi: ${String(data.failed_count ?? 0)}.`,
-        `Số bước bị bỏ qua: ${String(data.skipped_count ?? skippedOperations.length)}.`,
-        failed ? `Dừng tại: ${String(failed.operation_id ?? "")}.` : "",
-        "",
-        failed ? `Lỗi chính: ${String(failed.error ?? data.error ?? "Không rõ lỗi.")}` : `Lỗi chính: ${String(data.error ?? "Không rõ lỗi.")}`,
-        appliedOperations.length ? "" : "",
-        appliedOperations.length ? "Các bước đã ghi cần kiểm tra/cleanup nếu sửa plan:" : "",
-        ...appliedOperations.slice(0, 8).map(operation => `- ${String(operation.label ?? operation.operation_id ?? "")}`),
-        skippedOperations.length ? "" : "",
-        skippedOperations.length ? "Các bước chưa chạy:" : "",
-        ...skippedOperations.slice(0, 8).map(operation => `- ${String(operation.label ?? operation.operation_id ?? "")}`),
-        "",
-        data.pending_plan_deleted === true ? "Plan cũ đã được vô hiệu hóa để tránh apply lặp gây tạo trùng." : "",
-        "Tôi chưa coi thay đổi này là hoàn tất. Cần đọc lại graph, sửa plan theo lỗi trên rồi chuẩn bị kế hoạch mới."
-      ].filter(Boolean).join("\n");
-    }
+    return [
+      "Tôi đã chuẩn bị kế hoạch App Builder và chưa ghi dữ liệu vào hệ thống.",
+      `Plan ID: ${String(data.plan_id ?? "")}`,
+      `Tổng số bước: ${operations.length}.`,
+      "",
+      "Các bước sẽ thực hiện:",
+      ...operations.slice(0, 12).map((operation, index) => `${index + 1}. ${String(operation.label ?? operation.id ?? "operation")}`),
+      operations.length > 12 ? `... và ${operations.length - 12} bước nữa.` : "",
+      warnings.length ? "" : "",
+      warnings.length ? "Lưu ý:" : "",
+      ...warnings.slice(0, 6).map(warning => `- ${String(warning)}`),
+      "",
+      "Hãy kiểm tra kế hoạch và dùng nút xác nhận trên giao diện nếu bạn muốn thực hiện."
+    ].filter(Boolean).join("\n");
   } catch {
     return null;
   }
-
-  return null;
 }
 
 function extractActionStateFromToolResults(toolResults: ToolResultRecord[]): AgentActionState | undefined {
-  const last = [...toolResults].reverse().find(result => isAppBuilderWriteTool(result.name));
+  const last = [...toolResults].reverse().find(result => result.name === "app_builder_prepare_change");
   if (!last) return undefined;
 
   try {
     const data = JSON.parse(last.content) as Record<string, unknown>;
     const planId = typeof data.plan_id === "string" ? data.plan_id : undefined;
     const base: AgentActionState = {
-      kind: last.name === "app_builder_apply_change" ? "apply_change" : "prepare_change",
+      kind: "prepare_change",
       plan_id: planId,
       status: typeof data.status === "string" ? data.status : undefined,
       updated_at: new Date().toISOString()
     };
 
-    if (last.name === "app_builder_prepare_change") {
-      return {
-        ...base,
-        valid: typeof data.valid === "boolean" ? data.valid : undefined,
-        requires_confirmation: typeof data.requires_confirmation === "boolean" ? data.requires_confirmation : undefined,
-        summary: data.summary,
-        operations: data.operations,
-        error: typeof data.error === "string" ? data.error : undefined
-      };
-    }
-
     return {
       ...base,
-      ok: typeof data.ok === "boolean" ? data.ok : undefined,
-      applied_count: typeof data.applied_count === "number" ? data.applied_count : undefined,
-      failed_count: typeof data.failed_count === "number" ? data.failed_count : undefined,
-      skipped_count: typeof data.skipped_count === "number" ? data.skipped_count : undefined,
+      valid: typeof data.valid === "boolean" ? data.valid : undefined,
+      requires_confirmation: typeof data.requires_confirmation === "boolean" ? data.requires_confirmation : undefined,
+      summary: data.summary,
+      operations: data.operations,
+      approved_change_envelope: asRecord(data.approved_change_envelope) ?? undefined,
       error: typeof data.error === "string" ? data.error : undefined
     };
   } catch {
@@ -1047,12 +845,6 @@ function extractActionStateFromToolResults(toolResults: ToolResultRecord[]): Age
 function withActionState(result: AgenticLoopResult, toolResults: ToolResultRecord[]): AgenticLoopResult {
   const actionState = extractActionStateFromToolResults(toolResults);
   return actionState ? { ...result, action_state: actionState } : result;
-}
-
-function isStrongSearchMatch(match: Record<string, unknown> | undefined): boolean {
-  if (!match) return false;
-  const score = Number(match.score ?? 0);
-  return Number.isFinite(score) && score >= 70;
 }
 
 function recordArray(value: unknown): Record<string, unknown>[] {
@@ -1085,51 +877,6 @@ function cleanMarkdownArtifacts(answer: string): string {
     .trim();
 }
 
-export function shouldContinueAfterToolResult(
-  toolName: string,
-  toolResult: string,
-  userMessage: string,
-  continuationContext: string | ToolContinuationContext = userMessage
-): boolean {
-  const context = typeof continuationContext === "string"
-    ? { clarifiedMessage: continuationContext }
-    : continuationContext;
-  const clarifiedMessage = context.clarifiedMessage ?? userMessage;
-
-  if (toolName === "app_builder_creation_schema") {
-    return isWriteRequestAllowed(
-      userMessage,
-      clarifiedMessage,
-      context.chatHistory ?? [],
-      context.resolvedReferences ?? []
-    );
-  }
-
-  if (!GRAPH_CONTINUE_TOOLS.has(toolName)) return false;
-
-  const intent = inferGraphQuestionIntent(clarifiedMessage || userMessage);
-  if (!["deep_dive", "relationship", "detail", "count", "overview"].includes(intent)) return false;
-
-  try {
-    const data = JSON.parse(toolResult) as Record<string, unknown>;
-    if (String(data.mode ?? "") !== "search") return false;
-    const matchesCount = Number(data.matches_count ?? 0);
-    if (matchesCount === 0) return true;
-    if (matchesCount === 1) return true;
-    const matches = recordArray(data.matches);
-    return isStrongSearchMatch(matches[0]);
-  } catch {
-    return false;
-  }
-}
-
-export function isPlanConfirmation(message: string): boolean {
-  const text = normalizeVietnameseText(message);
-  if (/^(co|yes|ok|dong y)$/i.test(text)) return true;
-  return /^(co|yes|ok|dong y|thuc hien|hay thuc hien)/.test(text)
-    && /(thuc hien|tien hanh|ke hoach|apply|chay|tao|sua|xoa|cap nhat)/.test(text);
-}
-
 function normalizeVietnameseText(value: string): string {
   return value
     .normalize("NFD")
@@ -1139,79 +886,6 @@ function normalizeVietnameseText(value: string): string {
     .replace(/Đ/g, "d")
     .toLowerCase()
     .trim();
-}
-
-type GraphQuestionIntent =
-  | "overview"
-  | "search_only"
-  | "deep_dive"
-  | "relationship"
-  | "detail"
-  | "count"
-  | "unknown";
-
-export function inferGraphQuestionIntent(message: string): GraphQuestionIntent {
-  const text = normalizeVietnameseText(message);
-
-  if (/(bao nhieu|so luong|count|co may)/.test(text)) return "count";
-  if (/(luong|flow|lien ket|ket noi|quan he|dung bang|bang nao|map|lookup|domain)/.test(text)) return "relationship";
-  if (/(\bdi sau\b|phan tich|xem ky|xem sau|noi ro|giai thich|mo ta|cau truc|tong quan chi tiet|thanh phan|bao gom|gom nhung gi|gom nhung)/.test(text)) return "deep_dive";
-  if (/(chi tiet|field|truong|cot|column|tab|menu|cache|quyen|role|access)/.test(text)) return "detail";
-  if (/(he thong|tong quan|dang co nhung gi|co nhung gi|danh sach app|cac app|nhung app|ung dung nao|app nao)/.test(text)) return "overview";
-  if (/(tim|search|node|id)/.test(text)) return "search_only";
-
-  return "unknown";
-}
-
-function isPrepareChangeRequest(message: string): boolean {
-  const text = normalizeVietnameseText(message);
-  return text.includes("app_builder_prepare_change")
-    || text.includes("prepare change")
-    || text.includes("prepare_change")
-    || text.includes("tao plan")
-    || text.includes("chuan bi plan")
-    || text.includes("lap plan");
-}
-
-function extractAppOrdinalReference(message: string): number | null {
-  const normalized = normalizeVietnameseText(message);
-  const match = normalized.match(/(?:ung dung|app)\s*(?:so|thu)?\s*(\d+)/)
-    ?? normalized.match(/^so\s*(\d+)\b/);
-  if (!match) return null;
-  const value = Number(match[1]);
-  return Number.isFinite(value) && value > 0 ? value : null;
-}
-
-function isReadOnlyAppInfoIntent(message: string): boolean {
-  const normalized = normalizeVietnameseText(message);
-  if (/(tao|them|xoa|delete|remove|sua|doi|cap nhat|update|create|add)/.test(normalized)) return false;
-  return /(co gi|chi tiet|bang|table|window|cua so|menu|tab|field|truong|cot|cache|quyen|role|thong tin)/.test(normalized);
-}
-
-function resolveAppOrdinalFromHistory(chatHistory: AIMessage[], ordinal: number): { appid?: string; appName?: string } | null {
-  for (let i = chatHistory.length - 1; i >= 0; i--) {
-    const message = chatHistory[i];
-    if (message.role !== "assistant") continue;
-    const lines = (message.content ?? "").split(/\r?\n/);
-    for (const line of lines) {
-      const match = line.match(/^\s*(\d+)[.)]\s+(.+?)\s*$/);
-      if (!match || Number(match[1]) !== ordinal) continue;
-
-      const raw = match[2].trim();
-      const appidMatch = raw.match(/\bappid\s*[=:]\s*([0-9]+)/i);
-      const appName = raw
-        .replace(/\([^)]*\bappid\s*[=:]\s*[0-9]+[^)]*\)/i, "")
-        .replace(/\s+-\s+.*$/, "")
-        .replace(/\s*:\s+.*$/, "")
-        .replace(/\.$/, "")
-        .trim();
-      return {
-        appid: appidMatch?.[1],
-        appName: appName || undefined
-      };
-    }
-  }
-  return null;
 }
 
 export function sanitizeChatHistory(history: unknown): AIMessage[] {
@@ -1267,11 +941,23 @@ function buildSingleAppBuilderToolComprehensionContext(graphResult: ToolResultRe
 
     const graph = asRecord(data.graph);
     const nodes = recordArray(graph?.nodes);
+    const appNames = nodes
+      .filter(node => node.type === "app")
+      .slice(0, 10)
+      .map(node => ({
+        id: node.id,
+        label: node.label,
+        summary: node.summary
+      }));
     const mini = {
       mode: data.mode,
       query: data.query,
       requested_node_id: data.requested_node_id,
       resolved_from: data.resolved_from,
+      apps_count: data.apps_count ?? appNames.length,
+      app_names: appNames,
+      truncated: data.truncated,
+      graph_quality: data.graph_quality,
       scope: compactValueForFinalAnswer(facts.scope),
       flow_summary: compactScalarArrayForFinalAnswer(facts.flow_summary, 8),
       tables_summary: compactRecordArrayForFinalAnswer(facts.tables_summary, 8),
@@ -1288,15 +974,7 @@ function buildSingleAppBuilderToolComprehensionContext(graphResult: ToolResultRe
       creation_readiness: compactValueForFinalAnswer(facts.creation_readiness),
       operation_plan_facts: compactValueForFinalAnswer(facts.operation_plan_facts),
       inferred_notes: compactScalarArrayForFinalAnswer(facts.inferred_notes, 8),
-      truncated: facts.truncated,
-      app_names: nodes
-        .filter(node => node.type === "app")
-        .slice(0, 8)
-        .map(node => ({
-          id: node.id,
-          label: node.label,
-          summary: node.summary
-        }))
+      facts_truncated: facts.truncated
     };
 
     const raw = JSON.stringify(mini, null, 2);
@@ -1307,6 +985,9 @@ function buildSingleAppBuilderToolComprehensionContext(graphResult: ToolResultRe
       query: data.query,
       requested_node_id: data.requested_node_id,
       resolved_from: data.resolved_from,
+      apps_count: data.apps_count ?? appNames.length,
+      app_names: appNames,
+      truncated: data.truncated,
       scope: compactValueForFinalAnswer(facts.scope),
       flow_summary: compactScalarArrayForFinalAnswer(facts.flow_summary, 6),
       tables_summary: compactRecordArrayForFinalAnswer(facts.tables_summary, 4),
@@ -1319,7 +1000,7 @@ function buildSingleAppBuilderToolComprehensionContext(graphResult: ToolResultRe
       creation_readiness: compactValueForFinalAnswer(facts.creation_readiness),
       operation_plan_facts: compactValueForFinalAnswer(facts.operation_plan_facts),
       inferred_notes: compactScalarArrayForFinalAnswer(facts.inferred_notes, 5),
-      truncated: facts.truncated
+      facts_truncated: facts.truncated
     };
     const reducedRaw = JSON.stringify(reducedMini, null, 2);
     if (reducedRaw.length <= COMPREHENSION_CONTEXT_MAX_CHARS) return reducedRaw;
@@ -1464,7 +1145,7 @@ async function buildComprehension(
     messages: [
       {
         role: "system",
-        content: `Bạn là bộ phân tích context cho trợ lý Zilcode/App Builder.
+        content: `Bạn là bộ phân tích context cho trợ lý Zilcode/App Builder và Phần mềm Quản lý Sản xuất Nhựa Đại Việt.
 Nhiệm vụ: đọc tool/RAG/graph data bên dưới theo đúng câu hỏi của user và tạo một evidence brief nội bộ ngắn gọn.
 
 Đây không phải câu trả lời cuối cho user. Không tự thêm lời chào, không hướng dẫn user xác nhận, không tạo plan ghi nếu context chưa có tool write result.
@@ -1478,6 +1159,7 @@ Viết prose thuần, không JSON, không markdown, theo 4 ý ngắn:
 3. Liên kết/flow đã thấy: nối các quan hệ thành chuỗi dễ hiểu như app -> menu -> window -> tab -> table -> field -> column/domain/lookup, hoặc role -> roleapp/rolemenu/access. Chỉ nêu flow có bằng chứng.
 
 4. Điểm chưa rõ: phần context chưa đủ để kết luận, phần chỉ là suy luận/khuyến nghị, và phần runtime ngoài App Builder nếu có.
+5. Với overview app, giữ nguyên toàn bộ tên trong app_names. Chỉ kết luận danh sách bị giới hạn khi truncated.apps=true; không suy ra có app ẩn chỉ vì một summary khác ngắn hơn.
 
 Chỉ dùng thông tin có trong tool/RAG/graph data. Không bịa thêm. Chỉ dùng kiến thức chung nếu context thật sự cần diễn giải, và phải nói rõ đó là diễn giải.`
       },
@@ -1513,7 +1195,7 @@ async function buildReasoning(
     messages: [
       {
         role: "system",
-        content: `Bạn là bộ tạo answer brief nội bộ cho trợ lý Zilcode/App Builder.
+        content: `Bạn là bộ tạo answer brief nội bộ cho trợ lý Zilcode/App Builder và Phần mềm Quản lý Sản xuất Nhựa Đại Việt.
 Bạn nhận được: (1) evidence brief đã tóm tắt từ tool/RAG/graph data, (2) câu hỏi của user.
 
 Chỉ trả về MỘT JSON object ngắn. Không markdown. Không viết câu trả lời cuối. Không dùng lời tự nhắc như "We need", "Let's craft", "Tôi cần".
@@ -1571,7 +1253,7 @@ async function buildFinalAnswerFromReasoning(
     messages: [
       {
         role: "system",
-        content: `Bạn là trợ lý Zilcode/App Builder.
+        content: `Bạn là trợ lý Zilcode/App Builder và hướng dẫn sử dụng Phần mềm Quản lý Sản xuất Nhựa Đại Việt.
 Trả lời bằng ngôn ngữ của user. Nếu user viết tiếng Việt, toàn bộ câu trả lời phải là tiếng Việt.
 Không dùng heading hay cụm từ tiếng Anh nếu user viết tiếng Việt.
 Không nhắc đến tool/function nội bộ.
@@ -1587,6 +1269,7 @@ Cách viết:
 - Bắt đầu từ dữ liệu đã thấy trong tool/RAG/graph data, rồi mới diễn giải bằng kiến thức chung.
 - Được dùng kiến thức chung về no-code/app-builder/ERP/CRUD/workflow để giải thích dễ hiểu, nhưng không dùng để bịa dữ liệu context chưa xác minh.
 - Phân biệt rõ phần đã xác minh với phần suy luận/khuyến nghị khi câu trả lời có cả hai.
+- Khi trả lời danh sách app, dùng đủ app_names đã cung cấp. Chỉ nói dữ liệu bị giới hạn hoặc còn app chưa hiển thị khi evidence có truncated.apps=true; không tự suy đoán app bị ẩn.
 - Không kể lại JSON, không mở bằng danh sách dài nếu user không hỏi liệt kê.
 - Không viết các câu meta như "We need to", "Let's craft", "Tôi cần", "Kế hoạch trả lời". Chỉ viết câu trả lời cuối cùng cho user.`
       },
@@ -1670,136 +1353,142 @@ async function createFinalAnswerFromToolResults(
   return answer;
 }
 
+export function hasReachedRequiredOutcome(
+  requiredOutcome: AgentRequiredOutcome,
+  runState: AgentRunState
+): boolean {
+  return requiredOutcome === "answer"
+    || runState.terminal_status === "waiting_confirmation";
+}
+
 export async function runAgenticLoop(
   userMessage: string,
   env: Env,
   chatHistory: AIMessage[] = [],
   debugSteps?: DebugStep[],
   zilcodeSession?: ZilcodeSessionState | null,
-  mode: AgentMode = "default"
+  mode: AgentMode = "default",
+  runOptions: AgentRunOptions = {}
 ): Promise<AgenticLoopResult> {
   const activeTools = getToolsForAgentMode(mode);
   const activeToolNames = new Set<string>(activeTools.map(tool => tool.name));
   const searchOnlyMode = mode === "search";
+  const runState = createAgentRunState(userMessage, runOptions);
+  const persistRunState = async (): Promise<void> => {
+    await runOptions.on_state_change?.(runState);
+  };
+  const finishRun = async (
+    result: AgenticLoopResult,
+    terminalStatus?: AgentRunState["terminal_status"]
+  ): Promise<AgenticLoopResult> => {
+    if (terminalStatus) {
+      setAgentRunTerminalStatus(runState, terminalStatus);
+    } else if (runState.terminal_status === "running") {
+      setAgentRunTerminalStatus(runState, "succeeded");
+    }
+    await persistRunState();
+    return { ...result, run_state: runState };
+  };
 
   addDebugStep(debugSteps, "agent.start", "start", "Bắt đầu agentic loop.", {
     message_chars: userMessage.length,
     history_messages: chatHistory.length,
     mode,
+    run_id: runState.run_id,
     tools: activeTools.map(tool => tool.name)
   });
+  await persistRunState();
 
   const contextualizedRequest = await contextualizeUserRequest(userMessage, chatHistory, env, debugSteps);
   if (contextualizedRequest.needs_clarification) {
-    return {
+    blockAgentRun(
+      runState,
+      "clarification_required",
+      contextualizedRequest.clarification_question || "Yêu cầu chưa đủ rõ để tiếp tục an toàn."
+    );
+    return finishRun({
       answer: contextualizedRequest.clarification_question
         ?? "Bạn có thể nói rõ đối tượng hoặc hành động bạn đang muốn nhắc tới không?",
       toolsCalled: []
-    };
+    }, "blocked");
   }
 
   const clarifiedUserMessage = contextualizedRequest.rewritten_message || userMessage;
-  const appOrdinal = extractAppOrdinalReference(userMessage) ?? extractAppOrdinalReference(clarifiedUserMessage);
-  const ordinalApp = appOrdinal && isReadOnlyAppInfoIntent(clarifiedUserMessage)
-    ? resolveAppOrdinalFromHistory(chatHistory, appOrdinal)
-    : null;
-  if (!searchOnlyMode && ordinalApp && zilcodeSession) {
-    addDebugStep(debugSteps, "agent.app_ordinal_resolve", "start", "Resolve ứng dụng theo số thứ tự từ lịch sử hội thoại.", {
-      ordinal: appOrdinal,
-      appid: ordinalApp.appid,
-      app_name: ordinalApp.appName
-    });
+  const requestKind: AgentRequestKind = searchOnlyMode && contextualizedRequest.request_kind === "prepare_change"
+    ? "knowledge"
+    : contextualizedRequest.request_kind;
+  const requiredOutcome: AgentRequiredOutcome = searchOnlyMode
+    ? "answer"
+    : contextualizedRequest.required_outcome;
+  updateRunContext(
+    runState,
+    clarifiedUserMessage,
+    contextualizedRequest.resolved_references.map(reference => ({ ...reference })),
+    { request_kind: requestKind, required_outcome: requiredOutcome }
+  );
+  await persistRunState();
 
-    const toolExecution = await executeTool(
-      {
-        name: "app_builder_node_detail",
-        arguments: ordinalApp.appid
-          ? { node_id: `app:${ordinalApp.appid}`, include_neighbors: true, include_fields: false }
-          : { query: ordinalApp.appName, include_neighbors: true, include_fields: false }
-      },
-      env,
-      chatHistory,
-      debugSteps,
-      zilcodeSession
-    );
-    const toolResults = [{ name: "app_builder_node_detail", content: toolExecution.content }];
-    const answer = await createFinalAnswerFromToolResults(userMessage, toolResults, env, chatHistory, debugSteps);
-
-    return {
-      answer,
-      toolsCalled: ["app_builder_node_detail"]
-    };
-  }
-
+  const historyReference = buildToolSelectionHistoryContext(chatHistory);
   const messages: AIMessage[] = [
     {
       role: "system",
-      content: `Bạn là executor chọn bước tiếp theo cho agent Zilcode/App Builder.
-Nhiệm vụ của bạn là dựa vào câu gốc, câu đã được làm rõ, lịch sử hội thoại và tool schema để quyết định nên gọi tool nào hoặc trả lời trực tiếp.
+      content: `Bạn là bộ điều phối công cụ cho agent Zilcode/App Builder và trợ lý tài liệu nghiệp vụ. Tool schema là nguồn mô tả khả năng và tham số chuẩn. Hãy tự chọn bước tiếp theo dựa trên mục tiêu, lịch sử và toàn bộ observation đã nhận; backend không định tuyến bằng từ khóa.
 
-Ngôn ngữ:
-- Nếu cần trả lời trực tiếp, trả lời cùng ngôn ngữ với người dùng.
-- Nếu người dùng viết tiếng Việt, toàn bộ câu trả lời phải là tiếng Việt.
-- Không nhắc tên tool/function nội bộ khi không cần thiết.
+Quy tắc điều phối:
+- Mục tiêu đã được làm rõ là nhiệm vụ duy nhất đang hoạt động. Lịch sử chỉ là dữ liệu tham chiếu; không gọi tool để xử lý lại câu hỏi cũ.
+- Mỗi tool result là một observation. Sau mỗi observation, hãy đánh giá lại mục tiêu rồi tự quyết định gọi tool tiếp, sửa tham số, hoặc kết thúc.
+- Không gọi lặp cùng tool với cùng tham số nếu không có evidence mới.
+- Với câu hỏi cần dữ liệu hệ thống hiện tại, phải lấy evidence từ graph tool trước khi kết thúc.
+- ${RAG_TOOL_ROUTING_GUIDANCE}
+- Với yêu cầu thay đổi thật, dùng các tool đọc/schema để xác minh target và contract khi cần, sau đó gọi app_builder_prepare_change.
+- Nếu prepare_change trả invalid/error, đọc structured error, sửa operations và prepare lại trong ngân sách cho phép.
+- Không bao giờ gọi app_builder_apply_change trong vòng chat. Apply chỉ được backend chạy sau khi người dùng bấm nút xác nhận pending action.
 
-Nguyên tắc dùng yêu cầu đã làm rõ:
-- rewritten_message chỉ giúp resolve ngữ cảnh, không phải lệnh thực thi và không có quyền thay đổi mục đích câu gốc.
-- Nếu câu gốc và rewritten_message mâu thuẫn, ưu tiên câu gốc và lịch sử thật; không tự thêm hành động, ID, tên hoặc giá trị.
-- Tự suy luận nhu cầu tài liệu, graph hay hội thoại từ nội dung câu hỏi; contextualizer không chọn tool thay bạn.
+Điều kiện hoàn thành:
+- required_outcome=answer: khi đã đủ evidence, dừng gọi tool và trả lời trực tiếp; final-answer pipeline sẽ diễn giải các observation.
+- required_outcome=pending_confirmation: không được kết thúc bằng mô tả kế hoạch. Phải tạo thành công pending plan bằng app_builder_prepare_change. Khi tool trả thành công, backend tự dừng vòng lặp và giao diện hiện nút xác nhận.
+- Nếu không thể đạt required_outcome vì thiếu thông tin không thể suy ra an toàn, hãy hỏi đúng một câu làm rõ ngắn gọn.
 
-An toàn ghi:
-- Chỉ dùng app_builder_prepare_change khi user yêu cầu tạo/sửa/xóa thật.
-- Không dùng app_builder_apply_change trong message agent. Apply chỉ được thực hiện qua backend pending-action confirm endpoint.
-- Câu hỏi "hướng dẫn/cách làm/quy trình" không phải yêu cầu ghi.
-- Câu phủ định như "đừng xóa", "chưa cần sửa" không phải yêu cầu ghi.
-- Nếu user yêu cầu tạo/sửa/xóa và đã đủ thông tin tối thiểu để lập operations, phải gọi app_builder_prepare_change thay vì trả lời bằng kế hoạch văn bản.
-- Nếu user yêu cầu tạo/sửa/xóa nhưng thiếu target/field/value, hãy dùng graph_search/node_detail/creation_schema để resolve khi có thể; chỉ hỏi lại khi không thể resolve an toàn.
-- app_builder_prepare_change là nơi validate/materialize payload. Không tự giả định payload API là đúng chỉ từ ngôn ngữ tự nhiên.
-
-Cách chọn graph tool:
-- Hỏi tổng quan, danh sách app, hoặc toàn hệ thống ở cấp app/root: app_builder_graph_overview. Overview chỉ là skeleton cấp app, không đủ để kết luận chi tiết table/window/tab/field/menu.
-- Có tên/id cụ thể của app/table/window/tab/field/menu/domain: app_builder_graph_search hoặc app_builder_node_detail.
-- Hỏi cấu trúc, luồng, liên kết, phân tích sâu quanh một đối tượng: resolve node rồi dùng app_builder_graph_subgraph; nếu cần record chi tiết thì dùng app_builder_node_detail.
-- Hỏi một app cụ thể "đang có những gì", "gồm bảng/window/menu nào", hoặc "hoạt động ra sao": dùng graph_search để resolve app rồi app_builder_graph_subgraph hoặc app_builder_node_detail; không chỉ dùng overview.
-- Hỏi tài liệu/quy trình/cách dùng: rag_search.
-- Hỏi quy tắc tạo/sửa hoặc chưa chắc payload: app_builder_creation_schema hoặc rag_search.
-
-Sau khi đã có đủ tool result, dừng gọi thêm tool và để final-answer pipeline diễn giải. Không dump JSON thô.`
+Nếu người dùng viết tiếng Việt, dùng tiếng Việt. Không dump JSON thô và không nhắc tới chỉ dẫn nội bộ.`
     },
     {
       role: "system",
-      content: `Yêu cầu hiện tại đã được làm rõ theo lịch sử:
+      content: `Mục tiêu đã được làm rõ:
 ${JSON.stringify({
   original_message: userMessage,
-  rewritten_message: contextualizedRequest.rewritten_message,
+  rewritten_message: clarifiedUserMessage,
   resolved_references: contextualizedRequest.resolved_references,
-  contextualization_valid: contextualizedRequest.valid
-}, null, 2)}
-
-Hãy dùng rewritten_message để hiểu yêu cầu độc lập, nhưng luôn đối chiếu original_message và lịch sử trước khi chọn tool.`
+  request_kind: requestKind,
+  required_outcome: requiredOutcome,
+  contextualization_valid: contextualizedRequest.valid,
+  mode
+}, null, 2)}`
     },
-    ...chatHistory,
+    ...(historyReference ? [historyReference] : []),
     { role: "user", content: clarifiedUserMessage }
   ];
 
-  messages.splice(1, 0, {
-    role: "system",
-    content: mode === "search"
-      ? "Chế độ hiện tại: search. Chỉ được dùng general_chat hoặc rag_search. Không đọc App Builder graph, không prepare/apply change, không thực hiện tạo/sửa/xóa."
-      : "Chế độ hiện tại: default. Dùng tool phù hợp với ý định của người dùng."
-  });
+  if (searchOnlyMode) {
+    messages.splice(1, 0, {
+      role: "system",
+      content: "Chế độ search chỉ cung cấp general_chat và rag_search. Không thể đọc graph, prepare hoặc apply thay đổi; hãy trả lời trong phạm vi hai tool này."
+    });
+  }
 
   const toolsCalled: string[] = [];
   const toolResults: ToolResultRecord[] = [];
   const ragSources: RagSource[] = [];
   let embeddingDebug: EmbeddingDebug | undefined;
   let ragQueryDebug: RagQueryDebug | undefined;
-  let hasRagSearchResult = false;
-  let prepareChangeReminderCount = 0;
+  let incompleteGoalResponses = 0;
+  const maxControlDecisions = 16;
 
-  for (let i = 0; i < MAX_ITERATIONS; i++) {
-    addDebugStep(debugSteps, "agent.tool_selection", "start", "Model chọn tool hoặc trả lời trực tiếp.", {
-      iteration: i + 1,
+  for (let iteration = 0; iteration < maxControlDecisions; iteration += 1) {
+    addDebugStep(debugSteps, "agent.tool_selection", "start", "Model chọn bước tiếp theo.", {
+      iteration: iteration + 1,
+      request_kind: requestKind,
+      required_outcome: requiredOutcome,
+      terminal_status: runState.terminal_status,
       ...getActiveChatModelDebugInfo(env, CHAT_MODEL),
       messages: messages.length,
       max_tokens: TOOL_SELECTION_MAX_TOKENS
@@ -1810,123 +1499,48 @@ Hãy dùng rewritten_message để hiểu yêu cầu độc lập, nhưng luôn 
       messages,
       tools: activeTools
     }, env);
+    const toolCalls = response.tool_calls ?? [];
 
-    if (!response.tool_calls || response.tool_calls.length === 0) {
-      addDebugStep(debugSteps, "agent.tool_selection", "ok", "Model không gọi tool, trả lời trực tiếp.", {
-        iteration: i + 1,
-        response_chars: (response.response ?? "").length,
+    if (toolCalls.length === 0) {
+      const directAnswer = cleanMarkdownArtifacts(response.response?.trim() ?? "");
+      const directAnswerIsUsable = directAnswer.length > 0 && !isUnusableModelAnswer(directAnswer);
+      addDebugStep(debugSteps, "agent.tool_selection", "ok", "Model không gọi thêm tool.", {
+        iteration: iteration + 1,
+        response_chars: directAnswer.length,
+        required_outcome: requiredOutcome,
+        goal_reached: hasReachedRequiredOutcome(requiredOutcome, runState),
         model: response.model
       });
 
-      const directAnswer = cleanMarkdownArtifacts(response.response?.trim() ?? "");
-      const evidenceToolCall = selectEvidenceToolForDirectAnswer(userMessage, clarifiedUserMessage, mode);
-      if (shouldFetchEvidenceToolForDirectAnswer(toolResults, evidenceToolCall)) {
-        addDebugStep(debugSteps, "agent.direct_answer_guard", "start", "Câu hỏi cần evidence nên không dùng direct answer; tự gọi tool nền.", {
-          selected_tool: evidenceToolCall.name,
-          arguments: evidenceToolCall.arguments,
-          response_chars: directAnswer.length
-        });
-
-        toolsCalled.push(evidenceToolCall.name);
-        const toolExecution = await executeTool(
-          evidenceToolCall,
-          env,
-          chatHistory,
-          debugSteps,
-          zilcodeSession
-        );
-
-        addDebugStep(debugSteps, "agent.direct_answer_guard", "ok", "Đã lấy evidence nền cho câu trả lời.", {
-          selected_tool: evidenceToolCall.name,
-          result_chars: toolExecution.content.length
-        });
-
-        toolResults.push({ name: evidenceToolCall.name, content: toolExecution.content });
-        if (evidenceToolCall.name === "rag_search" && toolExecution.sources?.length) {
-          ragSources.push(...toolExecution.sources);
-        }
-        if (evidenceToolCall.name === "rag_search" && toolExecution.embedding_debug) {
-          embeddingDebug = toolExecution.embedding_debug;
-        }
-        if (evidenceToolCall.name === "rag_search" && toolExecution.rag_query_debug) {
-          ragQueryDebug = toolExecution.rag_query_debug;
-        }
-
-        messages.push({
-          role: "assistant",
-          content: JSON.stringify({
-            tool_call: evidenceToolCall.name,
-            arguments: evidenceToolCall.arguments
-          })
-        });
-        messages.push({
-          role: "tool",
-          tool_call_id: evidenceToolCall.id ?? evidenceToolCall.name,
-          content: truncateToolContext(compactToolContentForFinalAnswer({
-            name: evidenceToolCall.name,
-            content: toolExecution.content
-          }))
-        });
-
-        if (evidenceToolCall.name === "app_builder_creation_schema" && i < MAX_ITERATIONS - 1) {
-          addDebugStep(debugSteps, "agent.direct_answer_guard", "ok", "Đưa creation schema về model để chọn prepare_change nếu đủ thông tin.", {
-            next_iteration: i + 2
+      if (!hasReachedRequiredOutcome(requiredOutcome, runState)) {
+        if (incompleteGoalResponses < 1) {
+          incompleteGoalResponses += 1;
+          if (directAnswer) messages.push({ role: "assistant", content: directAnswer });
+          messages.push({
+            role: "system",
+            content: "Mục tiêu pending_confirmation chưa hoàn thành vì chưa có pending plan hợp lệ. Không kết thúc bằng kế hoạch văn bản. Hãy gọi tool cần thiết để tiếp tục; nếu thật sự thiếu thông tin không thể suy ra an toàn, hãy hỏi một câu làm rõ cụ thể."
+          });
+          addDebugStep(debugSteps, "agent.goal_incomplete", "skip", "Không chạy final answer vì mục tiêu pending plan chưa hoàn thành.", {
+            next_iteration: iteration + 2,
+            terminal_status: runState.terminal_status
           });
           continue;
         }
 
-        const finalAnswer = await createFinalAnswerFromToolResults(
-          userMessage,
-          toolResults,
-          env,
-          chatHistory,
-          debugSteps
-        );
-
-        return withActionState({
-          answer: finalAnswer,
+        blockAgentRun(runState, "required_outcome_not_reached", "Model dừng trước khi tạo được pending plan hợp lệ.", {
+          required_outcome: requiredOutcome,
+          terminal_status: runState.terminal_status,
+          direct_answer_chars: directAnswer.length
+        });
+        return finishRun({
+          answer: directAnswerIsUsable
+            ? directAnswer
+            : "Tôi chưa thể tạo pending plan an toàn từ thông tin hiện có. Cần bổ sung rõ target hoặc giá trị bắt buộc trước khi tiếp tục.",
           toolsCalled,
           sources: ragSources,
           embedding_debug: embeddingDebug,
           rag_query_debug: ragQueryDebug
-        }, toolResults);
-      }
-
-      const directAnswerIsUsable = directAnswer.length > 0 && !isUnusableModelAnswer(directAnswer);
-      if (
-        shouldRequirePrepareChangeAfterCreationSchema(
-          toolResults,
-          userMessage,
-          clarifiedUserMessage,
-          chatHistory,
-          contextualizedRequest.resolved_references
-        )
-        && !isLikelyClarificationAnswer(directAnswer)
-      ) {
-        if (prepareChangeReminderCount < 1 && i < MAX_ITERATIONS - 1) {
-          prepareChangeReminderCount++;
-          addDebugStep(debugSteps, "agent.prepare_change_guard", "skip", "Yêu cầu ghi thật đã có creation_schema nhưng model chưa gọi prepare_change; nhắc model chọn tool ghi.", {
-            next_iteration: i + 2,
-            direct_answer_chars: directAnswer.length
-          });
-          messages.push({
-            role: "system",
-            content: "Yêu cầu hiện tại là thao tác tạo/sửa/xóa thật và app_builder_creation_schema đã được đọc. Không trả lời bằng kế hoạch văn bản. Nếu đủ thông tin, hãy gọi app_builder_prepare_change để tạo pending plan; nếu thiếu thông tin bắt buộc, hãy hỏi lại ngắn gọn."
-          });
-          continue;
-        }
-
-        return {
-          answer: "Tôi chưa tạo được pending plan an toàn từ yêu cầu này. Hãy nói rõ đối tượng, hành động và giá trị cần thay đổi để tôi chuẩn bị kế hoạch ghi.",
-          toolsCalled
-        };
-      }
-
-      if (directAnswerIsUsable && toolResults.length === 0) {
-        return {
-          answer: directAnswer,
-          toolsCalled
-        };
+        }, "blocked");
       }
 
       if (toolResults.length > 0) {
@@ -1937,106 +1551,76 @@ Hãy dùng rewritten_message để hiểu yêu cầu độc lập, nhưng luôn 
           chatHistory,
           debugSteps
         );
-
-        return withActionState({
+        return finishRun(withActionState({
           answer: finalAnswer,
           toolsCalled,
           sources: ragSources,
           embedding_debug: embeddingDebug,
           rag_query_debug: ragQueryDebug
-        }, toolResults);
+        }, toolResults));
       }
 
-      return {
-        answer: "Không tạo được câu trả lời.",
+      return finishRun({
+        answer: directAnswerIsUsable ? directAnswer : "Không tạo được câu trả lời.",
         toolsCalled
-      };
+      }, directAnswerIsUsable ? undefined : "failed");
     }
 
-    let supportedToolCalls = response.tool_calls.filter(toolCall =>
-      activeToolNames.has(toolCall.name)
-      && isToolCallAllowedByPolicy(
-        toolCall.name,
-        userMessage,
-        clarifiedUserMessage,
-        chatHistory,
-        contextualizedRequest.resolved_references
-      )
-    );
-    const skippedUnsupportedToolCalls = response.tool_calls
+    const supportedToolCalls = toolCalls.filter(toolCall => activeToolNames.has(toolCall.name));
+    const skippedToolCalls = toolCalls
       .filter(toolCall => !activeToolNames.has(toolCall.name))
       .map(toolCall => toolCall.name);
-    const skippedPolicyToolCalls = response.tool_calls
-      .filter(toolCall => activeToolNames.has(toolCall.name)
-        && !isToolCallAllowedByPolicy(
-          toolCall.name,
-          userMessage,
-          clarifiedUserMessage,
-          chatHistory,
-          contextualizedRequest.resolved_references
-        ))
-      .map(toolCall => toolCall.name);
 
-    let forcedEvidenceToolName: string | null = null;
-    const evidenceToolCallForSelection = selectEvidenceToolForDirectAnswer(userMessage, clarifiedUserMessage, mode);
-    if (
-      shouldOverrideGeneralChatWithEvidenceTool(supportedToolCalls, toolResults, evidenceToolCallForSelection)
-      && activeToolNames.has(evidenceToolCallForSelection.name)
-      && isToolCallAllowedByPolicy(
-        evidenceToolCallForSelection.name,
-        userMessage,
-        clarifiedUserMessage,
-        chatHistory,
-        contextualizedRequest.resolved_references
-      )
-    ) {
-      forcedEvidenceToolName = evidenceToolCallForSelection.name;
-      supportedToolCalls = [evidenceToolCallForSelection];
-      addDebugStep(debugSteps, "agent.general_chat_guard", "ok", "Câu hỏi cần evidence nên thay general_chat bằng tool nền phù hợp.", {
-        selected_tool: evidenceToolCallForSelection.name,
-        arguments: evidenceToolCallForSelection.arguments,
-        original_tool_calls: response.tool_calls.map(toolCall => toolCall.name)
-      });
-    }
-
-    if (!supportedToolCalls.length) {
-      addDebugStep(debugSteps, "agent.tool_selection", "skip", "Model chọn tool không được hỗ trợ.", {
-        iteration: i + 1,
-        model: response.model,
-        tool_calls: response.tool_calls.map(toolCall => toolCall.name),
-        skipped_tool_calls: skippedUnsupportedToolCalls,
-        skipped_by_policy: skippedPolicyToolCalls
-      });
-
-      const blockedWriteTool = skippedPolicyToolCalls.some(toolName => isAppBuilderWriteTool(toolName));
-      const blockedBySearchMode = searchOnlyMode && skippedUnsupportedToolCalls.length > 0;
-      return {
-        answer: blockedWriteTool
-          ? "Yêu cầu hiện tại chưa đủ điều kiện an toàn để chuẩn bị hoặc thực hiện thao tác ghi. Hãy nói rõ đối tượng, hành động và giá trị cần thay đổi; nếu bạn chỉ muốn hướng dẫn, hãy nói rõ là hỏi hướng dẫn."
-          : blockedBySearchMode
-            ? "Bạn đang ở chế độ search nên tôi chỉ có thể chat thường hoặc tìm trong tài liệu RAG. Hãy tắt chế độ search nếu muốn đọc graph App Builder hoặc chuẩn bị thao tác tạo/sửa/xóa."
-            : "Tôi chưa chọn được công cụ phù hợp cho yêu cầu này. Hãy nói rõ bạn muốn hỏi tài liệu, đọc App Builder hiện tại, hay chuẩn bị thao tác tạo/sửa/xóa.",
+    if (supportedToolCalls.length === 0) {
+      const attemptedApply = skippedToolCalls.includes("app_builder_apply_change");
+      blockAgentRun(
+        runState,
+        attemptedApply ? "apply_requires_ui_confirmation" : "unsupported_tool_selection",
+        attemptedApply
+          ? "Message agent không có quyền apply; người dùng phải xác nhận pending action bằng nút trên giao diện."
+          : "Model không chọn được tool có trong mode hiện tại.",
+        { skipped_tool_calls: skippedToolCalls, mode }
+      );
+      return finishRun({
+        answer: attemptedApply
+          ? "Thao tác chưa được thực hiện. Hãy dùng nút xác nhận trên pending plan; xác nhận bằng tin nhắn không kích hoạt apply."
+          : searchOnlyMode
+            ? "Chế độ search chỉ hỗ trợ hội thoại thường và tìm tài liệu. Hãy chuyển về Default nếu cần thao tác với App Builder."
+            : "Tôi chưa chọn được công cụ phù hợp để tiếp tục.",
         toolsCalled
-      };
+      }, "blocked");
     }
-
-    const toolCallsToExecute = selectToolCallsToExecute(supportedToolCalls);
-    const skippedGeneralChatBecauseSpecificTool = toolCallsToExecute.length !== supportedToolCalls.length;
 
     addDebugStep(debugSteps, "agent.tool_selection", "ok", "Model đã chọn tool.", {
-      iteration: i + 1,
+      iteration: iteration + 1,
       model: response.model,
-      tool_calls: response.tool_calls.map(toolCall => toolCall.name),
-      executed_tool_calls: toolCallsToExecute.map(toolCall => toolCall.name),
-      skipped_tool_calls: skippedUnsupportedToolCalls,
-      skipped_by_policy: skippedPolicyToolCalls,
-      skipped_general_chat_because_specific_tool: skippedGeneralChatBecauseSpecificTool
+      tool_calls: toolCalls.map(toolCall => toolCall.name),
+      executed_tool_calls: supportedToolCalls.map(toolCall => toolCall.name),
+      skipped_tool_calls: skippedToolCalls
     });
 
-    let generalChatResult: string | null = null;
-    let shouldLetModelInspectToolResult = false;
+    let executedToolCount = 0;
+    let lastBlockedTool: { name: string; reason: string; fingerprint: string } | null = null;
 
-    for (const toolCall of toolCallsToExecute) {
+    for (const toolCall of supportedToolCalls) {
+      const executionGuard = guardToolExecution(runState, toolCall.name, toolCall.arguments);
+      if (!executionGuard.allowed) {
+        lastBlockedTool = {
+          name: toolCall.name,
+          reason: executionGuard.reason || "tool_execution_blocked",
+          fingerprint: executionGuard.fingerprint
+        };
+        addDebugStep(debugSteps, "agent.loop_guard", "skip", "Chặn tool call lặp lại hoặc đã hết ngân sách.", {
+          name: toolCall.name,
+          arguments: toolCall.arguments,
+          reason: executionGuard.reason,
+          fingerprint: executionGuard.fingerprint,
+          budgets: runState.budgets
+        });
+        continue;
+      }
+
+      executedToolCount += 1;
       toolsCalled.push(toolCall.name);
       addDebugStep(debugSteps, "tool.call", "start", `Gọi tool ${toolCall.name}.`, {
         name: toolCall.name,
@@ -2050,15 +1634,19 @@ Hãy dùng rewritten_message để hiểu yêu cầu độc lập, nhưng luôn 
         debugSteps,
         zilcodeSession
       );
-      const toolResult = toolExecution.content;
+      const outcome = inspectToolResult(toolCall.name, toolExecution.content);
+      recordToolOutcome(runState, toolCall.name, toolCall.arguments, outcome);
+      await persistRunState();
 
       addDebugStep(debugSteps, "tool.call", "ok", `Tool ${toolCall.name} đã trả kết quả.`, {
         name: toolCall.name,
-        result_chars: toolResult.length
+        result_chars: toolExecution.content.length,
+        result_status: outcome.status,
+        terminal_status: runState.terminal_status,
+        run_progress_revision: runState.progress_revision
       });
 
-      toolResults.push({ name: toolCall.name, content: toolResult });
-
+      toolResults.push({ name: toolCall.name, content: toolExecution.content });
       if (toolCall.name === "rag_search" && toolExecution.sources?.length) {
         ragSources.push(...toolExecution.sources);
       }
@@ -2071,110 +1659,83 @@ Hãy dùng rewritten_message để hiểu yêu cầu độc lập, nhưng luôn 
 
       messages.push({
         role: "assistant",
-        content: JSON.stringify({
-          tool_call: toolCall.name,
-          arguments: toolCall.arguments
-        })
+        content: JSON.stringify({ tool_call: toolCall.name, arguments: toolCall.arguments })
       });
       messages.push({
         role: "tool",
         tool_call_id: toolCall.id ?? toolCall.name,
         content: truncateToolContext(compactToolContentForFinalAnswer({
           name: toolCall.name,
-          content: toolResult
+          content: toolExecution.content
         }))
       });
 
-      if (toolCall.name === "general_chat") generalChatResult = toolResult;
-      if (toolCall.name === "rag_search") hasRagSearchResult = true;
-      const sameToolResultsCount = toolResults.filter(result => result.name === toolCall.name).length;
-      if (forcedEvidenceToolName === "app_builder_creation_schema" && toolCall.name === forcedEvidenceToolName) {
-        shouldLetModelInspectToolResult = true;
-      }
-      if (sameToolResultsCount <= 1 && shouldContinueAfterToolResult(toolCall.name, toolResult, userMessage, {
-        clarifiedMessage: clarifiedUserMessage,
-        chatHistory,
-        resolvedReferences: contextualizedRequest.resolved_references
-      })) {
-        shouldLetModelInspectToolResult = true;
-      }
+      if (runState.terminal_status === "waiting_confirmation") break;
     }
 
-    if (hasRagSearchResult) {
-      const finalAnswer = await createFinalAnswerFromToolResults(
+    if (runState.terminal_status === "waiting_confirmation") {
+      addDebugStep(debugSteps, "agent.goal_reached", "ok", "Đã tạo pending plan; dừng trước apply để chờ nút xác nhận.", {
+        required_outcome: requiredOutcome,
+        prepared_operations: runState.prepared_operations.length
+      });
+      const answer = await createFinalAnswerFromToolResults(
         userMessage,
         toolResults,
         env,
         chatHistory,
         debugSteps
       );
-
-      return withActionState({
-        answer: finalAnswer,
+      return finishRun(withActionState({
+        answer,
         toolsCalled,
         sources: ragSources,
         embedding_debug: embeddingDebug,
         rag_query_debug: ragQueryDebug
-      }, toolResults);
+      }, toolResults));
     }
 
-    if (generalChatResult) {
-      return {
-        answer: generalChatResult,
+    if (executedToolCount === 0) {
+      blockAgentRun(
+        runState,
+        lastBlockedTool?.reason || "no_executable_tool",
+        "Không còn tool call hợp lệ tạo tiến triển mới.",
+        lastBlockedTool ? {
+          tool_name: lastBlockedTool.name,
+          fingerprint: lastBlockedTool.fingerprint,
+          budgets: runState.budgets
+        } : undefined
+      );
+      return finishRun({
+        answer: "Tôi đã dừng vì bước tiếp theo lặp lại hoặc đã hết ngân sách xử lý an toàn. Cần thêm target hoặc evidence mới để tiếp tục.",
         toolsCalled
-      };
+      }, "blocked");
     }
 
-    if (toolResults.length > 0) {
-      if (shouldLetModelInspectToolResult && i < MAX_ITERATIONS - 1) {
-        addDebugStep(debugSteps, "agent.graph_continue", "ok", "Đưa graph/search/subgraph về model để quyết định trả lời hoặc gọi detail.", {
-          next_iteration: i + 2
-        });
-        continue;
-      }
-
-      const finalAnswer = await createFinalAnswerFromToolResults(
-        userMessage,
-        toolResults,
-        env,
-        chatHistory,
-        debugSteps
-      );
-
-      return withActionState({
-        answer: finalAnswer,
-        toolsCalled,
-        sources: ragSources,
-        embedding_debug: embeddingDebug,
-        rag_query_debug: ragQueryDebug
-      }, toolResults);
-    }
+    addDebugStep(debugSteps, "agent.observation_ready", "ok", "Đưa toàn bộ tool result về model để tự quyết định bước tiếp theo.", {
+      next_iteration: iteration + 2,
+      latest_tools: supportedToolCalls.map(toolCall => toolCall.name),
+      required_outcome: requiredOutcome,
+      terminal_status: runState.terminal_status
+    });
   }
 
-  addDebugStep(debugSteps, "agent.stop", "error", "Đạt số vòng gọi tool tối đa.", {
-    max_iterations: MAX_ITERATIONS
+  blockAgentRun(runState, "control_decision_budget_exhausted", "Agent đã hết ngân sách lượt quyết định mà chưa kết thúc mục tiêu.", {
+    required_outcome: requiredOutcome,
+    terminal_status: runState.terminal_status,
+    attempted_tool_calls: runState.attempted_tool_calls.length
   });
-
-  if (toolResults.length > 0) {
-    const finalAnswer = await createFinalAnswerFromToolResults(
-      userMessage,
-      toolResults,
-      env,
-      chatHistory,
-      debugSteps
-    );
-
-    return withActionState({
-      answer: finalAnswer,
-      toolsCalled,
-      sources: ragSources,
-      embedding_debug: embeddingDebug,
-      rag_query_debug: ragQueryDebug
-    }, toolResults);
-  }
-
-  return {
-    answer: "Đã đạt số vòng gọi công cụ tối đa nhưng chưa tạo được câu trả lời cuối cùng.",
-    toolsCalled
-  };
+  addDebugStep(debugSteps, "agent.stop", "error", "Dừng vì hết ngân sách lượt quyết định.", {
+    run_id: runState.run_id,
+    budgets: runState.budgets,
+    blocker: runState.blocker
+  });
+  return finishRun({
+    answer: requiredOutcome === "pending_confirmation"
+      ? "Tôi chưa tạo được pending plan trong ngân sách xử lý an toàn. Không có thay đổi nào được apply."
+      : "Tôi chưa hoàn tất câu trả lời trong ngân sách xử lý hiện tại.",
+    toolsCalled,
+    sources: ragSources,
+    embedding_debug: embeddingDebug,
+    rag_query_debug: ragQueryDebug
+  }, "blocked");
 }

@@ -1,7 +1,24 @@
 import type { Env } from "./config";
 import { invalidateAppBuilderGraphCache } from "./app-builder-graph";
+import {
+  loadDynamicMetadataContractRegistry,
+  materializeContractDefaults,
+  validateRecordAgainstContract,
+  type MetadataTableContract
+} from "./app-builder-contracts";
+import {
+  compileApplicationSpecification,
+  type ApplicationPhase,
+  type SpecificationPhasePlan,
+  type SpecificationValidationIssue
+} from "./app-builder-specification";
+import {
+  buildApprovedChangeEnvelope,
+  type ApprovedChangeEnvelope
+} from "./app-builder-envelope";
 import * as zipsonModule from "./vendor/zipson.min.js";
 import { asRecord, getCaseInsensitiveValue, getNumberArg, getStringArg, toArrayValues, truncateDebugText } from "./utils";
+import { redactSensitiveData } from "./security-redaction";
 import {
   assertZilcodeSuccess,
   buildZilcodeAppBuilderBlueprint,
@@ -77,8 +94,6 @@ const CREATE_REQUIRED_FIELDS: Record<string, string[]> = {
   accesses: ["roleid", "tableid", "siteid"]
 };
 
-const LEVEL3_COLLECTIONS = new Set(["applications", "tables", "columns", "windows", "tabs", "fields", "menus"]);
-
 const TARGET_NAME_FIELD: Record<string, string> = {
   app: "appname",
   application: "appname",
@@ -108,7 +123,7 @@ const IMPLICIT_ALLOWED_FIELDS: Record<string, string[]> = {
   accesses: ["siteid"]
 };
 
-interface PreparedOperation {
+export interface PreparedOperation {
   id: string;
   action: "create" | "update" | "delete";
   target: string;
@@ -117,19 +132,109 @@ interface PreparedOperation {
   record?: Record<string, unknown>;
   id_value?: string | number;
   where?: string;
+  phase?: ApplicationPhase;
+  depends_on?: string[];
 }
 
-interface PendingChange {
+interface BlockingError {
+  code: string;
+  operation_id?: string;
+  entity?: string;
+  field?: string;
+  expected?: unknown;
+  actual?: unknown;
+  evidence?: Record<string, unknown>;
+  repair_hint: string;
+}
+
+class PreparationBlockingError extends Error {
+  readonly blockingError: BlockingError;
+
+  constructor(blockingError: BlockingError) {
+    super(blockingError.code);
+    this.name = "PreparationBlockingError";
+    this.blockingError = blockingError;
+  }
+}
+
+export interface PendingChange {
   plan_id: string;
   intent: string;
   created_at: string;
   user_summary?: string;
   operations: PreparedOperation[];
   warnings: string[];
+  specification?: Record<string, unknown>;
+  phases?: SpecificationPhasePlan[];
+  verification_targets?: Array<Record<string, unknown>>;
+  approved_change_envelope?: ApprovedChangeEnvelope;
 }
 
 interface ApplyState {
   refs: Record<string, Record<string, unknown>>;
+}
+
+const COLLECTION_PHASE: Record<string, ApplicationPhase> = {
+  applications: "app_service",
+  services: "app_service",
+  appservices: "app_service",
+  tables: "table_column",
+  columns: "table_column",
+  domains: "domain_lookup_relation",
+  windows: "window_tab_field",
+  tabs: "window_tab_field",
+  fields: "window_tab_field",
+  menus: "menu_permission",
+  roleapps: "menu_permission",
+  rolemenus: "menu_permission",
+  accesses: "menu_permission",
+  caches: "cache_verification"
+};
+
+export interface WriteOperationJournalEvent {
+  stage: "planned" | "before" | "after";
+  plan_id: string;
+  operation_id: string;
+  phase: ApplicationPhase;
+  status: "pending" | "running" | "succeeded" | "failed" | "skipped";
+  attempt: number;
+  precondition?: Record<string, unknown>;
+  expected_effect?: Record<string, unknown>;
+  request?: Record<string, unknown>;
+  result?: unknown;
+  error?: Record<string, unknown>;
+  postcondition?: Record<string, unknown>;
+}
+
+export interface AppBuilderWriteExecutionOptions {
+  attempt?: number;
+  verified_operations?: Record<string, Record<string, unknown>>;
+  retain_pending_plan?: boolean;
+  on_operation_event?: (event: WriteOperationJournalEvent) => void | Promise<void>;
+}
+
+export function buildPlannedOperationJournalEvents(
+  planId: string,
+  operations: PreparedOperation[],
+  attempt: number
+): WriteOperationJournalEvent[] {
+  return operations.map(operation => ({
+    stage: "planned",
+    plan_id: planId,
+    operation_id: operation.id,
+    phase: operation.phase ?? inferOperationPhase(operation),
+    status: "pending",
+    attempt,
+    precondition: buildOperationPrecondition(operation),
+    expected_effect: redactSensitiveData(buildOperationExpectedEffect(operation)) as Record<string, unknown>
+  }));
+}
+
+async function emitOperationJournalEvent(
+  callback: AppBuilderWriteExecutionOptions["on_operation_event"],
+  event: WriteOperationJournalEvent
+): Promise<void> {
+  await callback?.(redactSensitiveData(event) as WriteOperationJournalEvent);
 }
 
 interface WriteContext {
@@ -137,6 +242,8 @@ interface WriteContext {
   collections: Record<string, Record<string, unknown>>;
   recordsByCollection: Record<string, Record<string, unknown>[]>;
   allowedColumnsByCollection: Record<string, Set<string>>;
+  contractsByCollection: Record<string, MetadataTableContract>;
+  contractWarnings: string[];
   session: ZilcodeSession;
 }
 
@@ -148,7 +255,8 @@ export async function runAppBuilderWriteTool(
   env: Env,
   session: ZilcodeSession | null,
   toolName: string,
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
+  executionOptions: AppBuilderWriteExecutionOptions = {}
 ): Promise<Record<string, unknown>> {
   if (!session) {
     return { error: "Chưa đăng nhập Zilcode nên không thể tạo/sửa/xóa App Builder." };
@@ -159,10 +267,47 @@ export async function runAppBuilderWriteTool(
   }
 
   if (toolName === "app_builder_apply_change") {
-    return applyChange(env, session, args);
+    return applyChange(env, session, args, executionOptions);
   }
 
   return { error: `Tool ghi App Builder không được hỗ trợ: ${toolName}` };
+}
+
+export async function loadPendingChangePlan(
+  env: Pick<Env, "CHUNKS">,
+  planId: string
+): Promise<PendingChange | undefined> {
+  const raw = await env.CHUNKS.get(`${PENDING_CHANGE_PREFIX}${planId}`);
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as PendingChange;
+    return parsed && Array.isArray(parsed.operations) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function deletePendingChangePlan(
+  env: Pick<Env, "CHUNKS">,
+  planId: string
+): Promise<void> {
+  await env.CHUNKS.delete(`${PENDING_CHANGE_PREFIX}${planId}`);
+}
+
+export function buildPendingChangeVerificationInput(
+  plan: PendingChange,
+  verifiedOperations: Record<string, Record<string, unknown>> = {}
+): Record<string, unknown> {
+  const state: ApplyState = { refs: { ...verifiedOperations } };
+  return {
+    mode: "apply_change",
+    ok: false,
+    status: "resume_observation",
+    plan_id: plan.plan_id,
+    expected_operations: plan.operations.map(operation => buildExpectedOperationSnapshot(operation, state)),
+    approved_change_envelope: plan.approved_change_envelope,
+    pending_plan_deleted: false
+  };
 }
 
 async function prepareChange(
@@ -173,22 +318,62 @@ async function prepareChange(
   const context = await loadWriteContext(env, session, args);
   const intent = getStringArg(args, "intent") || "change_app_builder";
   const userSummary = getStringArg(args, "summary") || getStringArg(args, "user_request");
-  const warnings: string[] = [];
-  const rawOperations = expandRawOperations(context, normalizeRawOperations(getRawOperations(args), warnings), warnings);
+  const warnings: string[] = [...context.contractWarnings];
+  const specification = getApplicationSpecificationInput(args);
+  const compiledSpecification = specification
+    ? compileApplicationSpecification(specification, context.recordsByCollection)
+    : undefined;
+
+  if (compiledSpecification && !compiledSpecification.valid) {
+    return {
+      mode: "prepare_change",
+      status: "invalid",
+      valid: false,
+      blocking_errors: compiledSpecification.blocking_errors.map(toBlockingError),
+      warnings: [...warnings, ...compiledSpecification.warnings],
+      phases: compiledSpecification.phases
+    };
+  }
+
+  warnings.push(...(compiledSpecification?.warnings ?? []));
+  const inputOperations: Record<string, unknown>[] = compiledSpecification
+    ? compiledSpecification.operations.map(operation => ({ ...operation }))
+    : getRawOperations(args);
+  let rawOperations: Record<string, unknown>[];
+  try {
+    rawOperations = expandRawOperations(
+      context,
+      normalizeRawOperations(inputOperations, warnings),
+      warnings
+    );
+  } catch (error) {
+    const blockingError = toPreparationBlockingError(error, {
+      code: "operation_normalization_failed",
+      evidence: { source: "prepare_change", stage: "normalize_operations" },
+      repair_hint: "Sửa operation/specification theo contract và chuẩn bị lại plan."
+    });
+    return {
+      mode: "prepare_change",
+      status: "invalid",
+      valid: false,
+      blocking_errors: [blockingError],
+      warnings
+    };
+  }
 
   if (!rawOperations.length) {
     return {
       mode: "prepare_change",
       status: "invalid",
       valid: false,
-      blocking_errors: [
+      blocking_errors: normalizeBlockingErrors([
         "Thiếu operations. Hãy truyền operations gồm các bước create/update/delete app/table/column/window/tab/field/menu/domain."
-      ]
+      ])
     };
   }
 
   const operations: PreparedOperation[] = [];
-  const blockingErrors: string[] = [];
+  const blockingErrors: BlockingError[] = [];
 
   rawOperations.forEach((rawOperation, index) => {
     try {
@@ -196,7 +381,12 @@ async function prepareChange(
       operations.push(prepared.operation);
       warnings.push(...prepared.warnings);
     } catch (error) {
-      blockingErrors.push(`Operation ${index + 1}: ${truncateDebugText(error)}`);
+      blockingErrors.push(toPreparationBlockingError(error, {
+        code: "operation_validation_failed",
+        operation_id: getStringFromUnknown(rawOperation.id) || `operation_${index + 1}`,
+        evidence: { source: "prepare_change", stage: "prepare_operation", operation_index: index },
+        repair_hint: "Sửa operation theo live metadata contract và prepare lại."
+      }));
     }
   });
 
@@ -212,13 +402,43 @@ async function prepareChange(
 
   autoWirePreparedOperations(context, operations, warnings);
 
+  const deleteSafetyErrors = validatePreparedDeleteDependencies(context, operations);
+  if (deleteSafetyErrors.length) {
+    return {
+      mode: "prepare_change",
+      status: "invalid",
+      valid: false,
+      blocking_errors: deleteSafetyErrors,
+      warnings
+    };
+  }
+
+  const planId = crypto.randomUUID();
+  const approvedChangeEnvelope = buildApprovedChangeEnvelope(
+    planId,
+    operations.map(operation => ({
+      id: operation.id,
+      action: operation.action,
+      target: operation.target,
+      collection: operation.collection,
+      record: operation.record,
+      id_field: TARGET_ID_FIELD[operation.collection],
+      id_value: operation.id_value,
+      where: operation.where
+    }))
+  );
+
   const plan: PendingChange = {
-    plan_id: crypto.randomUUID(),
+    plan_id: planId,
     intent,
     created_at: new Date().toISOString(),
     user_summary: userSummary || undefined,
     operations,
-    warnings
+    warnings,
+    specification,
+    phases: compiledSpecification?.phases,
+    verification_targets: compiledSpecification?.verification_targets,
+    approved_change_envelope: approvedChangeEnvelope
   };
 
   await env.CHUNKS.put(
@@ -236,6 +456,9 @@ async function prepareChange(
     expires_in_seconds: PENDING_CHANGE_TTL_SECONDS,
     summary: summarizePlan(plan),
     operations: plan.operations.map(operation => summarizeOperation(operation)),
+    phases: plan.phases,
+    verification_targets: plan.verification_targets,
+    approved_change_envelope: plan.approved_change_envelope,
     warnings
   };
 }
@@ -243,7 +466,8 @@ async function prepareChange(
 async function applyChange(
   env: Env,
   session: ZilcodeSession,
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
+  executionOptions: AppBuilderWriteExecutionOptions
 ): Promise<Record<string, unknown>> {
   const planId = getStringArg(args, "plan_id");
   if (!planId) {
@@ -271,17 +495,68 @@ async function applyChange(
   const operationsToApply = expandPreparedOperationsForApply(context, plan.operations, plan.warnings);
   const results: Record<string, unknown>[] = [];
   const state: ApplyState = { refs: {} };
+  const attempt = Math.max(1, Number(executionOptions.attempt || 1));
+  const verifiedOperations = executionOptions.verified_operations ?? {};
   let failed = false;
   let firstFailedOperation: Record<string, unknown> | undefined;
 
+  // Persist the complete intended DAG before the first remote write. A resumed
+  // job can then observe and rebuild only the unverified remainder safely.
+  for (const event of buildPlannedOperationJournalEvents(planId, operationsToApply, attempt)) {
+    await emitOperationJournalEvent(executionOptions.on_operation_event, event);
+  }
+
   for (const operation of operationsToApply) {
+    const phase = operation.phase ?? inferOperationPhase(operation);
+    const precondition = buildOperationPrecondition(operation);
+    const expectedEffect = buildOperationExpectedEffect(operation);
+
+    if (verifiedOperations[operation.id]) {
+      state.refs[operation.id] = verifiedOperations[operation.id];
+      const skipped = {
+        operation_id: operation.id,
+        label: operation.label,
+        skipped: true,
+        verified: true,
+        reason: "already_verified_success",
+        reference: verifiedOperations[operation.id]
+      };
+      results.push(skipped);
+      await emitOperationJournalEvent(executionOptions.on_operation_event, {
+        stage: "after",
+        plan_id: planId,
+        operation_id: operation.id,
+        phase,
+        status: "skipped",
+        attempt,
+        precondition,
+        expected_effect: expectedEffect,
+        result: skipped,
+        postcondition: { verified_before_apply: true }
+      });
+      continue;
+    }
+
     if (failed) {
-      results.push({
+      const skipped = {
         operation_id: operation.id,
         label: operation.label,
         skipped: true,
         reason: "previous_operation_failed",
         blocked_by: firstFailedOperation?.operation_id
+      };
+      results.push(skipped);
+      await emitOperationJournalEvent(executionOptions.on_operation_event, {
+        stage: "after",
+        plan_id: planId,
+        operation_id: operation.id,
+        phase,
+        status: "skipped",
+        attempt,
+        precondition,
+        expected_effect: expectedEffect,
+        result: skipped,
+        postcondition: { verified: false, reason: "previous_operation_failed" }
       });
       continue;
     }
@@ -289,6 +564,17 @@ async function applyChange(
     let request: Record<string, unknown> | undefined;
     try {
       request = buildOperationRequestAudit(context, operation, state);
+      await emitOperationJournalEvent(executionOptions.on_operation_event, {
+        stage: "before",
+        plan_id: planId,
+        operation_id: operation.id,
+        phase,
+        status: "running",
+        attempt,
+        precondition,
+        expected_effect: expectedEffect,
+        request
+      });
       const result = await applyOperation(env, context, operation, state);
       const resolvedRecord = operation.record ? resolveRecordReferences(operation.record, state) : {};
       const reference = {
@@ -296,7 +582,21 @@ async function applyChange(
         ...extractOperationReference(operation, result)
       };
       state.refs[operation.id] = reference;
-      results.push({ operation_id: operation.id, ok: true, request, result, reference });
+      const success = { operation_id: operation.id, label: operation.label, ok: true, request, result, reference };
+      results.push(success);
+      await emitOperationJournalEvent(executionOptions.on_operation_event, {
+        stage: "after",
+        plan_id: planId,
+        operation_id: operation.id,
+        phase,
+        status: "succeeded",
+        attempt,
+        precondition,
+        expected_effect: expectedEffect,
+        request,
+        result,
+        postcondition: { api_call_succeeded: true, graph_verification_pending: true }
+      });
     } catch (error) {
       failed = true;
       const failure = {
@@ -308,31 +608,83 @@ async function applyChange(
       };
       firstFailedOperation = failure;
       results.push(failure);
+      await emitOperationJournalEvent(executionOptions.on_operation_event, {
+        stage: "after",
+        plan_id: planId,
+        operation_id: operation.id,
+        phase,
+        status: "failed",
+        attempt,
+        precondition,
+        expected_effect: expectedEffect,
+        request,
+        error: {
+          message: truncateDebugText(error),
+          retryable: isRetryableWriteError(error)
+        },
+        postcondition: { api_call_succeeded: false, graph_verification_required: true }
+      });
     }
   }
 
   if (!failed) {
+    const affectedWindowIds = collectAffectedWindowIds(context, operationsToApply, state);
+    await emitOperationJournalEvent(executionOptions.on_operation_event, {
+      stage: "before",
+      plan_id: planId,
+      operation_id: "auto_deploy_window_cache",
+      phase: "cache_verification",
+      status: "running",
+      attempt,
+      precondition: { metadata_operations_succeeded: true, window_ids: affectedWindowIds },
+      expected_effect: { postcondition: "window_cache_readable", window_ids: affectedWindowIds }
+    });
     try {
       const cacheDeploy = await deployAffectedWindowCaches(env, context, operationsToApply, state);
       if (cacheDeploy.deployed_count) {
         results.push({ operation_id: "auto_deploy_window_cache", ok: true, result: cacheDeploy });
       }
+      await emitOperationJournalEvent(executionOptions.on_operation_event, {
+        stage: "after",
+        plan_id: planId,
+        operation_id: "auto_deploy_window_cache",
+        phase: "cache_verification",
+        status: cacheDeploy.deployed_count ? "succeeded" : "skipped",
+        attempt,
+        result: cacheDeploy,
+        postcondition: { cache_api_succeeded: true, graph_verification_pending: true }
+      });
     } catch (error) {
       failed = true;
-      results.push({
+      const cacheFailure = {
         operation_id: "auto_deploy_window_cache",
         ok: false,
+        expected_window_ids: affectedWindowIds,
         error: truncateDebugText(error)
+      };
+      results.push(cacheFailure);
+      await emitOperationJournalEvent(executionOptions.on_operation_event, {
+        stage: "after",
+        plan_id: planId,
+        operation_id: "auto_deploy_window_cache",
+        phase: "cache_verification",
+        status: "failed",
+        attempt,
+        result: cacheFailure,
+        error: { message: truncateDebugText(error), retryable: isRetryableWriteError(error) },
+        postcondition: { cache_api_succeeded: false, graph_verification_required: true }
       });
     }
   }
 
   let pendingPlanDeleted = false;
-  try {
-    await env.CHUNKS.delete(`${PENDING_CHANGE_PREFIX}${planId}`);
-    pendingPlanDeleted = true;
-  } catch {
-    pendingPlanDeleted = false;
+  if (!executionOptions.retain_pending_plan) {
+    try {
+      await env.CHUNKS.delete(`${PENDING_CHANGE_PREFIX}${planId}`);
+      pendingPlanDeleted = true;
+    } catch {
+      pendingPlanDeleted = false;
+    }
   }
 
   if (results.some(result => result.ok === true)) {
@@ -374,6 +726,12 @@ async function applyChange(
       }
       : undefined,
     skipped_operations: skippedOperations,
+    attempt,
+    operation_phases: plan.phases,
+    verification_targets: plan.verification_targets,
+    approved_change_envelope: plan.approved_change_envelope,
+    expected_operations: operationsToApply.map(operation => buildExpectedOperationSnapshot(operation, state)),
+    resolved_references: state.refs,
     pending_plan_deleted: pendingPlanDeleted,
     can_reapply_same_plan: false,
     results,
@@ -381,6 +739,123 @@ async function applyChange(
       ? "Sửa lại plan dựa trên lỗi, đọc lại graph để xem các bước đã ghi, rồi gọi prepare_change mới. Không apply lại plan cũ."
       : "Gọi app_builder_graph_overview/search/detail để verify cấu hình sau khi ghi."
   };
+}
+
+function inferOperationPhase(operation: PreparedOperation): ApplicationPhase {
+  return COLLECTION_PHASE[operation.collection] ?? "cache_verification";
+}
+
+function buildOperationPrecondition(operation: PreparedOperation): Record<string, unknown> {
+  const idField = TARGET_ID_FIELD[operation.collection];
+  const targetSelector = operation.where
+    ? { where: operation.where }
+    : hasUsableValue(operation.id_value)
+      ? { id_field: idField, id_value: operation.id_value }
+      : undefined;
+
+  if (operation.action === "create") {
+    return {
+      condition: "dependencies_resolved_and_no_known_duplicate",
+      collection: operation.collection,
+      depends_on: operation.depends_on ?? [],
+      natural_key_candidates: getNaturalKeyCandidates(operation)
+    };
+  }
+
+  return {
+    condition: "target_exists",
+    collection: operation.collection,
+    target: targetSelector,
+    depends_on: operation.depends_on ?? []
+  };
+}
+
+function buildOperationExpectedEffect(operation: PreparedOperation): Record<string, unknown> {
+  const idField = TARGET_ID_FIELD[operation.collection];
+  const base = {
+    action: operation.action,
+    target: operation.target,
+    collection: operation.collection,
+    id_field: idField,
+    id_value: operation.id_value,
+    where: operation.where
+  };
+
+  if (operation.action === "delete") {
+    return {
+      ...base,
+      postcondition: "target_absent"
+    };
+  }
+
+  return {
+    ...base,
+    postcondition: "target_present_with_expected_values",
+    expected_record: operation.record ?? {}
+  };
+}
+
+function buildExpectedOperationSnapshot(
+  operation: PreparedOperation,
+  state: ApplyState
+): Record<string, unknown> {
+  let record: Record<string, unknown> | undefined;
+  let idValue: unknown = operation.id_value;
+  let where = operation.where;
+
+  try {
+    record = operation.record ? resolveRecordReferences(operation.record, state) : undefined;
+    idValue = resolveValueReference(operation.id_value, state);
+    where = resolveStringReferences(operation.where, state) || undefined;
+  } catch {
+    record = operation.record;
+  }
+
+  return {
+    operation_id: operation.id,
+    action: operation.action,
+    target: operation.target,
+    collection: operation.collection,
+    label: operation.label,
+    phase: operation.phase ?? inferOperationPhase(operation),
+    depends_on: operation.depends_on ?? [],
+    id_field: TARGET_ID_FIELD[operation.collection],
+    id_value: idValue,
+    where,
+    record,
+    reference: state.refs[operation.id]
+  };
+}
+
+function getNaturalKeyCandidates(operation: PreparedOperation): Record<string, unknown> {
+  const record = operation.record ?? {};
+  const candidates = [
+    TARGET_NAME_FIELD[operation.target],
+    "roleid",
+    "appid",
+    "menuid",
+    "tableid",
+    "serviceid",
+    "windowid",
+    "tabid",
+    "columnid"
+  ].filter((field): field is string => Boolean(field));
+  return compactRecord(record, candidates);
+}
+
+function isRetryableWriteError(error: unknown): boolean {
+  const message = truncateDebugText(error).toLowerCase();
+  if (/\b(408|425|429|500|502|503|504)\b/.test(message)) return true;
+  return [
+    "timeout",
+    "timed out",
+    "failed to fetch",
+    "network error",
+    "connection reset",
+    "connection refused",
+    "temporarily unavailable",
+    "rate limit"
+  ].some(fragment => message.includes(fragment));
 }
 
 function expandPreparedOperationsForApply(
@@ -421,14 +896,12 @@ function expandPreparedOperationsForApply(
 function hasDeleteAppCascadeOperation(operations: PreparedOperation[], appId: unknown): boolean {
   if (!hasUsableValue(appId)) return false;
   const appIdText = String(appId);
-  return operations.some(operation =>
-    operation.action === "delete"
-    && operation.collection === "windows"
-    && (
-      String(operation.id ?? "").startsWith(`delete_app_${appIdText}_windows`)
-      || String(operation.where ?? "").includes(`appid=${appIdText}`)
-    )
-  );
+  return operations.some(operation => {
+    if (operation.action !== "delete") return false;
+    const operationId = String(operation.id ?? "");
+    return operationId.startsWith(`delete_app_${appIdText}_`)
+      || (operation.collection === "windows" && String(operation.where ?? "").includes(`appid=${appIdText}`));
+  });
 }
 
 async function loadWriteContext(
@@ -491,11 +964,27 @@ async function loadWriteContext(
     allowedColumnsByCollection[key] = allowed;
   }
 
+  const contractRegistry = await loadDynamicMetadataContractRegistry(
+    env,
+    session,
+    collections,
+    CREATE_REQUIRED_FIELDS
+  );
+  for (const [collection, contract] of Object.entries(contractRegistry.contracts)) {
+    if (contract.source !== "live_schema") continue;
+    const liveColumns = Object.keys(contract.columns);
+    if (liveColumns.length) {
+      allowedColumnsByCollection[collection] = new Set(liveColumns.map(column => column.toLowerCase()));
+    }
+  }
+
   return {
     blueprint,
     collections,
     recordsByCollection,
     allowedColumnsByCollection,
+    contractsByCollection: contractRegistry.contracts,
+    contractWarnings: contractRegistry.warnings,
     session
   };
 }
@@ -513,6 +1002,22 @@ function prepareOperation(
 
   if (!collection) throw new Error(`Target không hỗ trợ: ${target}`);
   if (!context.collections[collection]) throw new Error(`Không tìm thấy collection metadata: ${collection}`);
+  const contract = context.contractsByCollection[collection];
+  if ((action === "create" || action === "update") && contract?.source !== "live_schema") {
+    throwPreparationBlock({
+      code: "live_metadata_schema_required",
+      operation_id: getStringFromUnknown(rawOperation.id) || `${action}_${target}_${index + 1}`,
+      entity: target,
+      expected: "schema source=live_schema from /rest/{database}/{schema}/column/{table}",
+      actual: contract?.source ?? "missing",
+      evidence: {
+        source: "dynamic_metadata_contract_registry",
+        table: contract?.table_name,
+        warnings: contract?.warnings ?? context.contractWarnings
+      },
+      repair_hint: "Khôi phục quyền/kết nối tới schema API rồi prepare lại; không dùng field hard-coded để ghi thay thế."
+    });
+  }
 
   const record = getOperationRecordPayload(target, rawOperation, warnings);
   const preparedRecord = action === "create"
@@ -545,8 +1050,31 @@ function prepareOperation(
   const where = getStringFromUnknown(rawOperation.where)
     || (whereRecord && idValue === undefined ? buildWhereFromRecord(context, collection, whereRecord, warnings) : "");
 
-  if ((action === "update" || action === "delete") && (idValue === undefined || idValue === null || idValue === "") && !where) {
-    throw new Error("Update/delete cần id_value hoặc where.");
+  if ((action === "update" || action === "delete") && !hasUsableValue(idValue)) {
+    throwPreparationBlock({
+      code: "exact_metadata_id_required",
+      operation_id: getStringFromUnknown(rawOperation.id) || `${action}_${target}_${index + 1}`,
+      entity: target,
+      field: idField,
+      expected: `${idField} hoặc id_value của đúng một metadata entity`,
+      actual: where || null,
+      evidence: {
+        source: "write_safety_policy",
+        rejected_where: where || undefined
+      },
+      repair_hint: "Resolve entity bằng graph/detail trước, rồi prepare update/delete bằng metadata ID cụ thể; không ghi theo batch where."
+    });
+  }
+  if ((action === "update" || action === "delete") && where) {
+    throwPreparationBlock({
+      code: "batch_where_write_not_allowed",
+      operation_id: getStringFromUnknown(rawOperation.id) || `${action}_${target}_${index + 1}`,
+      entity: target,
+      expected: "one metadata entity selected by id_value",
+      actual: where,
+      evidence: { source: "write_safety_policy", id_field: idField, id_value: idValue },
+      repair_hint: "Bung batch thành các operation theo từng metadata ID để mỗi operation có journal và postcondition riêng."
+    });
   }
 
   const operation: PreparedOperation = {
@@ -557,7 +1085,11 @@ function prepareOperation(
     label: `${action} ${target}: ${getOperationLabel(target, preparedRecord ?? record, idValue)}`,
     record: preparedRecord,
     id_value: typeof idValue === "string" || typeof idValue === "number" ? idValue : undefined,
-    where
+    where: undefined,
+    phase: isApplicationPhase(rawOperation.phase) ? rawOperation.phase : undefined,
+    depends_on: Array.isArray(rawOperation.depends_on)
+      ? rawOperation.depends_on.map(value => String(value)).filter(Boolean)
+      : undefined
   };
 
   return { operation, warnings };
@@ -570,6 +1102,7 @@ function materializeUpdateRecord(
   warnings: string[]
 ): Record<string, unknown> {
   const record = { ...rawRecord };
+  normalizeLiveWritableAliases(context, collection, record, warnings);
   stripReferenceOnlyFields(record);
   const filtered = filterRecordByAllowedColumns(context, collection, record, warnings);
   return filtered;
@@ -587,6 +1120,288 @@ function autoWirePreparedOperations(context: WriteContext, operations: PreparedO
     operation.record.appid = `$${firstCreatedApp.id}.appid`;
     warnings.push(`${operation.id}: tự động liên kết appid với ${firstCreatedApp.id}.appid.`);
   }
+}
+
+interface DeleteDependencyRule {
+  targetCollection: string;
+  dependentCollection: string;
+  fields: string[];
+}
+
+const DELETE_DEPENDENCY_RULES: DeleteDependencyRule[] = [
+  { targetCollection: "applications", dependentCollection: "windows", fields: ["appid"] },
+  { targetCollection: "applications", dependentCollection: "menus", fields: ["appid"] },
+  { targetCollection: "applications", dependentCollection: "domains", fields: ["appid"] },
+  { targetCollection: "applications", dependentCollection: "roleapps", fields: ["appid"] },
+  { targetCollection: "applications", dependentCollection: "appservices", fields: ["appid"] },
+  { targetCollection: "applications", dependentCollection: "caches", fields: ["appid"] },
+  { targetCollection: "services", dependentCollection: "appservices", fields: ["serviceid"] },
+  { targetCollection: "services", dependentCollection: "tables", fields: ["serviceid"] },
+  { targetCollection: "tables", dependentCollection: "columns", fields: ["tableid"] },
+  { targetCollection: "tables", dependentCollection: "tabs", fields: ["tableid", "linktableid", "relatetableid"] },
+  { targetCollection: "tables", dependentCollection: "fields", fields: ["linktableid"] },
+  { targetCollection: "tables", dependentCollection: "accesses", fields: ["tableid"] },
+  { targetCollection: "tables", dependentCollection: "archives", fields: ["tableid"] },
+  { targetCollection: "columns", dependentCollection: "fields", fields: ["columnid"] },
+  { targetCollection: "windows", dependentCollection: "tabs", fields: ["windowid"] },
+  { targetCollection: "windows", dependentCollection: "menus", fields: ["windowid", "linkwindowid"] },
+  { targetCollection: "windows", dependentCollection: "caches", fields: ["windowid"] },
+  { targetCollection: "tabs", dependentCollection: "fields", fields: ["tabid"] },
+  { targetCollection: "tabs", dependentCollection: "tabs", fields: ["parenttabid"] },
+  { targetCollection: "fields", dependentCollection: "fields", fields: ["parentfieldid"] },
+  { targetCollection: "domains", dependentCollection: "columns", fields: ["domainid"] },
+  { targetCollection: "domains", dependentCollection: "fields", fields: ["domainid"] },
+  { targetCollection: "menus", dependentCollection: "rolemenus", fields: ["menuid"] }
+];
+
+function validatePreparedDeleteDependencies(
+  context: WriteContext,
+  operations: PreparedOperation[]
+): BlockingError[] {
+  const errors: BlockingError[] = [
+    ...validateOperationIdentityConflicts(operations)
+  ];
+
+  for (const operation of operations) {
+    if (operation.action !== "delete" || !hasUsableValue(operation.id_value)) continue;
+    if (isReferenceValue(operation.id_value)) continue;
+    const targetId = operation.id_value;
+
+    for (const rule of DELETE_DEPENDENCY_RULES) {
+      if (rule.targetCollection !== operation.collection) continue;
+      for (const dependent of context.recordsByCollection[rule.dependentCollection] ?? []) {
+        if (rule.dependentCollection === operation.collection
+          && sameId(ci(dependent, TARGET_ID_FIELD[rule.dependentCollection]), targetId)) {
+          continue;
+        }
+        const matchedFields = rule.fields.filter(field => sameId(ci(dependent, field), targetId));
+        if (!matchedFields.length) continue;
+        if (dependencyResolvedByPlan(
+          dependent,
+          rule.dependentCollection,
+          operations,
+          candidate => !matchedFields.some(field => sameId(ci(candidate, field), targetId))
+        )) continue;
+        errors.push(buildUnresolvedDependencyError(operation, dependent, rule.dependentCollection, matchedFields));
+      }
+    }
+
+    if (operation.collection === "columns") {
+      errors.push(...validateColumnLinkDependencies(context, operations, operation));
+    }
+    if (operation.collection === "fields") {
+      errors.push(...validateTabFieldRelationDependencies(context, operations, operation));
+    }
+  }
+
+  return dedupeBlockingErrors(errors);
+}
+
+function validateOperationIdentityConflicts(operations: PreparedOperation[]): BlockingError[] {
+  const byIdentity = new Map<string, PreparedOperation[]>();
+  const operationIds = new Map<string, number>();
+  const errors: BlockingError[] = [];
+
+  for (const operation of operations) {
+    operationIds.set(operation.id, (operationIds.get(operation.id) ?? 0) + 1);
+    if (!hasUsableValue(operation.id_value) || isReferenceValue(operation.id_value)) continue;
+    const key = `${operation.collection}:${String(operation.id_value)}`;
+    const group = byIdentity.get(key) ?? [];
+    group.push(operation);
+    byIdentity.set(key, group);
+  }
+
+  for (const [operationId, count] of operationIds) {
+    if (count < 2) continue;
+    errors.push({
+      code: "duplicate_operation_id",
+      operation_id: operationId,
+      expected: "unique operation id",
+      actual: count,
+      evidence: { source: "prepared_operation_dag" },
+      repair_hint: "Đặt ID duy nhất cho mỗi operation và cập nhật depends_on/reference tương ứng."
+    });
+  }
+
+  for (const [identity, group] of byIdentity) {
+    if (group.length < 2) continue;
+    const uniqueActions = new Set(group.map(operation => operation.action));
+    const duplicateDeletesOnly = uniqueActions.size === 1 && uniqueActions.has("delete");
+    if (duplicateDeletesOnly) continue;
+    errors.push({
+      code: "conflicting_operations_for_entity",
+      operation_id: group.map(operation => operation.id).join(","),
+      entity: identity,
+      expected: "one unambiguous mutation per existing metadata entity",
+      actual: group.map(operation => ({ id: operation.id, action: operation.action })),
+      evidence: { source: "prepared_operation_dag" },
+      repair_hint: "Gộp các update hoặc bỏ operation mâu thuẫn; không update và delete cùng entity trong một plan."
+    });
+  }
+  return errors;
+}
+
+function validateColumnLinkDependencies(
+  context: WriteContext,
+  operations: PreparedOperation[],
+  operation: PreparedOperation
+): BlockingError[] {
+  const column = findMetadataRecord(context, "columns", operation.id_value);
+  if (!column) return [];
+  const tableId = ci(column, "tableid");
+  const columnId = ci(column, "columnid");
+  const columnName = ci(column, "columnname");
+  if (!hasUsableValue(tableId) || (!hasUsableValue(columnId) && !hasUsableValue(columnName))) return [];
+
+  const errors: BlockingError[] = [];
+  for (const collection of ["columns", "fields"]) {
+    for (const dependent of context.recordsByCollection[collection] ?? []) {
+      if (collection === "columns" && sameId(ci(dependent, "columnid"), columnId)) continue;
+      const linksTable = sameId(ci(dependent, "linktableid"), tableId);
+      const linksColumn = [ci(dependent, "linkcolumn"), ci(dependent, "mapcolumn")]
+        .some(value => sameId(value, columnId) || sameId(value, columnName));
+      if (!linksTable || !linksColumn) continue;
+      if (dependencyResolvedByPlan(
+        dependent,
+        collection,
+        operations,
+        candidate => {
+          const stillLinksTable = sameId(ci(candidate, "linktableid"), tableId);
+          const stillLinksColumn = [ci(candidate, "linkcolumn"), ci(candidate, "mapcolumn")]
+            .some(value => sameId(value, columnId) || sameId(value, columnName));
+          return !stillLinksTable || !stillLinksColumn;
+        }
+      )) continue;
+      errors.push(buildUnresolvedDependencyError(
+        operation,
+        dependent,
+        collection,
+        ["linktableid", "linkcolumn", "mapcolumn"]
+      ));
+    }
+  }
+  return errors;
+}
+
+function validateTabFieldRelationDependencies(
+  context: WriteContext,
+  operations: PreparedOperation[],
+  operation: PreparedOperation
+): BlockingError[] {
+  const field = findMetadataRecord(context, "fields", operation.id_value);
+  if (!field) return [];
+  const fieldId = ci(field, "fieldid");
+  const fieldName = ci(field, "fieldname") ?? ci(field, "columnname");
+  const relationFields = ["linkchildfield", "linkparentfield", "relatechildfield", "relateparentfield", "filterfield"];
+  const errors: BlockingError[] = [];
+
+  for (const tab of context.recordsByCollection.tabs ?? []) {
+    const matched = relationFields.filter(name => {
+      const value = ci(tab, name);
+      return sameId(value, fieldId) || sameId(value, fieldName);
+    });
+    if (!matched.length) continue;
+    if (dependencyResolvedByPlan(
+      tab,
+      "tabs",
+      operations,
+      candidate => !matched.some(name => {
+        const value = ci(candidate, name);
+        return sameId(value, fieldId) || sameId(value, fieldName);
+      })
+    )) continue;
+    errors.push(buildUnresolvedDependencyError(operation, tab, "tabs", matched));
+  }
+  return errors;
+}
+
+function dependencyResolvedByPlan(
+  dependent: Record<string, unknown>,
+  collection: string,
+  operations: PreparedOperation[],
+  isResolved: (candidate: Record<string, unknown>) => boolean
+): boolean {
+  const idField = TARGET_ID_FIELD[collection];
+  const idValue = ci(dependent, idField);
+  if (!hasUsableValue(idValue)) return false;
+
+  const mutations = operations.filter(operation =>
+    operation.collection === collection
+    && hasUsableValue(operation.id_value)
+    && sameId(operation.id_value, idValue)
+  );
+  if (mutations.some(operation => operation.action === "delete")) return true;
+
+  let candidate = { ...dependent };
+  let changed = false;
+  for (const mutation of mutations) {
+    if (mutation.action !== "update" || !mutation.record) continue;
+    candidate = mergeCaseInsensitive(candidate, mutation.record);
+    changed = true;
+  }
+  return changed && isResolved(candidate);
+}
+
+function mergeCaseInsensitive(
+  base: Record<string, unknown>,
+  patch: Record<string, unknown>
+): Record<string, unknown> {
+  const output = { ...base };
+  for (const [key, value] of Object.entries(patch)) {
+    const existingKey = Object.keys(output).find(name => name.toLowerCase() === key.toLowerCase());
+    output[existingKey ?? key] = value;
+  }
+  return output;
+}
+
+function findMetadataRecord(
+  context: WriteContext,
+  collection: string,
+  idValue: unknown
+): Record<string, unknown> | undefined {
+  const idField = TARGET_ID_FIELD[collection];
+  return (context.recordsByCollection[collection] ?? [])
+    .find(record => sameId(ci(record, idField), idValue));
+}
+
+function buildUnresolvedDependencyError(
+  operation: PreparedOperation,
+  dependent: Record<string, unknown>,
+  dependentCollection: string,
+  fields: string[]
+): BlockingError {
+  const dependentIdField = TARGET_ID_FIELD[dependentCollection];
+  const dependentId = ci(dependent, dependentIdField);
+  return {
+    code: "delete_dependency_unresolved",
+    operation_id: operation.id,
+    entity: `${operation.target}:${String(operation.id_value)}`,
+    field: fields.join(","),
+    expected: "dependency deleted or explicitly updated in the same confirmed plan",
+    actual: compactRecord(dependent, [dependentIdField, ...fields, TARGET_NAME_FIELD[singularTarget(dependentCollection)]].filter(Boolean)),
+    evidence: {
+      source: "live_app_builder_metadata",
+      dependent_collection: dependentCollection,
+      dependent_id: dependentId,
+      relation_fields: fields
+    },
+    repair_hint: "Thêm operation rõ ràng để xóa hoặc chuyển liên kết dependency; nếu làm thay đổi phạm vi nghiệp vụ, phải xác nhận plan mới."
+  };
+}
+
+function singularTarget(collection: string): string {
+  return Object.entries(TARGET_COLLECTION)
+    .find(([, value]) => value === collection)?.[0] ?? collection.replace(/s$/, "");
+}
+
+function dedupeBlockingErrors(errors: BlockingError[]): BlockingError[] {
+  const seen = new Set<string>();
+  return errors.filter(error => {
+    const key = JSON.stringify([error.code, error.operation_id, error.entity, error.field, error.actual]);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function extractOperationReference(operation: PreparedOperation, result: unknown): Record<string, unknown> {
@@ -664,7 +1479,7 @@ function buildOperationRequestAudit(
       endpoint: addQuery(endpoint, { returnid: "true" }),
       source_table: compactRecord(sourceTable, ["tableid", "tablename", "alias", "urledit", "urlview"]),
       record_keys: Object.keys(record),
-      record_preview: compactRecord(record, Object.keys(record))
+      record_preview: redactSensitiveData(compactRecord(record, Object.keys(record)))
     };
   }
 
@@ -683,15 +1498,12 @@ function buildOperationRequestAudit(
       id_value: idValue,
       where,
       record_keys: Object.keys(body),
-      record_preview: compactRecord(body, Object.keys(body))
+      record_preview: redactSensitiveData(compactRecord(body, Object.keys(body)))
     };
   }
 
   const where = resolveStringReferences(operation.where, state)
     || buildIdWhere(idField, resolveValueReference(operation.id_value, state));
-  const hiddenMetadataCleanup = operation.collection === "applications"
-    ? buildApplicationDeleteCleanupAudit(operation, state)
-    : undefined;
   return {
     method: "DELETE",
     collection: operation.collection,
@@ -700,8 +1512,7 @@ function buildOperationRequestAudit(
     source_table: compactRecord(sourceTable, ["tableid", "tablename", "alias", "urledit", "urlview"]),
     id_field: idField,
     id_value: operation.id_value,
-    where,
-    hidden_metadata_cleanup: hiddenMetadataCleanup
+    where
   };
 }
 
@@ -748,18 +1559,12 @@ async function applyOperation(
 
   const where = resolveStringReferences(operation.where, state)
     || buildIdWhere(TARGET_ID_FIELD[operation.collection], resolveValueReference(operation.id_value, state));
-  const hiddenMetadataCleanup = operation.collection === "applications"
-    ? await cleanupApplicationMetadataBeforeDelete(env, context, operation, state)
-    : undefined;
   const envelope = await callZilcodeJson<unknown>(env, addQuery(endpoint, { where }), {
     method: "DELETE",
     token: context.session.token,
     baseUrl: context.session.base_url
   });
-  const deleteResult = assertZilcodeSuccess(envelope);
-  return hiddenMetadataCleanup
-    ? { delete_result: deleteResult, hidden_metadata_cleanup: hiddenMetadataCleanup }
-    : deleteResult;
+  return assertZilcodeSuccess(envelope);
 }
 
 async function deployAffectedWindowCaches(
@@ -1009,216 +1814,6 @@ function stringId(value: unknown): string | undefined {
   return hasUsableValue(value) ? String(value) : undefined;
 }
 
-function buildApplicationDeleteCleanupAudit(
-  operation: PreparedOperation,
-  state: ApplyState
-): Record<string, unknown> | undefined {
-  const appIdText = getNumericAppIdText(resolveDeleteApplicationId(operation, state));
-  if (!appIdText) {
-    return {
-      status: "skipped",
-      reason: "Không resolve được appid số từ id_value/where nên không thể cleanup metadata ẩn trước delete_app."
-    };
-  }
-
-  return {
-    status: "will_run_before_delete_app",
-    appid: appIdText,
-    fixed_order: ["n_cache", "n_field", "n_tab", "n_rolemenu", "n_menu", "n_roleapp", "n_appservice", "n_domain", "n_window"],
-    note: "Dùng query endpoint để dọn metadata có thể bị ẩn khỏi data endpoint, vì FK/cache/role/menu/window vẫn chặn xóa n_app."
-  };
-}
-
-async function cleanupApplicationMetadataBeforeDelete(
-  env: Env,
-  context: WriteContext,
-  operation: PreparedOperation,
-  state: ApplyState
-): Promise<Record<string, unknown> | undefined> {
-  const appIdText = getNumericAppIdText(resolveDeleteApplicationId(operation, state));
-  if (!appIdText) return undefined;
-
-  const endpoint = getZilcodeQueryEndpoint(context, "applications");
-  const statements = buildDeleteApplicationMetadataStatements(context, appIdText);
-  const results: Record<string, unknown>[] = [];
-
-  for (const statement of statements) {
-    const envelope = await callZilcodeJson<unknown>(env, endpoint, {
-      method: "PUT",
-      token: context.session.token,
-      baseUrl: context.session.base_url,
-      data: { body: statement.sql }
-    });
-    const result = assertZilcodeSuccess(envelope);
-    results.push({
-      label: statement.label,
-      ok: true,
-      result: summarizeCleanupQueryResult(result)
-    });
-  }
-
-  return {
-    appid: appIdText,
-    query_endpoint: endpoint,
-    statements_count: statements.length,
-    results
-  };
-}
-
-function resolveDeleteApplicationId(operation: PreparedOperation, state: ApplyState): unknown {
-  const idValue = resolveValueReference(operation.id_value, state);
-  if (hasUsableValue(idValue)) return idValue;
-  return extractNumericIdFromSimpleWhere(resolveStringReferences(operation.where, state), "appid");
-}
-
-function getNumericAppIdText(value: unknown): string | undefined {
-  const text = String(value ?? "").trim();
-  return /^\d+$/.test(text) ? text : undefined;
-}
-
-function extractNumericIdFromSimpleWhere(where: string, field: string): string | undefined {
-  const normalizedField = field.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const equalsMatch = where.match(new RegExp(`^\\s*${normalizedField}\\s*=\\s*(\\d+)\\s*$`, "i"));
-  if (equalsMatch) return equalsMatch[1];
-  const inMatch = where.match(new RegExp(`^\\s*${normalizedField}\\s+IN\\s*\\(\\s*(\\d+)\\s*\\)\\s*$`, "i"));
-  return inMatch?.[1];
-}
-
-function buildDeleteApplicationMetadataStatements(
-  context: WriteContext,
-  appIdText: string
-): Array<{ label: string; sql: string }> {
-  const cachesTable = getSqlTableName(context, "caches", "n_cache");
-  const fieldsTable = getSqlTableName(context, "fields", "n_field");
-  const tabsTable = getSqlTableName(context, "tabs", "n_tab");
-  const rolemenusTable = getSqlTableName(context, "rolemenus", "n_rolemenu");
-  const menusTable = getSqlTableName(context, "menus", "n_menu");
-  const roleappsTable = getSqlTableName(context, "roleapps", "n_roleapp");
-  const appservicesTable = getSqlTableName(context, "appservices", "n_appservice");
-  const domainsTable = getSqlTableName(context, "domains", "n_domain");
-  const windowsTable = getSqlTableName(context, "windows", "n_window");
-  const appidColumn = getSqlColumnName("appid");
-  const tabidColumn = getSqlColumnName("tabid");
-  const menuidColumn = getSqlColumnName("menuid");
-  const windowidColumn = getSqlColumnName("windowid");
-  const windowSubquery = `SELECT ${windowidColumn} FROM ${windowsTable} WHERE ${appidColumn}=${appIdText}`;
-  const tabSubquery = `SELECT ${tabidColumn} FROM ${tabsTable} WHERE ${windowidColumn} IN (${windowSubquery})`;
-  const menuClauses: string[] = [];
-  const cacheClauses: string[] = [];
-
-  if (isColumnAllowed(context, "menus", "appid")) {
-    menuClauses.push(`${appidColumn}=${appIdText}`);
-  }
-  for (const linkColumn of getMenuWindowLinkColumns(context)) {
-    menuClauses.push(`${getSqlColumnName(linkColumn)} IN (${windowSubquery})`);
-  }
-
-  if (isColumnAllowed(context, "caches", "appid")) {
-    cacheClauses.push(`${appidColumn}=${appIdText}`);
-  }
-  if (isColumnAllowed(context, "caches", "windowid")) {
-    cacheClauses.push(`${windowidColumn} IN (${windowSubquery})`);
-  }
-
-  const menuWhere = menuClauses.length ? menuClauses.join(" OR ") : "";
-  const menuSubquery = menuWhere ? `SELECT ${menuidColumn} FROM ${menusTable} WHERE ${menuWhere}` : "";
-  const statements: Array<{ label: string; sql: string }> = [];
-
-  if (cacheClauses.length) {
-    statements.push({
-      label: "delete generated cache linked to app/windows",
-      sql: `DELETE FROM ${cachesTable} WHERE ${cacheClauses.join(" OR ")}`
-    });
-  }
-
-  statements.push(
-    {
-      label: "delete fields of app windows",
-      sql: `DELETE FROM ${fieldsTable} WHERE ${tabidColumn} IN (${tabSubquery})`
-    },
-    {
-      label: "delete tabs of app windows",
-      sql: `DELETE FROM ${tabsTable} WHERE ${windowidColumn} IN (${windowSubquery})`
-    }
-  );
-
-  if (menuSubquery) {
-    statements.push({
-      label: "delete role-menu permissions linked to app menus",
-      sql: `DELETE FROM ${rolemenusTable} WHERE ${menuidColumn} IN (${menuSubquery})`
-    });
-  }
-
-  if (menuClauses.length) {
-    statements.push({
-      label: "delete menus linked to app/windows",
-      sql: `DELETE FROM ${menusTable} WHERE ${menuWhere}`
-    });
-  }
-
-  if (isColumnAllowed(context, "roleapps", "appid")) {
-    statements.push({
-      label: "delete role-app permissions linked to app",
-      sql: `DELETE FROM ${roleappsTable} WHERE ${appidColumn}=${appIdText}`
-    });
-  }
-
-  if (isColumnAllowed(context, "appservices", "appid")) {
-    statements.push({
-      label: "delete app-service links",
-      sql: `DELETE FROM ${appservicesTable} WHERE ${appidColumn}=${appIdText}`
-    });
-  }
-
-  if (isColumnAllowed(context, "domains", "appid")) {
-    statements.push({
-      label: "delete domains linked to app",
-      sql: `DELETE FROM ${domainsTable} WHERE ${appidColumn}=${appIdText}`
-    });
-  }
-
-  statements.push({
-    label: "delete windows of app",
-    sql: `DELETE FROM ${windowsTable} WHERE ${appidColumn}=${appIdText}`
-  });
-
-  return statements;
-}
-
-function getZilcodeQueryEndpoint(context: WriteContext, collection: string): string {
-  const collectionMeta = context.collections[collection] ?? context.collections.applications;
-  const sourceTable = asRecord(collectionMeta?.source_table) ?? {};
-  const endpoint = String(sourceTable.urledit ?? sourceTable.urlview ?? "");
-  const match = endpoint.match(/^(.*?rest\/[^/]+\/[^/]+)\/data(?:\/|$)/i);
-  return match ? `${match[1]}/query` : "rest/applicationjs_nut/dbo/query";
-}
-
-function getSqlTableName(context: WriteContext, collection: string, fallback: string): string {
-  const collectionMeta = context.collections[collection];
-  const sourceTable = asRecord(collectionMeta?.source_table) ?? {};
-  return getSqlIdentifier(String(ci(sourceTable, "tablename") ?? fallback), fallback);
-}
-
-function getSqlColumnName(column: string): string {
-  return getSqlIdentifier(column, column);
-}
-
-function getSqlIdentifier(value: string, fallback: string): string {
-  const text = value.trim();
-  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(text) ? text : fallback;
-}
-
-function summarizeCleanupQueryResult(result: unknown): unknown {
-  if (Array.isArray(result)) {
-    return { rows: result.length };
-  }
-  if (result && typeof result === "object") {
-    const record = result as Record<string, unknown>;
-    return compactRecord(record, ["rowsAffected", "affectedRows", "count", "message"]);
-  }
-  return result ?? null;
-}
-
 function getRawOperations(args: Record<string, unknown>): Record<string, unknown>[] {
   const plan = asRecord(args.plan);
   const operations = args.operations ?? plan?.operations ?? args.changes ?? plan?.changes;
@@ -1235,6 +1830,104 @@ function getRawOperations(args: Record<string, unknown>): Record<string, unknown
 
   const single = asRecord(args.operation) ?? plan;
   return single ? [single] : [];
+}
+
+function getApplicationSpecificationInput(args: Record<string, unknown>): Record<string, unknown> | undefined {
+  const explicit = asRecord(args.application_specification)
+    ?? asRecord(args.specification)
+    ?? asRecord(asRecord(args.plan)?.application_specification)
+    ?? asRecord(asRecord(args.plan)?.specification);
+  if (explicit) return explicit;
+
+  const plan = asRecord(args.plan);
+  if (!plan || Array.isArray(plan.operations) || Array.isArray(plan.changes)) return undefined;
+  const specificationKeys = [
+    "app", "services", "appservices", "service_bindings", "tables", "domains",
+    "relations", "windows", "menus", "roleapps", "rolemenu", "rolemenus", "accesses"
+  ];
+  return specificationKeys.some(key => plan[key] !== undefined) ? plan : undefined;
+}
+
+function toBlockingError(issue: SpecificationValidationIssue): BlockingError {
+  return {
+    code: issue.code,
+    operation_id: `spec:${issue.entity}`,
+    entity: issue.entity,
+    field: issue.field,
+    expected: issue.expected,
+    actual: issue.actual,
+    evidence: issue.evidence,
+    repair_hint: issue.repair_hint
+  };
+}
+
+function normalizeBlockingErrors(errors: unknown[]): BlockingError[] {
+  return errors.map((error, index) => {
+    if (error && typeof error === "object" && !Array.isArray(error)) {
+      const record = error as Record<string, unknown>;
+      return {
+        code: String(record.code ?? "operation_invalid"),
+        operation_id: record.operation_id ? String(record.operation_id) : `operation_${index + 1}`,
+        entity: record.entity ? String(record.entity) : undefined,
+        field: record.field ? String(record.field) : undefined,
+        expected: record.expected,
+        actual: record.actual,
+        evidence: asRecord(record.evidence) ?? { source: "prepare_change" },
+        repair_hint: String(record.repair_hint ?? "Sửa operation theo contract rồi prepare lại.")
+      };
+    }
+    return {
+      code: "operation_invalid",
+      operation_id: `operation_${index + 1}`,
+      actual: String(error ?? "unknown error"),
+      evidence: { source: "prepare_change" },
+      repair_hint: "Sửa operation theo lỗi và contract rồi prepare lại; không bỏ field bắt buộc."
+    };
+  });
+}
+
+function toPreparationBlockingError(
+  error: unknown,
+  fallback: Omit<BlockingError, "actual">
+): BlockingError {
+  if (error instanceof PreparationBlockingError) {
+    return {
+      ...fallback,
+      ...error.blockingError,
+      operation_id: error.blockingError.operation_id ?? fallback.operation_id,
+      evidence: {
+        ...(fallback.evidence ?? {}),
+        ...(error.blockingError.evidence ?? {})
+      }
+    };
+  }
+  return {
+    ...fallback,
+    actual: truncateDebugText(error)
+  };
+}
+
+function throwPreparationBlock(blockingError: BlockingError): never {
+  throw new PreparationBlockingError(blockingError);
+}
+
+function safeOperationTarget(operation: Record<string, unknown>): string {
+  try {
+    return getTarget(getOperationName(operation), operation);
+  } catch {
+    return String(operation.target ?? operation.entity_type ?? "unknown");
+  }
+}
+
+function isApplicationPhase(value: unknown): value is ApplicationPhase {
+  return [
+    "app_service",
+    "table_column",
+    "domain_lookup_relation",
+    "window_tab_field",
+    "menu_permission",
+    "cache_verification"
+  ].includes(String(value));
 }
 
 function normalizeRawOperations(
@@ -1543,11 +2236,51 @@ export function __materializeAppBuilderCreateRecordForTest(
     allowedColumnsByCollection: {
       [collection]: allowedColumns
     },
+    contractsByCollection: {},
+    contractWarnings: [],
     session: { user: options.sessionUser ?? { siteid: 1 } } as ZilcodeSession
   };
 
   return {
     record: materializeCreateRecord(context, collection, normalizedRecord, warnings),
+    warnings
+  };
+}
+
+export function __validatePreparedDeleteDependenciesForTest(
+  recordsByCollection: Record<string, Record<string, unknown>[]>,
+  operations: PreparedOperation[]
+): BlockingError[] {
+  const collections = Object.fromEntries(Object.keys(recordsByCollection).map(key => [key, {}]));
+  const context: WriteContext = {
+    blueprint: {},
+    collections,
+    recordsByCollection,
+    allowedColumnsByCollection: {},
+    contractsByCollection: {},
+    contractWarnings: [],
+    session: { user: { siteid: 1 } } as unknown as ZilcodeSession
+  };
+  return validatePreparedDeleteDependencies(context, operations);
+}
+
+export function __expandRawAppBuilderOperationsForTest(
+  recordsByCollection: Record<string, Record<string, unknown>[]>,
+  rawOperations: Record<string, unknown>[]
+): { operations: Record<string, unknown>[]; warnings: string[] } {
+  const warnings: string[] = [];
+  const collections = Object.fromEntries(Object.keys(recordsByCollection).map(key => [key, {}]));
+  const context: WriteContext = {
+    blueprint: {},
+    collections,
+    recordsByCollection,
+    allowedColumnsByCollection: {},
+    contractsByCollection: {},
+    contractWarnings: [],
+    session: { user: { siteid: 1 } } as unknown as ZilcodeSession
+  };
+  return {
+    operations: expandRawOperations(context, rawOperations, warnings),
     warnings
   };
 }
@@ -1612,6 +2345,11 @@ function expandRawOperations(
       continue;
     }
 
+    if (action === "delete" && target === "menu" && cascade) {
+      expanded.push(...buildDeleteMenuCascadeOperations(context, rawOperation, warnings));
+      continue;
+    }
+
     if (action === "delete" && target === "table" && cascade) {
       expanded.push(...buildDeleteTableCascadeOperations(context, rawOperation, warnings));
       continue;
@@ -1640,6 +2378,39 @@ function wantsAutoCreateFields(rawOperation: Record<string, unknown>): boolean {
     || getBooleanLike(record.fields_from_table)
     || getBooleanLike(rawOperation.create_fields)
     || getBooleanLike(rawOperation.include_fields);
+}
+
+function allowsSharedDependencyDelete(rawOperation: Record<string, unknown>): boolean {
+  return getBooleanLike(rawOperation.allow_shared_dependency_delete)
+    || getBooleanLike(rawOperation.confirm_shared_dependency_delete);
+}
+
+function requireSharedDependencyConfirmation(
+  rawOperation: Record<string, unknown>,
+  target: string,
+  targetId: unknown,
+  dependencyType: string,
+  dependencies: Record<string, unknown>[],
+  evidenceKeys: string[]
+): void {
+  if (!dependencies.length || allowsSharedDependencyDelete(rawOperation)) return;
+  throwPreparationBlock({
+    code: "shared_dependency_delete_requires_confirmation",
+    operation_id: getStringFromUnknown(rawOperation.id) || `delete_${target}_${String(targetId)}`,
+    entity: `${target}:${String(targetId)}`,
+    expected: "allow_shared_dependency_delete=true after reviewing the expanded dependency list",
+    actual: {
+      dependency_type: dependencyType,
+      count: dependencies.length
+    },
+    evidence: {
+      source: "live_app_builder_metadata",
+      dependency_type: dependencyType,
+      dependencies: dependencies.slice(0, 50).map(record => compactRecord(record, evidenceKeys)),
+      truncated: dependencies.length > 50
+    },
+    repair_hint: "Xem danh sách dependency dùng chung; chỉ bật allow_shared_dependency_delete khi người dùng xác nhận rõ phạm vi xóa."
+  });
 }
 
 function buildCreateTabWithFieldsOperations(
@@ -1728,6 +2499,22 @@ function buildDeleteWindowCascadeOperations(
     .filter(field => tabIds.has(String(ci(field, "tabid") ?? "")));
   const menus = (context.recordsByCollection.menus ?? [])
     .filter(menu => sameId(ci(menu, "linkwindowid") ?? ci(menu, "windowid"), windowIdText));
+  const windowRecord = (context.recordsByCollection.windows ?? [])
+    .find(window => sameId(ci(window, "windowid"), windowIdText));
+  const windowAppId = windowRecord ? ci(windowRecord, "appid") : undefined;
+  const externalMenus = menus.filter(menu =>
+    hasUsableValue(windowAppId)
+    && hasUsableValue(ci(menu, "appid"))
+    && !sameId(ci(menu, "appid"), windowAppId)
+  );
+  requireSharedDependencyConfirmation(
+    rawOperation,
+    "window",
+    windowId,
+    "menus_owned_by_another_app",
+    externalMenus,
+    ["menuid", "menuname", "appid", "windowid", "linkwindowid"]
+  );
   const menuIds = new Set(menus.map(menu => String(ci(menu, "menuid") ?? "")).filter(Boolean));
   const caches = (context.recordsByCollection.caches ?? [])
     .filter(cache => sameId(ci(cache, "windowid"), windowIdText));
@@ -1859,17 +2646,41 @@ function buildDeleteColumnCascadeOperations(
   const columnIdText = String(columnId);
   const fields = (context.recordsByCollection.fields ?? [])
     .filter(field => sameId(ci(field, "columnid"), columnIdText));
+  const column = (context.recordsByCollection.columns ?? [])
+    .find(item => sameId(ci(item, "columnid"), columnIdText));
+  const columnTableId = column ? ci(column, "tableid") : undefined;
+  const tabsById = new Map(
+    (context.recordsByCollection.tabs ?? [])
+      .map(tab => [String(ci(tab, "tabid") ?? ""), tab] as const)
+      .filter(([tabId]) => Boolean(tabId))
+  );
+  const fieldsOutsideColumnTable = fields.filter(field => {
+    const tab = tabsById.get(String(ci(field, "tabid") ?? ""));
+    return tab
+      && hasUsableValue(columnTableId)
+      && !sameId(ci(tab, "tableid"), columnTableId);
+  });
+  requireSharedDependencyConfirmation(
+    rawOperation,
+    "column",
+    columnId,
+    "fields_in_tabs_of_another_table",
+    fieldsOutsideColumnTable,
+    ["fieldid", "fieldname", "tabid", "columnid", "tableid", "linktableid"]
+  );
 
   warnings.push(
     `delete_column cascade columnid=${columnIdText}: sẽ xóa ${fields.length} field đang dùng column trước khi xóa column. Không xóa table/dữ liệu thật.`
   );
 
   const operations: Record<string, unknown>[] = [];
-  if (isColumnAllowed(context, "fields", "columnid")) {
+  for (const field of fields) {
+    const fieldId = ci(field, "fieldid");
+    if (!hasUsableValue(fieldId)) continue;
     operations.push({
-      id: `delete_column_${columnIdText}_fields`,
+      id: `delete_column_${columnIdText}_field_${String(fieldId)}`,
       op: "delete_field",
-      where: buildIdWhere("columnid", columnId)
+      id_value: fieldId
     });
   }
 
@@ -1879,6 +2690,27 @@ function buildDeleteColumnCascadeOperations(
     id_value: columnId
   });
 
+  return operations;
+}
+
+function buildDeleteMenuCascadeOperations(
+  context: WriteContext,
+  rawOperation: Record<string, unknown>,
+  warnings: string[]
+): Record<string, unknown>[] {
+  const menuId = getDeleteIdValue(rawOperation, "menuid");
+  if (!hasUsableValue(menuId)) {
+    throw new Error("delete_menu cascade thiếu menuid/id_value.");
+  }
+  const menuIdText = String(menuId);
+  const rolemenus = (context.recordsByCollection.rolemenus ?? [])
+    .filter(rolemenu => sameId(ci(rolemenu, "menuid"), menuIdText));
+  warnings.push(
+    `delete_menu cascade menuid=${menuIdText}: sẽ xóa ${rolemenus.length} rolemenu trước menu.`
+  );
+  const operations: Record<string, unknown>[] = [];
+  appendDeleteOperations(operations, `delete_menu_${menuIdText}`, "rolemenu", rolemenus, "rolemenuid");
+  operations.push({ id: `delete_menu_${menuIdText}`, op: "delete_menu", id_value: menuId });
   return operations;
 }
 
@@ -1893,26 +2725,40 @@ function buildDeleteTableCascadeOperations(
   }
 
   const tableIdText = String(tableId);
-  const tableWhere = buildIdWhere("tableid", tableId);
-  const tabClauses = buildAllowedIdClauses(context, "tabs", ["tableid", "linktableid", "relatetableid"], tableId);
-  const tabWhere = tabClauses.join(" OR ");
-  const tabSubquery = tabWhere ? `SELECT tabid FROM n_tab WHERE ${tabWhere}` : "";
-  const columnSubquery = `SELECT columnid FROM n_column WHERE ${tableWhere}`;
-
   const columns = (context.recordsByCollection.columns ?? [])
     .filter(column => sameId(ci(column, "tableid"), tableIdText));
   const columnIds = new Set(columns.map(column => String(ci(column, "columnid") ?? "")).filter(Boolean));
   const tabs = (context.recordsByCollection.tabs ?? [])
-    .filter(tab => tabClauses.some(clause => {
-      const [columnName] = clause.split("=");
-      return sameId(ci(tab, columnName.trim()), tableIdText);
-    }));
+    .filter(tab => sameId(ci(tab, "tableid"), tableIdText));
   const tabIds = new Set(tabs.map(tab => String(ci(tab, "tabid") ?? "")).filter(Boolean));
   const fields = (context.recordsByCollection.fields ?? [])
     .filter(field =>
       columnIds.has(String(ci(field, "columnid") ?? ""))
       || tabIds.has(String(ci(field, "tabid") ?? ""))
     );
+  const externalMappedFields = fields.filter(field => !tabIds.has(String(ci(field, "tabid") ?? "")));
+  requireSharedDependencyConfirmation(
+    rawOperation,
+    "table",
+    tableId,
+    "fields_in_tabs_outside_deleted_table",
+    externalMappedFields,
+    ["fieldid", "fieldname", "tabid", "columnid", "linktableid"]
+  );
+
+  const distinctWindowIds = new Set(
+    tabs.map(tab => String(ci(tab, "windowid") ?? "")).filter(Boolean)
+  );
+  if (distinctWindowIds.size > 1) {
+    requireSharedDependencyConfirmation(
+      rawOperation,
+      "table",
+      tableId,
+      "tabs_across_multiple_windows",
+      tabs,
+      ["tabid", "tabname", "windowid", "tableid"]
+    );
+  }
   const accesses = (context.recordsByCollection.accesses ?? [])
     .filter(access => sameId(ci(access, "tableid"), tableIdText));
   const archives = (context.recordsByCollection.archives ?? [])
@@ -1923,50 +2769,53 @@ function buildDeleteTableCascadeOperations(
   );
 
   const operations: Record<string, unknown>[] = [];
-  const fieldClauses: string[] = [];
-  if (isColumnAllowed(context, "fields", "tabid") && tabSubquery) {
-    fieldClauses.push(`tabid IN (${tabSubquery})`);
-  }
-  if (isColumnAllowed(context, "fields", "columnid")) {
-    fieldClauses.push(`columnid IN (${columnSubquery})`);
-  }
-  if (fieldClauses.length) {
+  for (const field of fields) {
+    const fieldId = ci(field, "fieldid");
+    if (!hasUsableValue(fieldId)) continue;
     operations.push({
-      id: `delete_table_${tableIdText}_fields`,
+      id: `delete_table_${tableIdText}_field_${String(fieldId)}`,
       op: "delete_field",
-      where: fieldClauses.join(" OR ")
+      id_value: fieldId
     });
   }
 
-  if (tabWhere) {
+  for (const tab of tabs) {
+    const tabId = ci(tab, "tabid");
+    if (!hasUsableValue(tabId)) continue;
     operations.push({
-      id: `delete_table_${tableIdText}_tabs`,
+      id: `delete_table_${tableIdText}_tab_${String(tabId)}`,
       op: "delete_tab",
-      where: tabWhere
+      id_value: tabId
     });
   }
 
-  if (context.collections.accesses && isColumnAllowed(context, "accesses", "tableid")) {
+  for (const access of accesses) {
+    const accessId = ci(access, "accessid");
+    if (!hasUsableValue(accessId)) continue;
     operations.push({
-      id: `delete_table_${tableIdText}_accesses`,
+      id: `delete_table_${tableIdText}_access_${String(accessId)}`,
       op: "delete_access",
-      where: tableWhere
+      id_value: accessId
     });
   }
 
-  if (context.collections.archives && isColumnAllowed(context, "archives", "tableid")) {
+  for (const archive of archives) {
+    const archiveId = ci(archive, "archiveid");
+    if (!hasUsableValue(archiveId)) continue;
     operations.push({
-      id: `delete_table_${tableIdText}_archives`,
+      id: `delete_table_${tableIdText}_archive_${String(archiveId)}`,
       op: "delete_archive",
-      where: tableWhere
+      id_value: archiveId
     });
   }
 
-  if (isColumnAllowed(context, "columns", "tableid")) {
+  for (const column of columns) {
+    const columnId = ci(column, "columnid");
+    if (!hasUsableValue(columnId)) continue;
     operations.push({
-      id: `delete_table_${tableIdText}_columns`,
+      id: `delete_table_${tableIdText}_column_${String(columnId)}`,
       op: "delete_column",
-      where: tableWhere
+      id_value: columnId
     });
   }
 
@@ -1977,17 +2826,6 @@ function buildDeleteTableCascadeOperations(
   });
 
   return operations;
-}
-
-function buildAllowedIdClauses(
-  context: WriteContext,
-  collection: string,
-  columns: string[],
-  idValue: unknown
-): string[] {
-  return columns
-    .filter(column => isColumnAllowed(context, collection, column))
-    .map(column => `${column}=${formatSqlValue(idValue)}`);
 }
 
 function buildDeleteAppCascadeOperations(
@@ -2001,15 +2839,6 @@ function buildDeleteAppCascadeOperations(
   }
 
   const appIdText = String(appId);
-  const appWhere = buildIdWhere("appid", appId);
-  const windowSubquery = `SELECT windowid FROM n_window WHERE ${appWhere}`;
-  const tabSubquery = `SELECT tabid FROM n_tab WHERE windowid IN (${windowSubquery})`;
-  const menuLinkColumns = getMenuWindowLinkColumns(context);
-  const menuClauses = [`appid=${formatSqlValue(appId)}`];
-  for (const linkColumn of menuLinkColumns) {
-    menuClauses.push(`${linkColumn} IN (${windowSubquery})`);
-  }
-
   const windows = (context.recordsByCollection.windows ?? [])
     .filter(window => sameId(ci(window, "appid"), appIdText));
   const windowIds = new Set(windows.map(window => String(ci(window, "windowid") ?? "")).filter(Boolean));
@@ -2023,6 +2852,18 @@ function buildDeleteAppCascadeOperations(
       sameId(ci(menu, "appid"), appIdText)
       || windowIds.has(String(ci(menu, "linkwindowid") ?? ci(menu, "windowid") ?? ""))
     );
+  const externalMenus = menus.filter(menu =>
+    hasUsableValue(ci(menu, "appid"))
+    && !sameId(ci(menu, "appid"), appIdText)
+  );
+  requireSharedDependencyConfirmation(
+    rawOperation,
+    "app",
+    appId,
+    "menus_owned_by_another_app",
+    externalMenus,
+    ["menuid", "menuname", "appid", "windowid", "linkwindowid"]
+  );
   const menuIds = new Set(menus.map(menu => String(ci(menu, "menuid") ?? "")).filter(Boolean));
   const caches = (context.recordsByCollection.caches ?? [])
     .filter(cache =>
@@ -2037,65 +2878,45 @@ function buildDeleteAppCascadeOperations(
     .filter(appservice => sameId(ci(appservice, "appid"), appIdText));
   const domains = (context.recordsByCollection.domains ?? [])
     .filter(domain => sameId(ci(domain, "appid"), appIdText));
-  const menuWhere = menuClauses.join(" OR ");
-  const menuSubquery = `SELECT menuid FROM n_menu WHERE ${menuWhere}`;
 
   warnings.push(
     `delete_app cascade appid=${appIdText}: sẽ xóa UI/access metadata liên quan trước app (${caches.length} cache, ${fields.length} field, ${tabs.length} tab, ${rolemenus.length} rolemenu, ${menus.length} menu, ${roleapps.length} roleapp, ${appservices.length} appservice, ${domains.length} domain, ${windows.length} window đã đọc được). Không xóa table/column/dữ liệu thật.`
   );
 
-  return [
-    {
-      id: `delete_app_${appIdText}_caches`,
-      op: "delete_cache",
-      where: `appid=${formatSqlValue(appId)} OR windowid IN (${windowSubquery})`
-    },
-    {
-      id: `delete_app_${appIdText}_fields`,
-      op: "delete_field",
-      where: `tabid IN (${tabSubquery})`
-    },
-    {
-      id: `delete_app_${appIdText}_tabs`,
-      op: "delete_tab",
-      where: `windowid IN (${windowSubquery})`
-    },
-    {
-      id: `delete_app_${appIdText}_rolemenus`,
-      op: "delete_rolemenu",
-      where: `menuid IN (${menuSubquery})`
-    },
-    {
-      id: `delete_app_${appIdText}_menus`,
-      op: "delete_menu",
-      where: menuWhere
-    },
-    {
-      id: `delete_app_${appIdText}_roleapps`,
-      op: "delete_roleapp",
-      where: appWhere
-    },
-    {
-      id: `delete_app_${appIdText}_appservices`,
-      op: "delete_appservice",
-      where: appWhere
-    },
-    {
-      id: `delete_app_${appIdText}_domains`,
-      op: "delete_domain",
-      where: appWhere
-    },
-    {
-      id: `delete_app_${appIdText}_windows`,
-      op: "delete_window",
-      where: appWhere
-    },
-    {
-      id: `delete_app_${appIdText}`,
-      op: "delete_app",
-      id_value: appId
-    }
-  ];
+  const operations: Record<string, unknown>[] = [];
+  appendDeleteOperations(operations, `delete_app_${appIdText}`, "cache", caches, "cacheid");
+  appendDeleteOperations(operations, `delete_app_${appIdText}`, "field", fields, "fieldid");
+  appendDeleteOperations(operations, `delete_app_${appIdText}`, "tab", tabs, "tabid");
+  appendDeleteOperations(operations, `delete_app_${appIdText}`, "rolemenu", rolemenus, "rolemenuid");
+  appendDeleteOperations(operations, `delete_app_${appIdText}`, "menu", menus, "menuid");
+  appendDeleteOperations(operations, `delete_app_${appIdText}`, "roleapp", roleapps, "roleappid");
+  appendDeleteOperations(operations, `delete_app_${appIdText}`, "appservice", appservices, "appserviceid");
+  appendDeleteOperations(operations, `delete_app_${appIdText}`, "domain", domains, "domainid");
+  appendDeleteOperations(operations, `delete_app_${appIdText}`, "window", windows, "windowid");
+  operations.push({
+    id: `delete_app_${appIdText}`,
+    op: "delete_app",
+    id_value: appId
+  });
+  return operations;
+}
+
+function appendDeleteOperations(
+  output: Record<string, unknown>[],
+  idPrefix: string,
+  target: string,
+  records: Record<string, unknown>[],
+  idField: string
+): void {
+  for (const record of records) {
+    const idValue = ci(record, idField);
+    if (!hasUsableValue(idValue)) continue;
+    output.push({
+      id: `${idPrefix}_${target}_${String(idValue)}`,
+      op: `delete_${target}`,
+      id_value: idValue
+    });
+  }
 }
 
 function dedupeRawOperations(operations: Record<string, unknown>[]): Record<string, unknown>[] {
@@ -2538,6 +3359,7 @@ function materializeCreateRecord(
   warnings: string[]
 ): Record<string, unknown> {
   const record: Record<string, unknown> = { ...rawRecord };
+  normalizeLiveWritableAliases(context, collection, record, warnings);
 
   if (collection === "applications") {
     if (!record.appname && record.name) record.appname = record.name;
@@ -2584,8 +3406,8 @@ function materializeCreateRecord(
       delete record.appid;
     }
     if (!record.tablename && record.name) record.tablename = record.name;
-    if (!record.alias) record.alias = record.tablename;
-    if (!record.tabletype) record.tabletype = "table";
+    applyDefaultIfAllowed(context, collection, record, "alias", record.tablename);
+    applyDefaultIfAllowed(context, collection, record, "tabletype", "table");
     applyDefaultIfAllowed(
       context,
       collection,
@@ -2605,9 +3427,8 @@ function materializeCreateRecord(
     resolveDomainReference(context, record, warnings);
     resolveLookupTableReference(context, record, warnings);
     if (!record.columnname && record.name) record.columnname = record.name;
-    if (!record.caption && record.label) record.caption = record.label;
     if (!record.datatype && record.columntype) record.datatype = record.columntype;
-    if (!record.columntype && record.datatype) record.columntype = record.datatype;
+    applyDefaultIfAllowed(context, collection, record, "columntype", record.datatype);
     applyDefaultIfAllowed(
       context,
       collection,
@@ -2617,14 +3438,14 @@ function materializeCreateRecord(
         ?? inferExistingValue(context.recordsByCollection.columns ?? [], "siteid")
         ?? inferExistingValue(context.recordsByCollection.applications ?? [], "siteid")
     );
-    if (!record.seqno) record.seqno = nextSeq(context.recordsByCollection.columns ?? []);
+    applyDefaultIfAllowed(context, collection, record, "seqno", nextSeq(context.recordsByCollection.columns ?? []));
     if (!record.columnname) throw new Error("create_column thiếu columnname.");
   }
 
   if (collection === "windows") {
     resolveAppReference(context, collection, record, warnings);
     if (!record.windowname && record.name) record.windowname = record.name;
-    if (!record.windowtype) record.windowtype = "window";
+    applyDefaultIfAllowed(context, collection, record, "windowtype", "window");
     applyDefaultIfAllowed(
       context,
       collection,
@@ -2642,7 +3463,7 @@ function materializeCreateRecord(
     resolveWindowReference(context, record, warnings);
     resolveTableReference(context, record, warnings);
     if (!record.tabname && record.name) record.tabname = record.name;
-    if (record.tablevel === undefined) record.tablevel = record.parenttabid ? 1 : 0;
+    applyDefaultIfAllowed(context, collection, record, "tablevel", record.parenttabid ? 1 : 0);
     applyDefaultIfAllowed(
       context,
       collection,
@@ -2652,7 +3473,7 @@ function materializeCreateRecord(
         ?? inferExistingValue(context.recordsByCollection.tabs ?? [], "siteid")
         ?? inferExistingValue(context.recordsByCollection.applications ?? [], "siteid")
     );
-    if (!record.seqno) record.seqno = nextSeq(context.recordsByCollection.tabs ?? []);
+    applyDefaultIfAllowed(context, collection, record, "seqno", nextSeq(context.recordsByCollection.tabs ?? []));
     if (!record.tabname) throw new Error("create_tab thiếu tabname.");
   }
 
@@ -2687,7 +3508,7 @@ function materializeCreateRecord(
         ?? inferExistingValue(context.recordsByCollection.fields ?? [], "siteid")
         ?? inferExistingValue(context.recordsByCollection.applications ?? [], "siteid")
     );
-    if (!record.seqno) record.seqno = nextSeq(context.recordsByCollection.fields ?? []);
+    applyDefaultIfAllowed(context, collection, record, "seqno", nextSeq(context.recordsByCollection.fields ?? []));
     if (!record.fieldname) throw new Error("create_field thiếu fieldname/columnname.");
   }
 
@@ -2695,7 +3516,7 @@ function materializeCreateRecord(
     resolveAppReference(context, collection, record, warnings);
     resolveWindowLinkReference(context, record, warnings);
     if (!record.menuname && record.name) record.menuname = record.name;
-    if (!record.translate) record.translate = record.menuname;
+    applyDefaultIfAllowed(context, collection, record, "translate", record.menuname);
     applyDefaultIfAllowed(context, collection, record, "menutype", "menu");
     applyDefaultIfAllowed(
       context,
@@ -2706,7 +3527,7 @@ function materializeCreateRecord(
         ?? inferExistingValue(context.recordsByCollection.menus ?? [], "siteid")
         ?? inferExistingValue(context.recordsByCollection.applications ?? [], "siteid")
     );
-    if (!record.seqno) record.seqno = nextSeq(context.recordsByCollection.menus ?? []);
+    applyDefaultIfAllowed(context, collection, record, "seqno", nextSeq(context.recordsByCollection.menus ?? []));
     if (!record.menuname) throw new Error("create_menu thiếu menuname.");
   }
 
@@ -2714,7 +3535,14 @@ function materializeCreateRecord(
     resolveAppReference(context, collection, record, warnings);
     if (!record.domainname && record.name) record.domainname = record.name;
     if (!record.domainname) throw new Error("create_domain thiếu domainname.");
-    if (record.values && !record.domainjson) record.domainjson = JSON.stringify(record.values);
+    const domainValues = record.values ?? record.domain_values;
+    if (domainValues !== undefined && record.domainjson === undefined) {
+      if (isColumnAllowed(context, collection, "domainjson")) {
+        record.domainjson = JSON.stringify(domainValues);
+        delete record.values;
+        delete record.domain_values;
+      }
+    }
     applyDefaultIfAllowed(context, collection, record, "domainjson", "[]");
     applyDefaultIfAllowed(context, collection, record, "domaintype", "list");
     applyDefaultIfAllowed(
@@ -2784,9 +3612,23 @@ function materializeCreateRecord(
     );
   }
 
+  materializeContractDefaults(context.contractsByCollection[collection], record, warnings);
   stripReferenceOnlyFields(record);
   const filtered = filterRecordByAllowedColumns(context, collection, record, warnings);
   validateRequiredFields(context, collection, filtered);
+  const contractErrors = validateRecordAgainstContract(context.contractsByCollection[collection], filtered);
+  if (contractErrors.length) {
+    const error = contractErrors[0];
+    throwPreparationBlock({
+      code: error.code,
+      entity: collection,
+      field: error.field,
+      expected: error.expected,
+      actual: error.actual,
+      evidence: error.evidence,
+      repair_hint: error.repair_hint
+    });
+  }
   ensureNoDuplicateCreateRecord(context, collection, filtered);
   return filtered;
 }
@@ -3260,12 +4102,27 @@ function filterRecordByAllowedColumns(
   if (!allowed || allowed.size === 0) return record;
 
   const output: Record<string, unknown> = {};
+  const unsupported: string[] = [];
   for (const [key, value] of Object.entries(record)) {
     if (allowed.has(key.toLowerCase())) {
       output[key] = value;
     } else {
-      warnings.push(`Bỏ qua field không tồn tại trong ${collection}: ${key}`);
+      unsupported.push(key);
     }
+  }
+  if (unsupported.length) {
+    throwPreparationBlock({
+      code: "unsupported_metadata_field",
+      entity: collection,
+      field: unsupported.join(","),
+      expected: [...allowed].sort(),
+      actual: unsupported,
+      evidence: {
+        source: context.contractsByCollection[collection]?.source ?? "metadata_collection",
+        table: context.contractsByCollection[collection]?.table_name
+      },
+      repair_hint: "Sửa alias/semantic reference trước khi lọc payload; chỉ bỏ field khi đã xác nhận nó không thuộc yêu cầu người dùng."
+    });
   }
   return output;
 }
@@ -3275,13 +4132,25 @@ function validateRequiredFields(
   collection: string,
   record: Record<string, unknown>
 ): void {
-  const required = CREATE_REQUIRED_FIELDS[collection] ?? [];
-  const missing = required.filter(key => isColumnAllowed(context, collection, key) && !hasUsableValue(record[key]));
+  const required = context.contractsByCollection[collection]?.required_fields
+    ?? CREATE_REQUIRED_FIELDS[collection]
+    ?? [];
+  const missing = required.filter(key => isColumnAllowed(context, collection, key) && !hasUsableValue(ci(record, key)));
   if (missing.length) {
-    const label = LEVEL3_COLLECTIONS.has(collection)
-      ? "Level 3 create metadata"
-      : "Create metadata";
-    throw new Error(`${label} ${collection} thiếu field bắt buộc: ${missing.join(", ")}.`);
+    const contract = context.contractsByCollection[collection];
+    throwPreparationBlock({
+      code: "required_field_missing",
+      entity: collection,
+      field: missing.join(","),
+      expected: "non-null values required by live metadata schema",
+      actual: Object.fromEntries(missing.map(field => [field, ci(record, field)])),
+      evidence: {
+        source: contract?.source ?? "metadata_contract",
+        table: contract?.table_name,
+        columns: missing.map(field => contract?.columns[field.toLowerCase()])
+      },
+      repair_hint: "Cung cấp giá trị bắt buộc hoặc dùng default/identity đã được schema live chứng minh; không bỏ field để làm plan valid."
+    });
   }
 }
 
@@ -3334,17 +4203,51 @@ function ensureUniqueByKeys(
 
 function stripReferenceOnlyFields(record: Record<string, unknown>): void {
   for (const key of [
+    "key", "ref",
     "app_ref", "app_name", "application", "application_name", "app",
     "table_ref", "table_name", "table",
     "service_ref", "service_name", "service",
     "window_ref", "window_name", "window",
     "tab_ref", "tab_name", "tab",
+    "parent_tab", "parenttab_ref", "parent",
     "column_ref", "column_name", "column",
+    "domain_ref", "domain_name", "domain",
+    "lookup_table", "lookup_table_ref", "link_table",
+    "linkparentfield_ref", "linkchildfield_ref",
+    "relateparentfield_ref", "relatechildfield_ref",
+    "relate_table_ref", "relatetable_ref",
     "linkwindow_ref", "link_window", "linkwindow",
     "role_ref", "role_name", "role",
     "menu_ref", "menu_name", "menu"
   ]) {
     delete record[key];
+  }
+}
+
+function normalizeLiveWritableAliases(
+  context: WriteContext,
+  collection: string,
+  record: Record<string, unknown>,
+  warnings: string[]
+): void {
+  const aliases: Array<[string, string]> = collection === "columns"
+    ? [["columntype", "datatype"], ["datatype", "columntype"]]
+    : collection === "tabs"
+      ? [
+        ["linkparentfield", "linkparentfieldid"],
+        ["linkchildfield", "linkchildfieldid"],
+        ["relateparentfield", "relateparentfieldid"],
+        ["relatechildfield", "relatechildfieldid"]
+      ]
+      : [];
+
+  for (const [source, target] of aliases) {
+    if (!hasUsableValue(record[source])) continue;
+    if (isColumnAllowed(context, collection, source)) continue;
+    if (!isColumnAllowed(context, collection, target)) continue;
+    if (!hasUsableValue(record[target])) record[target] = record[source];
+    delete record[source];
+    warnings.push(`${collection}: chuẩn hóa semantic alias ${source} -> ${target} theo live schema.`);
   }
 }
 
@@ -3484,8 +4387,40 @@ function summarizeOperation(operation: PreparedOperation): Record<string, unknow
     label: operation.label,
     id_value: operation.id_value,
     where: operation.where,
-    record_keys: operation.record ? Object.keys(operation.record) : undefined
+    phase: operation.phase,
+    depends_on: operation.depends_on,
+    record_keys: operation.record ? Object.keys(operation.record) : undefined,
+    record_preview: operation.record ? buildSafeRecordPreview(operation.record) : undefined
   };
+}
+
+function buildSafeRecordPreview(record: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(record).map(([key, value]) => [key, previewMetadataValue(value, key)])
+  );
+}
+
+function previewMetadataValue(value: unknown, key: string): unknown {
+  const normalizedKey = key.toLowerCase();
+  if (["token", "password", "secret", "credential", "accesspass", "authorization"]
+    .some(fragment => normalizedKey.includes(fragment))) {
+    return "<redacted>";
+  }
+  if (typeof value === "string") {
+    return value.length > 2_000 ? `${value.slice(0, 2_000)}…<truncated>` : value;
+  }
+  if (Array.isArray(value)) return value.map(item => previewMetadataValue(item, key));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .map(([childKey, childValue]) => [childKey, previewMetadataValue(childValue, childKey)])
+    );
+  }
+  return value;
+}
+
+export function __summarizeOperationForTest(operation: PreparedOperation): Record<string, unknown> {
+  return summarizeOperation(operation);
 }
 
 function getOperationLabel(target: string, record: Record<string, unknown>, idValue: unknown): string {

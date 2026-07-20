@@ -80,6 +80,15 @@ export interface ChatHistoryMessage {
 
 export type AgentMode = "default" | "search";
 
+export type AgentRequestKind =
+  | "conversation"
+  | "knowledge"
+  | "read"
+  | "prepare_change"
+  | "unknown";
+
+export type AgentRequiredOutcome = "answer" | "pending_confirmation";
+
 export interface ChatRequest {
   message: string;
   mode?: AgentMode;
@@ -111,11 +120,97 @@ export interface AgentActionState {
   requires_confirmation?: boolean;
   summary?: unknown;
   operations?: unknown;
+  approved_change_envelope?: Record<string, unknown>;
   applied_count?: number;
   failed_count?: number;
   skipped_count?: number;
+  verification_status?: string;
+  verification_summary?: Record<string, unknown>;
+  residual_plan_id?: string;
   error?: string;
   updated_at?: string;
+}
+
+export type AgentRunTerminalStatus =
+  | "running"
+  | "waiting_confirmation"
+  | "repairing"
+  | "succeeded"
+  | "failed"
+  | "blocked"
+  | "verification_failed";
+
+export interface AgentRunBudget {
+  used: number;
+  limit: number;
+}
+
+export interface AgentRunBudgets {
+  read: AgentRunBudget;
+  prepare_repair: AgentRunBudget;
+  apply_repair: AgentRunBudget;
+}
+
+export interface AgentToolAttempt {
+  tool_name: string;
+  arguments: Record<string, unknown>;
+  input_fingerprint: string;
+  result_fingerprint: string;
+  result_status: string;
+  progress_revision: number;
+  attempted_at: string;
+}
+
+export interface AgentEvidenceRecord {
+  tool_name: string;
+  result_status: string;
+  summary: Record<string, unknown>;
+  collected_at: string;
+}
+
+export interface AgentRepairAttempts {
+  prepare: number;
+  apply: number;
+}
+
+export interface AgentRunState {
+  run_id: string;
+  job_id?: string;
+  conversation_id?: string;
+  user_key?: string;
+  goal: string;
+  original_request: string;
+  clarified_request: string;
+  request_kind: AgentRequestKind;
+  required_outcome: AgentRequiredOutcome;
+  resolved_targets: Array<Record<string, unknown>>;
+  collected_evidence: AgentEvidenceRecord[];
+  desired_graph?: Record<string, unknown>;
+  attempted_tool_calls: AgentToolAttempt[];
+  prepared_operations: Array<Record<string, unknown>>;
+  completed_operations: Array<Record<string, unknown>>;
+  failed_operation?: Record<string, unknown>;
+  verification_results: Array<Record<string, unknown>>;
+  repair_attempts: AgentRepairAttempts;
+  approved_change_envelope?: Record<string, unknown>;
+  active_plan_id?: string;
+  residual_plan_ids: string[];
+  phase_checkpoints: Record<string, string>;
+  budgets: AgentRunBudgets;
+  progress_revision: number;
+  terminal_status: AgentRunTerminalStatus;
+  blocker?: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AgentRunOptions {
+  run_id?: string;
+  job_id?: string;
+  conversation_id?: string;
+  user_key?: string;
+  initial_state?: AgentRunState;
+  on_state_change?: (state: AgentRunState) => void | Promise<void>;
 }
 
 export interface AgenticLoopResult {
@@ -125,6 +220,7 @@ export interface AgenticLoopResult {
   embedding_debug?: EmbeddingDebug;
   rag_query_debug?: RagQueryDebug;
   action_state?: AgentActionState;
+  run_state?: AgentRunState;
 }
 
 export interface AIMessage {

@@ -10,6 +10,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:worker": "vitest --config vitest.worker.config.mts",
+    "smoke:offline": "vitest run test/app-builder-read-coverage.test.ts test/app-builder-prepare-integration.test.ts test/app-builder-recovery.test.ts test/app-builder-verification.test.ts test/security-redaction.test.ts",
+    "rag:dry-run": "vite-node scripts/ingest.ts --replace --dry-run",
+    "rag:sync": "vite-node scripts/ingest.ts --replace",
     "cf-typegen": "wrangler types"
   },
   "devDependencies": {

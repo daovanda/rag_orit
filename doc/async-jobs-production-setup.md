@@ -56,6 +56,9 @@ Migration hien tai nam o:
 
 ```text
 migrations/0001_async_jobs.sql
+migrations/0002_unique_active_conversation_job.sql
+migrations/0003_agent_run_state_and_operation_journal.sql
+migrations/0004_job_retry_lease.sql
 ```
 
 Bang duoc tao:
@@ -65,6 +68,9 @@ Bang duoc tao:
 - `jobs`
 - `job_events`
 - `pending_actions`
+- `agent_runs`
+- `operation_journal`
+- `agent_phase_checkpoints`
 
 ## Queue
 
@@ -223,6 +229,12 @@ Chay test hien co:
 
 ```powershell
 npm run test
+```
+
+Chay smoke App Builder offline, khong ghi Zilcode that:
+
+```powershell
+npm run smoke:offline
 ```
 
 Chay smoke async job:

@@ -1884,10 +1884,13 @@ function buildAppBuilderInventory(
           tabs: windowTabs.map(tab => {
             const tabid = getCaseInsensitiveValue(tab, "tabid");
             const tableid = getCaseInsensitiveValue(tab, "tableid");
-            const tabFields = fields.filter(field =>
-              sameZilcodeId(getCaseInsensitiveValue(field, "tabid"), tabid)
-              || sameZilcodeId(getCaseInsensitiveValue(field, "tableid"), tableid)
-            );
+            const tabFields = fields.filter(field => {
+              const fieldTabId = getCaseInsensitiveValue(field, "tabid");
+              if (fieldTabId !== undefined && fieldTabId !== null && fieldTabId !== "") {
+                return sameZilcodeId(fieldTabId, tabid);
+              }
+              return sameZilcodeId(getCaseInsensitiveValue(field, "tableid"), tableid);
+            });
 
             return {
               ...tab,
@@ -1924,6 +1927,8 @@ function buildAppBuilderInventory(
     apps
   };
 }
+
+export const __buildAppBuilderInventoryForTest = buildAppBuilderInventory;
 
 async function buildAppBuilderRecords(
   env: Env,

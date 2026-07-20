@@ -1,0 +1,13 @@
+{
+  "documents": [
+    {
+      "path": "HUONG_DAN_SU_DUNG_PHAN_MEM_DAI_VIET_MOI.md",
+      "doc_type": "dai_viet",
+      "doc_group": "guide",
+      "audience": "người dùng và quản lý vận hành Phần mềm Quản lý Sản xuất Nhựa Đại Việt"
+    },
+    "intro.md",
+    "zilcode-admin-docs.md",
+    "zilcode-user-docs.md"
+  ]
+}

@@ -1,9 +1,30 @@
 import { CORS, MAX_HISTORY_CONTENT_CHARS, MAX_HISTORY_MESSAGES, type Env } from "./config";
 import { addDebugStep, type DebugStep } from "./debug";
 import { parseAgentMode, runAgenticLoop, sanitizeHistoryContentForModel } from "./agent";
-import { runAppBuilderWriteTool } from "./app-builder-write";
+import { createAgentRunState } from "./agent-run-state";
+import {
+  buildPendingChangeVerificationInput,
+  deletePendingChangePlan,
+  loadPendingChangePlan,
+  runAppBuilderWriteTool,
+  type PendingChange,
+  type WriteOperationJournalEvent
+} from "./app-builder-write";
+import {
+  verifyAppBuilderWriteResult,
+  type AppBuilderVerificationReport,
+  type OperationVerificationResult
+} from "./app-builder-verification";
+import {
+  buildApprovedChangeEnvelope,
+  type ApprovedChangeEnvelope
+} from "./app-builder-envelope";
+import { aggregateRecoveryVerification, runApplyRecovery } from "./app-builder-recovery";
+import { repairInvalidPrepareOperations } from "./app-builder-prepare-repair";
+import { ActiveJobLeaseError, canScheduleJobRetry, isRetryableJobError } from "./job-retry";
+import { redactSensitiveData, redactSensitiveString } from "./security-redaction";
 import { loadZilcodeSessionFromRequestHeaders, type ZilcodeSessionState } from "./zilcode";
-import type { AgentActionState, AgentMode, AIMessage, RagSource } from "./types";
+import type { AgentActionState, AgentMode, AgentRunState, AIMessage, RagSource } from "./types";
 
 const MAX_STORED_MESSAGES = 200;
 const JOB_AUTH_TTL_SECONDS = 60 * 60 * 2;
@@ -11,6 +32,9 @@ const RUNNING_JOB_STALE_SECONDS = 60 * 60 * 2;
 const JOB_POLL_EVENT_LIMIT = 80;
 const MAX_JOB_EVENT_PAYLOAD_CHARS = 12_000;
 const JOB_EVENT_RETENTION_DAYS = 14;
+const JOB_MAX_ATTEMPTS = 3;
+const JOB_LEASE_SECONDS = 5 * 60;
+const JOB_RETRY_DELAY_SECONDS = 5;
 
 type JobStatus = "queued" | "running" | "waiting_confirmation" | "succeeded" | "failed" | "cancelled" | "expired";
 type MessageStatus = "completed" | "generating" | "failed";
@@ -73,6 +97,10 @@ interface JobRow {
   updated_at: string;
   finished_at: string | null;
   expires_at: string | null;
+  attempt_count: number;
+  max_attempts: number;
+  lease_expires_at: string | null;
+  last_error_json: string | null;
 }
 
 interface PendingActionRow {
@@ -173,7 +201,7 @@ function toJson(value: unknown): string | null {
 }
 
 function toLimitedJson(value: unknown, maxChars: number): string | null {
-  const json = toJson(value);
+  const json = toJson(redactSensitiveData(value));
   if (!json || json.length <= maxChars) return json;
   return JSON.stringify({
     truncated: true,
@@ -184,6 +212,372 @@ function toLimitedJson(value: unknown, maxChars: number): string | null {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+interface OperationJournalRow {
+  operation_id: string;
+  plan_id: string | null;
+  status: "pending" | "running" | "succeeded" | "failed" | "skipped" | "verification_failed";
+  attempt: number;
+  postcondition_json: string | null;
+}
+
+function isTerminalRunStatus(status: AgentRunState["terminal_status"]): boolean {
+  return ["succeeded", "failed", "blocked", "verification_failed"].includes(status);
+}
+
+async function loadAgentRunForJob(
+  db: D1Database,
+  job: JobRow
+): Promise<AgentRunState | undefined> {
+  const row = await db.prepare(
+    `SELECT * FROM agent_runs WHERE job_id = ?1 AND user_key = ?2 LIMIT 1`
+  ).bind(job.job_id, job.user_key).first<AgentRunRow>();
+  return row ? safeJsonParse<AgentRunState | undefined>(row.state_json, undefined) : undefined;
+}
+
+async function loadAgentRunByJobId(
+  db: D1Database,
+  userKey: string,
+  jobId: string | null
+): Promise<AgentRunState | undefined> {
+  if (!jobId) return undefined;
+  const row = await db.prepare(
+    `SELECT * FROM agent_runs WHERE job_id = ?1 AND user_key = ?2 LIMIT 1`
+  ).bind(jobId, userKey).first<AgentRunRow>();
+  return row ? safeJsonParse<AgentRunState | undefined>(row.state_json, undefined) : undefined;
+}
+
+async function persistAgentRunState(
+  db: D1Database,
+  job: JobRow,
+  state: AgentRunState
+): Promise<void> {
+  const finishedAt = isTerminalRunStatus(state.terminal_status) ? state.updated_at : null;
+  await db.prepare(
+    `INSERT INTO agent_runs (
+       run_id, job_id, conversation_id, user_key, status, goal,
+       state_json, created_at, updated_at, finished_at
+     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+     ON CONFLICT(run_id) DO UPDATE SET
+       status = excluded.status,
+       goal = excluded.goal,
+       state_json = excluded.state_json,
+       updated_at = excluded.updated_at,
+       finished_at = excluded.finished_at`
+  ).bind(
+    state.run_id,
+    job.job_id,
+    job.conversation_id,
+    job.user_key,
+    state.terminal_status,
+    state.goal,
+    JSON.stringify(redactSensitiveData(state)),
+    state.created_at,
+    state.updated_at,
+    finishedAt
+  ).run();
+}
+
+async function persistOperationJournalEvent(
+  db: D1Database,
+  job: JobRow,
+  runId: string,
+  event: WriteOperationJournalEvent
+): Promise<void> {
+  const now = nowIso();
+  const journalId = `journal_${runId}_${event.plan_id}_${event.operation_id}_${event.attempt}`;
+  const safeEvent = redactSensitiveData(event) as WriteOperationJournalEvent;
+  await db.prepare(
+    `INSERT INTO operation_journal (
+       journal_id, run_id, job_id, plan_id, operation_id, phase, status, attempt,
+       precondition_json, expected_effect_json, request_json, result_json,
+       error_json, postcondition_json, created_at, updated_at
+     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+     ON CONFLICT(run_id, plan_id, operation_id, attempt) DO UPDATE SET
+       status = excluded.status,
+       precondition_json = COALESCE(excluded.precondition_json, operation_journal.precondition_json),
+       expected_effect_json = COALESCE(excluded.expected_effect_json, operation_journal.expected_effect_json),
+       request_json = COALESCE(excluded.request_json, operation_journal.request_json),
+       result_json = COALESCE(excluded.result_json, operation_journal.result_json),
+       error_json = COALESCE(excluded.error_json, operation_journal.error_json),
+       postcondition_json = COALESCE(excluded.postcondition_json, operation_journal.postcondition_json),
+       updated_at = excluded.updated_at`
+  ).bind(
+    journalId,
+    runId,
+    job.job_id,
+    event.plan_id,
+    event.operation_id,
+    event.phase,
+    event.status,
+    event.attempt,
+    toLimitedJson(safeEvent.precondition, MAX_JOB_EVENT_PAYLOAD_CHARS),
+    toLimitedJson(safeEvent.expected_effect, MAX_JOB_EVENT_PAYLOAD_CHARS),
+    toLimitedJson(safeEvent.request, MAX_JOB_EVENT_PAYLOAD_CHARS),
+    toLimitedJson(safeEvent.result, MAX_JOB_EVENT_PAYLOAD_CHARS),
+    toLimitedJson(safeEvent.error, MAX_JOB_EVENT_PAYLOAD_CHARS),
+    toLimitedJson(safeEvent.postcondition, MAX_JOB_EVENT_PAYLOAD_CHARS),
+    now,
+    now
+  ).run();
+}
+
+async function persistVerificationJournal(
+  db: D1Database,
+  runId: string,
+  planId: string,
+  attempt: number,
+  report: AppBuilderVerificationReport
+): Promise<void> {
+  const now = nowIso();
+  for (const result of report.operation_results) {
+    await db.prepare(
+      `UPDATE operation_journal
+       SET status = ?1, postcondition_json = ?2, updated_at = ?3
+       WHERE run_id = ?4 AND plan_id = ?5 AND operation_id = ?6 AND attempt = ?7`
+    ).bind(
+      result.status === "passed" ? "succeeded" : "verification_failed",
+      toLimitedJson(redactSensitiveData({
+        verified: result.status === "passed",
+        status: result.status,
+        observed_state: result.observed_state,
+        node_id: result.node_id,
+        reference: result.reference,
+        actual_record: result.actual_record,
+        mismatches: result.mismatches,
+        relations_checked: result.relations_checked,
+        evidence: result.evidence,
+        error: result.error
+      }), MAX_JOB_EVENT_PAYLOAD_CHARS),
+      now,
+      runId,
+      planId,
+      result.operation_id,
+      attempt
+    ).run();
+  }
+  if (report.cache_results.length) {
+    const cacheVerified = report.cache_results.every(result => result.status === "passed");
+    await db.prepare(
+      `UPDATE operation_journal
+       SET status = ?1, postcondition_json = ?2, updated_at = ?3
+       WHERE run_id = ?4 AND plan_id = ?5
+         AND operation_id = 'auto_deploy_window_cache' AND attempt = ?6`
+    ).bind(
+      cacheVerified ? "succeeded" : "verification_failed",
+      toLimitedJson(redactSensitiveData({
+        verified: cacheVerified,
+        cache_results: report.cache_results
+      }), MAX_JOB_EVENT_PAYLOAD_CHARS),
+      now,
+      runId,
+      planId,
+      attempt
+    ).run();
+  }
+}
+
+async function loadResumeJournalSnapshot(
+  db: D1Database,
+  runId: string,
+  planId: string
+): Promise<{
+  attempt: number;
+  has_execution_progress: boolean;
+  verified_operations: Record<string, Record<string, unknown>>;
+}> {
+  const result = await db.prepare(
+    `SELECT operation_id, plan_id, status, attempt, postcondition_json
+     FROM operation_journal
+     WHERE run_id = ?1
+     ORDER BY attempt DESC, updated_at ASC`
+  ).bind(runId).all<OperationJournalRow>();
+  const rows = result.results ?? [];
+  const activeRows = rows.filter(row => row.plan_id === planId);
+  const attempt = activeRows.length ? Math.max(...activeRows.map(row => Number(row.attempt || 1))) : 0;
+  const latestRows = activeRows.filter(row => Number(row.attempt || 1) === attempt);
+  const verifiedOperations: Record<string, Record<string, unknown>> = {};
+
+  for (const row of rows) {
+    if (Object.prototype.hasOwnProperty.call(verifiedOperations, row.operation_id)) continue;
+    const postcondition = safeJsonParse<Record<string, unknown>>(row.postcondition_json, {});
+    if (postcondition.verified !== true) continue;
+    const reference = postcondition.reference
+      && typeof postcondition.reference === "object"
+      && !Array.isArray(postcondition.reference)
+      ? postcondition.reference as Record<string, unknown>
+      : postcondition.actual_record
+        && typeof postcondition.actual_record === "object"
+        && !Array.isArray(postcondition.actual_record)
+        ? postcondition.actual_record as Record<string, unknown>
+        : undefined;
+    verifiedOperations[row.operation_id] = reference ?? {};
+  }
+
+  return {
+    attempt,
+    has_execution_progress: latestRows.some(row => row.status !== "pending"),
+    verified_operations: verifiedOperations
+  };
+}
+
+async function observePendingPlanForResume(
+  db: D1Database,
+  env: Env,
+  state: ZilcodeSessionState,
+  runId: string,
+  plan: PendingChange,
+  approvedEnvelope: ApprovedChangeEnvelope,
+  journalAttempt: number,
+  verifiedOperations: Record<string, Record<string, unknown>>,
+  debugSteps: DebugStep[]
+): Promise<{ write_result: Record<string, unknown>; verification: AppBuilderVerificationReport }> {
+  let writeResult = buildPendingChangeVerificationInput(plan, verifiedOperations);
+  addDebugStep(debugSteps, "pending_action.resume_observe", "start", "Đọc lại trạng thái thật trước khi resume apply.", {
+    plan_id: plan.plan_id,
+    journal_attempt: journalAttempt,
+    previously_verified: Object.keys(verifiedOperations)
+  });
+  let verification = await verifyAppBuilderWriteResult(env, state.session, writeResult);
+  const combinedReferences = {
+    ...verifiedOperations,
+    ...verification.verified_operations
+  };
+  if (Object.keys(combinedReferences).length > Object.keys(verifiedOperations).length) {
+    writeResult = buildPendingChangeVerificationInput(plan, combinedReferences);
+    verification = await verifyAppBuilderWriteResult(env, state.session, writeResult);
+  }
+  const operationResults = new Map(
+    verification.operation_results.map(result => [result.operation_id, result])
+  );
+  for (const operation of approvedEnvelope.operations) {
+    if (operationResults.has(operation.operation_id)) continue;
+    if (!Object.prototype.hasOwnProperty.call(verifiedOperations, operation.operation_id)) continue;
+    const reference = verifiedOperations[operation.operation_id];
+    operationResults.set(operation.operation_id, {
+      operation_id: operation.operation_id,
+      target: operation.target,
+      action: operation.original_action,
+      status: "passed",
+      observed_state: operation.original_action === "delete" ? "absent" : "present",
+      reference,
+      actual_record: reference,
+      mismatches: [],
+      relations_checked: []
+    });
+  }
+  verification = aggregateRecoveryVerification(
+    operationResults,
+    new Map(verification.cache_results.map(result => [result.windowid, result])),
+    approvedEnvelope.operations.map(operation => operation.operation_id)
+  );
+  await persistVerificationJournal(db, runId, plan.plan_id, journalAttempt, verification);
+  addDebugStep(
+    debugSteps,
+    "pending_action.resume_observe",
+    verification.ok ? "ok" : "error",
+    "Đã đối chiếu journal với metadata hiện tại.",
+    { plan_id: plan.plan_id, verification: verification.summary }
+  );
+  return { write_result: writeResult, verification };
+}
+
+function parseApprovedChangeEnvelope(value: unknown): ApprovedChangeEnvelope | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  if (record.source !== "confirmed_plan" || !Array.isArray(record.operations)) return undefined;
+  const operations = record.operations.filter(operation =>
+    Boolean(operation) && typeof operation === "object" && !Array.isArray(operation)
+  ) as ApprovedChangeEnvelope["operations"];
+  if (!operations.length || operations.some(operation =>
+    !operation.operation_id
+    || !["create", "update", "delete"].includes(operation.original_action)
+    || !operation.target
+    || !operation.collection
+    || !Array.isArray(operation.allowed_fields)
+  )) return undefined;
+  return {
+    source: "confirmed_plan",
+    plan_id: typeof record.plan_id === "string" ? record.plan_id : undefined,
+    operations
+  };
+}
+
+async function loadApprovedEnvelopeFromPendingPlan(
+  env: Env,
+  planId: string
+): Promise<ApprovedChangeEnvelope | undefined> {
+  const raw = await env.CHUNKS.get(`app_builder_change:${planId}`);
+  if (!raw) return undefined;
+  const plan = safeJsonParse<PendingChange | undefined>(raw, undefined);
+  if (!plan) return undefined;
+  const storedEnvelope = parseApprovedChangeEnvelope(plan.approved_change_envelope);
+  if (storedEnvelope) return storedEnvelope;
+  if (!Array.isArray(plan.operations) || !plan.operations.length) return undefined;
+  return buildApprovedChangeEnvelope(
+    planId,
+    plan.operations.map(operation => ({
+      id: operation.id,
+      action: operation.action,
+      target: operation.target,
+      collection: operation.collection,
+      record: operation.record,
+      id_value: operation.id_value,
+      where: operation.where
+    }))
+  );
+}
+
+async function persistPhaseCheckpoints(
+  db: D1Database,
+  runId: string,
+  report: AppBuilderVerificationReport
+): Promise<void> {
+  const phases = new Map<string, OperationVerificationResult[]>();
+  for (const result of report.operation_results) {
+    const phase = result.phase || "cache_verification";
+    phases.set(phase, [...(phases.get(phase) ?? []), result]);
+  }
+
+  if (report.cache_results.length) {
+    const cacheResults: OperationVerificationResult[] = report.cache_results.map((result, index) => ({
+      operation_id: `verify_cache_${index + 1}`,
+      target: "cache",
+      action: "update",
+      phase: "cache_verification",
+      status: result.status,
+      observed_state: result.status === "passed" ? "present" : "unknown",
+      mismatches: [],
+      relations_checked: [],
+      error: result.error
+    }));
+    phases.set("cache_verification", [...(phases.get("cache_verification") ?? []), ...cacheResults]);
+  }
+
+  for (const [phase, results] of phases) {
+    const status = results.every(result => result.status === "passed")
+      ? "succeeded"
+      : "verification_failed";
+    const now = nowIso();
+    await db.prepare(
+      `INSERT INTO agent_phase_checkpoints (
+         checkpoint_id, run_id, phase, status, state_json, created_at, updated_at
+       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+       ON CONFLICT(run_id, phase) DO UPDATE SET
+         status = excluded.status,
+         state_json = excluded.state_json,
+         updated_at = excluded.updated_at`
+    ).bind(
+      `checkpoint_${runId}_${phase}`,
+      runId,
+      phase,
+      status,
+      toLimitedJson(redactSensitiveData({ results }), MAX_JOB_EVENT_PAYLOAD_CHARS),
+      now,
+      now
+    ).run();
+  }
 }
 
 function addSeconds(date: Date, seconds: number): string {
@@ -350,6 +744,19 @@ async function getJobAnyOwner(db: D1Database, jobId: string): Promise<JobRow | n
   return db.prepare(`SELECT * FROM jobs WHERE job_id = ?1`).bind(jobId).first<JobRow>();
 }
 
+interface AgentRunRow {
+  run_id: string;
+  job_id: string | null;
+  conversation_id: string;
+  user_key: string;
+  status: AgentRunState["terminal_status"];
+  goal: string;
+  state_json: string;
+  created_at: string;
+  updated_at: string;
+  finished_at: string | null;
+}
+
 async function getActiveConversationJob(db: D1Database, userKey: string, conversationId: string): Promise<JobRow | null> {
   return db.prepare(
     `SELECT * FROM jobs
@@ -393,23 +800,39 @@ async function listJobEvents(db: D1Database, userKey: string, jobId: string): Pr
 async function updateJob(
   db: D1Database,
   job: Pick<JobRow, "job_id" | "user_key">,
-  patch: Partial<Pick<JobRow, "status" | "stage" | "progress_text" | "error" | "finished_at" | "auth_context_json">>
+  patch: Partial<Pick<JobRow,
+    "status" | "stage" | "progress_text" | "error" | "finished_at" |
+    "auth_context_json" | "lease_expires_at" | "last_error_json"
+  >>
 ): Promise<void> {
   const current = await getJob(db, job.user_key, job.job_id);
   if (!current) return;
   const has = (key: keyof typeof patch) => Object.prototype.hasOwnProperty.call(patch, key);
+  const nextStatus = has("status") ? patch.status : current.status;
+  const clearsLease = Boolean(nextStatus && [
+    "waiting_confirmation", "succeeded", "failed", "cancelled", "expired"
+  ].includes(nextStatus));
+  const refreshedLease = nextStatus === "running"
+    ? addSeconds(new Date(), JOB_LEASE_SECONDS)
+    : current.lease_expires_at;
   await db.prepare(
     `UPDATE jobs
      SET status = ?1, stage = ?2, progress_text = ?3, error = ?4, finished_at = ?5,
-         auth_context_json = ?6, updated_at = ?7
-     WHERE job_id = ?8 AND user_key = ?9`
+         auth_context_json = ?6, lease_expires_at = ?7, last_error_json = ?8, updated_at = ?9
+     WHERE job_id = ?10 AND user_key = ?11`
   ).bind(
-    has("status") ? patch.status : current.status,
+    nextStatus,
     has("stage") ? patch.stage : current.stage,
     has("progress_text") ? patch.progress_text : current.progress_text,
-    has("error") ? patch.error : current.error,
+    has("error") && patch.error
+      ? redactSensitiveString(patch.error)
+      : has("error") ? patch.error : current.error,
     has("finished_at") ? patch.finished_at : current.finished_at,
     patch.auth_context_json === undefined ? current.auth_context_json : patch.auth_context_json,
+    patch.lease_expires_at === undefined
+      ? clearsLease ? null : refreshedLease
+      : patch.lease_expires_at,
+    patch.last_error_json === undefined ? current.last_error_json : patch.last_error_json,
     nowIso(),
     job.job_id,
     job.user_key
@@ -418,11 +841,13 @@ async function updateJob(
 
 async function claimQueuedJob(db: D1Database, job: JobRow): Promise<JobRow | null> {
   const now = nowIso();
+  const leaseExpiresAt = addSeconds(new Date(), JOB_LEASE_SECONDS);
   const claimed = await db.prepare(
     `UPDATE jobs
-     SET status = 'running', stage = 'starting', progress_text = 'Agent job đang bắt đầu.', updated_at = ?1
-     WHERE job_id = ?2 AND user_key = ?3 AND status = 'queued'`
-  ).bind(now, job.job_id, job.user_key).run();
+     SET status = 'running', stage = 'starting', progress_text = 'Agent job đang bắt đầu.',
+         attempt_count = attempt_count + 1, lease_expires_at = ?2, updated_at = ?1
+     WHERE job_id = ?3 AND user_key = ?4 AND status = 'queued'`
+  ).bind(now, leaseExpiresAt, job.job_id, job.user_key).run();
 
   if (Number(claimed.meta?.changes ?? 0) < 1) return null;
   return {
@@ -430,6 +855,8 @@ async function claimQueuedJob(db: D1Database, job: JobRow): Promise<JobRow | nul
     status: "running",
     stage: "starting",
     progress_text: "Agent job đang bắt đầu.",
+    attempt_count: Number(job.attempt_count || 0) + 1,
+    lease_expires_at: leaseExpiresAt,
     updated_at: now
   };
 }
@@ -446,13 +873,24 @@ async function setAssistantMessageFailed(
      SET content = ?1, status = 'failed', error = ?2, debug_steps_json = ?3, updated_at = ?4
      WHERE message_id = ?5 AND user_key = ?6`
   ).bind(
-    `Không xử lý được yêu cầu: ${error}`,
-    error,
-    toJson(debugSteps ?? []),
+    `Không xử lý được yêu cầu: ${redactSensitiveString(error)}`,
+    redactSensitiveString(error),
+    toJson(redactSensitiveData(debugSteps ?? [])),
     nowIso(),
     job.assistant_message_id,
     job.user_key
   ).run();
+}
+
+async function redactProcessedUserMessage(db: D1Database, job: JobRow): Promise<void> {
+  if (!job.user_message_id) return;
+  const message = await getMessage(db, job.user_key, job.user_message_id);
+  if (!message) return;
+  const redacted = redactSensitiveString(message.content);
+  if (redacted === message.content) return;
+  await db.prepare(
+    `UPDATE messages SET content = ?1, updated_at = ?2 WHERE message_id = ?3 AND user_key = ?4`
+  ).bind(redacted, nowIso(), job.user_message_id, job.user_key).run();
 }
 
 function truncateMessageContent(content: string): string {
@@ -522,7 +960,7 @@ async function updateConversationActionState(
       assistant_message_id: job.assistant_message_id,
       plan_id: actionState.plan_id,
       status: "waiting_confirmation",
-      payload_json: toJson(actionState),
+      payload_json: toJson(redactSensitiveData(actionState)),
       created_at: now,
       updated_at: now,
       expires_at: addSeconds(new Date(), 60 * 30)
@@ -595,6 +1033,7 @@ async function dispatchJob(env: Env, ctx: ExecutionContext | undefined, jobId: s
 
 async function failJob(db: D1Database, job: JobRow, error: unknown, debugSteps?: DebugStep[]): Promise<void> {
   const message = error instanceof Error ? error.message : String(error);
+  await redactProcessedUserMessage(db, job);
   await setAssistantMessageFailed(db, job, message, debugSteps);
   await updateJob(db, job, {
     status: "failed",
@@ -607,14 +1046,69 @@ async function failJob(db: D1Database, job: JobRow, error: unknown, debugSteps?:
   await insertJobEvent(db, job, "failed", { error: message });
 }
 
+async function scheduleJobRetry(
+  db: D1Database,
+  env: Env,
+  job: JobRow,
+  error: unknown
+): Promise<boolean> {
+  const maxAttempts = Math.max(1, Number(job.max_attempts || JOB_MAX_ATTEMPTS));
+  const attemptCount = Math.max(0, Number(job.attempt_count || 0));
+  const queue = env.AGENT_JOBS;
+  if (!canScheduleJobRetry({
+    error,
+    attempt_count: attemptCount,
+    max_attempts: maxAttempts,
+    queue_available: Boolean(queue)
+  })) return false;
+  if (!queue) return false;
+
+  const message = error instanceof Error ? error.message : String(error);
+  await updateJob(db, job, {
+    status: "queued",
+    stage: "retry_scheduled",
+    progress_text: `Lỗi tạm thời; sẽ thử lại (${attemptCount}/${maxAttempts}).`,
+    error: null,
+    lease_expires_at: null,
+    last_error_json: toLimitedJson(redactSensitiveData({
+      message,
+      retryable: true,
+      attempt: attemptCount,
+      recorded_at: nowIso()
+    }), MAX_JOB_EVENT_PAYLOAD_CHARS)
+  });
+  await insertJobEvent(db, job, "retry_scheduled", {
+    attempt: attemptCount,
+    max_attempts: maxAttempts,
+    delay_seconds: JOB_RETRY_DELAY_SECONDS,
+    error: message
+  });
+  await queue.send(
+    { job_id: job.job_id },
+    { delaySeconds: JOB_RETRY_DELAY_SECONDS }
+  );
+  return true;
+}
+
 function buildApplyChangeAnswer(result: Record<string, unknown>): string {
   if (result.ok === true) {
+    const verification = asVerificationSummary(result.verification);
     return [
-      "Đã thực hiện xong kế hoạch App Builder.",
+      "Đã thực hiện và kiểm tra xong kế hoạch App Builder.",
       `Plan ID: ${String(result.plan_id ?? "")}`,
       `Số bước đã ghi: ${String(result.applied_count ?? 0)}.`,
-      "",
-      "Bước tiếp theo nên làm là đọc lại App Builder graph để kiểm tra thay đổi đã đúng."
+      `Số bước đã xác minh: ${String(verification?.passed ?? 0)}.`,
+      verification?.caches_checked ? `Cache window đã kiểm tra: ${String(verification.caches_checked)}.` : ""
+    ].filter(Boolean).join("\n");
+  }
+
+  if (result.requires_new_confirmation === true && result.repair_plan_id) {
+    return [
+      "Kế hoạch ban đầu chưa đạt đầy đủ postcondition.",
+      `Đã xác minh được ${String(asVerificationSummary(result.verification)?.passed ?? 0)} bước.`,
+      "Phần sửa tiếp theo cần đổi loại thao tác hoặc mở rộng phạm vi so với kế hoạch đã xác nhận, nên hệ thống chưa tự thực hiện.",
+      `Plan sửa mới: ${String(result.repair_plan_id)}.`,
+      "Hãy xem các bước của plan mới và bấm xác nhận nếu đồng ý."
     ].join("\n");
   }
 
@@ -623,15 +1117,33 @@ function buildApplyChangeAnswer(result: Record<string, unknown>): string {
     : null;
 
   return [
-    "Kế hoạch chưa được thực hiện thành công.",
+    "Kế hoạch chưa đạt trạng thái hoàn tất đã xác minh.",
     `Đã ghi được: ${String(result.applied_count ?? 0)} bước.`,
-    `Số bước lỗi: ${String(result.failed_count ?? 0)}.`,
+    `Số bước lỗi khi ghi: ${String(result.failed_count ?? 0)}.`,
     failed ? `Dừng tại: ${String(failed.operation_id ?? "")}.` : "",
     "",
-    `Lỗi chính: ${String(failed?.error ?? result.error ?? "Không rõ lỗi.")}`,
+    `Lỗi chính: ${String(failed?.error ?? result.error ?? verificationError(result.verification) ?? "Không rõ lỗi.")}`,
     "",
-    "Tôi chưa coi thay đổi này là hoàn tất. Cần đọc lại graph, sửa plan theo lỗi trên rồi chuẩn bị kế hoạch mới nếu cần."
+    "Hệ thống chưa báo thành công vì postcondition chưa đạt. Phần đã ghi được giữ nguyên để lập residual plan, không apply lại plan cũ."
   ].filter(Boolean).join("\n");
+}
+
+function asVerificationSummary(value: unknown): Record<string, unknown> | undefined {
+  const report = value && typeof value === "object" ? value as Record<string, unknown> : undefined;
+  return report?.summary && typeof report.summary === "object"
+    ? report.summary as Record<string, unknown>
+    : undefined;
+}
+
+function verificationError(value: unknown): string | undefined {
+  const report = value && typeof value === "object" ? value as Record<string, unknown> : undefined;
+  const results = Array.isArray(report?.operation_results) ? report.operation_results : [];
+  const failed = results.find(result =>
+    result
+    && typeof result === "object"
+    && (result as Record<string, unknown>).status !== "passed"
+  ) as Record<string, unknown> | undefined;
+  return failed?.error ? String(failed.error) : undefined;
 }
 
 async function runMessageJob(db: D1Database, env: Env, job: JobRow, state: ZilcodeSessionState): Promise<void> {
@@ -656,7 +1168,24 @@ async function runMessageJob(db: D1Database, env: Env, job: JobRow, state: Zilco
   });
   await insertJobEvent(db, job, "agent_started", { mode: job.mode });
 
-  const result = await runAgenticLoop(userMessage.content, env, history, debugSteps, state, job.mode);
+  const initialRunState = await loadAgentRunForJob(db, job);
+  const result = await runAgenticLoop(
+    userMessage.content,
+    env,
+    history,
+    debugSteps,
+    state,
+    job.mode,
+    {
+      run_id: initialRunState?.run_id || `run_${job.job_id}`,
+      job_id: job.job_id,
+      conversation_id: job.conversation_id,
+      user_key: job.user_key,
+      initial_state: initialRunState,
+      on_state_change: currentState => persistAgentRunState(db, job, currentState)
+    }
+  );
+  await redactProcessedUserMessage(db, job);
   const pendingAction = await updateConversationActionState(db, job, result.action_state);
   const status = responseStatus(result.action_state);
   const now = nowIso();
@@ -670,8 +1199,8 @@ async function runMessageJob(db: D1Database, env: Env, job: JobRow, state: Zilco
     result.answer,
     toJson(result.toolsCalled),
     toJson(result.sources ?? []),
-    toJson(debugSteps ?? []),
-    toJson(result.action_state),
+    toJson(redactSensitiveData(debugSteps ?? [])),
+    toJson(redactSensitiveData(result.action_state)),
     now,
     job.assistant_message_id,
     job.user_key
@@ -732,25 +1261,317 @@ async function runApplyPendingActionJob(db: D1Database, env: Env, job: JobRow, s
     plan_id: planId
   });
 
-  const writeResult = await runAppBuilderWriteTool(env, state.session, "app_builder_apply_change", { plan_id: planId });
-  addDebugStep(debugSteps, "pending_action.apply", "ok", "app_builder_apply_change đã trả kết quả.", {
-    ok: writeResult.ok,
-    status: writeResult.status,
-    plan_id: writeResult.plan_id
+  const pendingActionPayload = safeJsonParse<Record<string, unknown>>(pendingAction.payload_json, {});
+  const confirmedEnvelope = parseApprovedChangeEnvelope(pendingActionPayload.approved_change_envelope);
+
+  let runState = await loadAgentRunByJobId(db, job.user_key, pendingAction.job_id);
+  if (!runState) {
+    runState = createAgentRunState(`Apply confirmed App Builder plan ${planId}`, {
+      run_id: `run_apply_${actionId}`,
+      job_id: job.job_id,
+      conversation_id: job.conversation_id,
+      user_key: job.user_key
+    });
+    runState.approved_change_envelope = confirmedEnvelope as unknown as Record<string, unknown>
+      ?? { plan_id: planId };
+    await persistAgentRunState(db, job, runState);
+  }
+
+  const approvedEnvelope = confirmedEnvelope
+    ?? parseApprovedChangeEnvelope(runState.approved_change_envelope)
+    ?? await loadApprovedEnvelopeFromPendingPlan(env, planId);
+  if (!approvedEnvelope) {
+    throw new Error("Không đọc được approved change envelope từ pending plan; dừng apply để tránh mở rộng phạm vi.");
+  }
+  runState.approved_change_envelope = approvedEnvelope as unknown as Record<string, unknown>;
+  runState.residual_plan_ids = runState.residual_plan_ids ?? [];
+  runState.active_plan_id = runState.active_plan_id || planId;
+  await persistAgentRunState(db, job, runState);
+
+  const resumePlanId = runState.active_plan_id;
+  const resumeJournal = await loadResumeJournalSnapshot(db, runState.run_id, resumePlanId);
+  let initialObservation: {
+    write_result: Record<string, unknown>;
+    verification: AppBuilderVerificationReport;
+  } | undefined;
+  if (resumeJournal.has_execution_progress) {
+    const resumePlan = await loadPendingChangePlan(env, resumePlanId);
+    if (!resumePlan) {
+      throw new Error(
+        `Không thể resume plan ${resumePlanId}: pending plan không còn nhưng journal cho thấy apply đã bắt đầu.`
+      );
+    }
+    await updateJob(db, job, {
+      status: "running",
+      stage: "resume_observation",
+      progress_text: "Đang đối chiếu operation journal với metadata thật trước khi tiếp tục."
+    });
+    initialObservation = await observePendingPlanForResume(
+      db,
+      env,
+      state,
+      runState.run_id,
+      resumePlan,
+      approvedEnvelope,
+      resumeJournal.attempt,
+      resumeJournal.verified_operations,
+      debugSteps
+    );
+  }
+
+  const recovery = await runApplyRecovery({
+    original_plan_id: planId,
+    approved_change_envelope: approvedEnvelope,
+    apply_repair_limit: runState.budgets.apply_repair.limit,
+    prepare_repair_limit: runState.budgets.prepare_repair.limit,
+    initial_apply_repairs: runState.repair_attempts.apply,
+    initial_prepare_repairs: runState.repair_attempts.prepare,
+    initial_current_plan_id: resumePlanId,
+    initial_observation: initialObservation
+  }, {
+    execute_attempt: async (currentPlanId, applyAttempt, verifiedOperations) => {
+      const attemptResult = await executeVerifiedApplyAttempt(
+        db,
+        env,
+        job,
+        state,
+        runState.run_id,
+        currentPlanId,
+        applyAttempt,
+        debugSteps,
+        verifiedOperations
+      );
+      runState.verification_results = [
+        ...runState.verification_results,
+        redactSensitiveData({
+          attempt: applyAttempt,
+          plan_id: currentPlanId,
+          report: attemptResult.verification
+        }) as Record<string, unknown>
+      ];
+      runState.updated_at = nowIso();
+      await persistAgentRunState(db, job, runState);
+      return {
+        write_result: attemptResult.writeResult,
+        verification: attemptResult.verification
+      };
+    },
+    prepare_plan: async (operations, kind, context) => {
+      await updateJob(db, job, {
+        status: "running",
+        stage: kind === "residual" ? "prepare_residual" : "prepare_scope_expansion",
+        progress_text: kind === "residual"
+          ? "Đang chuẩn bị residual plan cho phần chưa đạt postcondition."
+          : "Đang chuẩn bị plan mở rộng để yêu cầu xác nhận lại."
+      });
+      addDebugStep(debugSteps, `pending_action.${kind}_prepare`, "start", "Chuẩn bị repair plan mới.", {
+        operation_count: operations.length,
+        ...context
+      });
+      const prepared = await runAppBuilderWriteTool(
+        env,
+        state.session,
+        "app_builder_prepare_change",
+        {
+          intent: `${kind}_repair:${planId}`,
+          user_summary: kind === "residual"
+            ? "Tự sửa phần metadata chưa đạt postcondition trong phạm vi plan đã xác nhận."
+            : "Repair thay đổi action/phạm vi nên bắt buộc xác nhận lại.",
+          operations
+        }
+      );
+      addDebugStep(
+        debugSteps,
+        `pending_action.${kind}_prepare`,
+        prepared.valid === true ? "ok" : "error",
+        prepared.valid === true ? "Đã tạo repair plan mới." : "Repair plan không vượt qua prepare validation.",
+        { plan_id: prepared.plan_id, blocking_errors: prepared.blocking_errors }
+      );
+      return {
+        ...prepared,
+        valid: prepared.valid === true,
+        plan_id: typeof prepared.plan_id === "string" ? prepared.plan_id : undefined
+      };
+    },
+    repair_invalid_prepare: async (operations, blockingErrors, repairAttempt) => {
+      await updateJob(db, job, {
+        status: "running",
+        stage: "repair_invalid_prepare",
+        progress_text: `Đang sửa residual plan không hợp lệ (lần ${repairAttempt}).`
+      });
+      const repaired = await repairInvalidPrepareOperations(env, {
+        operations,
+        blocking_errors: blockingErrors,
+        attempt: repairAttempt
+      });
+      addDebugStep(
+        debugSteps,
+        "pending_action.prepare_repair",
+        repaired.operations ? "ok" : "error",
+        repaired.operations
+          ? "Đã tạo đề xuất sửa operation có cấu trúc; backend sẽ kiểm tra lại approved envelope và live schema."
+          : "Không thể tự sửa operation mà vẫn giữ nguyên phạm vi đã xác nhận.",
+        {
+          attempt: repairAttempt,
+          model: repaired.model,
+          operation_count: repaired.operations?.length ?? 0,
+          error: repaired.error
+        }
+      );
+      return repaired.operations;
+    },
+    on_event: async event => {
+      if (event.type === "residual_prepared") {
+        runState.repair_attempts.apply = Number(event.attempt ?? runState.repair_attempts.apply + 1);
+        runState.budgets.apply_repair.used = runState.repair_attempts.apply;
+        runState.terminal_status = "repairing";
+        if (event.plan_id) {
+          runState.active_plan_id = event.plan_id;
+          runState.residual_plan_ids = [...new Set([...(runState.residual_plan_ids ?? []), event.plan_id])];
+        }
+      }
+      if (event.type === "resume_observed") {
+        runState.terminal_status = "repairing";
+      }
+      if (event.type === "prepare_repair_attempt") {
+        runState.repair_attempts.prepare = Math.max(
+          runState.repair_attempts.prepare,
+          Number(event.attempt ?? 0)
+        );
+        runState.budgets.prepare_repair.used = runState.repair_attempts.prepare;
+        runState.terminal_status = "repairing";
+      }
+      runState.updated_at = nowIso();
+      await persistAgentRunState(db, job, runState);
+    }
   });
 
-  const answer = buildApplyChangeAnswer(writeResult);
-  const actionState: AgentActionState = {
+  const finalWriteResult = recovery.final_write_result;
+  const recoveryPlanIds = new Set([
+    planId,
+    resumePlanId,
+    recovery.current_plan_id,
+    ...(runState.residual_plan_ids ?? [])
+  ]);
+  const verification = recovery.verification;
+  const residualPlanId = recovery.residual_plan_id;
+  const scopeExpansionRepair = recovery.repair_plan as Record<string, unknown> | undefined;
+  const repairBlockers = recovery.blockers;
+  const totalApplied = recovery.totals.applied;
+  const totalFailed = recovery.totals.failed;
+  const totalSkipped = recovery.totals.skipped;
+  const result: Record<string, unknown> = {
+    ...finalWriteResult,
+    plan_id: planId,
+    last_plan_id: recovery.current_plan_id,
+    residual_plan_id: residualPlanId,
+    ok: verification.ok,
+    status: recovery.status,
+    verification,
+    attempts: recovery.attempts,
+    repair_blockers: repairBlockers,
+    applied_count: totalApplied,
+    failed_count: totalFailed,
+    skipped_count: totalSkipped,
+    original_apply_status: recovery.attempts[0]?.apply_status
+  };
+  if (recovery.status === "waiting_confirmation" && scopeExpansionRepair) {
+    result.status = "waiting_confirmation";
+    result.requires_new_confirmation = true;
+    result.repair_plan_id = scopeExpansionRepair.plan_id;
+    result.repair_plan = scopeExpansionRepair;
+  }
+
+  runState.completed_operations = verification.operation_results
+    .filter(item => item.status === "passed")
+    .map(item => ({
+      operation_id: item.operation_id,
+      target: item.target,
+      action: item.action,
+      reference: item.reference,
+      verified_at: nowIso()
+    }));
+  runState.failed_operation = verification.operation_results
+    .find(item => item.status !== "passed") as unknown as Record<string, unknown> | undefined
+    ?? repairBlockers[0];
+  runState.phase_checkpoints = Object.fromEntries(
+    Object.entries(groupVerificationByPhase(verification))
+      .map(([phase, ok]) => [phase, ok ? "succeeded" : "verification_failed"])
+  );
+  runState.repair_attempts.apply = recovery.apply_repairs_used;
+  runState.repair_attempts.prepare = recovery.prepare_repairs_used;
+  runState.budgets.apply_repair.used = recovery.apply_repairs_used;
+  runState.budgets.prepare_repair.used = recovery.prepare_repairs_used;
+  runState.terminal_status = verification.ok
+    ? "succeeded"
+    : scopeExpansionRepair
+      ? "waiting_confirmation"
+      : "verification_failed";
+  if (scopeExpansionRepair) {
+    runState.prepared_operations = Array.isArray(scopeExpansionRepair.operations)
+      ? scopeExpansionRepair.operations.filter(item => item && typeof item === "object") as Record<string, unknown>[]
+      : [];
+    runState.approved_change_envelope = scopeExpansionRepair.approved_change_envelope as Record<string, unknown>;
+    runState.active_plan_id = typeof scopeExpansionRepair.plan_id === "string"
+      ? scopeExpansionRepair.plan_id
+      : undefined;
+    runState.residual_plan_ids = [];
+    runState.repair_attempts.apply = 0;
+    runState.budgets.apply_repair.used = 0;
+  }
+  if (verification.ok) runState.active_plan_id = undefined;
+  runState.blocker = verification.ok ? undefined : repairBlockers[0];
+  runState.updated_at = nowIso();
+  await persistAgentRunState(db, job, runState);
+
+  const supersededPlanIds = new Set(
+    [...recoveryPlanIds].filter(candidate => candidate && candidate !== scopeExpansionRepair?.plan_id)
+  );
+  for (const supersededPlanId of supersededPlanIds) {
+    try {
+      await deletePendingChangePlan(env, supersededPlanId);
+    } catch (error) {
+      addDebugStep(debugSteps, "pending_action.plan_cleanup", "error", "Không xóa được pending plan đã dùng.", {
+        plan_id: supersededPlanId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+
+  const answer = buildApplyChangeAnswer(result);
+  const applyActionState: AgentActionState = {
     kind: "apply_change",
-    plan_id: typeof writeResult.plan_id === "string" ? writeResult.plan_id : planId,
-    status: typeof writeResult.status === "string" ? writeResult.status : undefined,
-    ok: typeof writeResult.ok === "boolean" ? writeResult.ok : undefined,
-    applied_count: typeof writeResult.applied_count === "number" ? writeResult.applied_count : undefined,
-    failed_count: typeof writeResult.failed_count === "number" ? writeResult.failed_count : undefined,
-    skipped_count: typeof writeResult.skipped_count === "number" ? writeResult.skipped_count : undefined,
-    error: typeof writeResult.error === "string" ? writeResult.error : undefined,
+    plan_id: typeof result.plan_id === "string" ? result.plan_id : planId,
+    status: typeof result.status === "string" ? result.status : undefined,
+    ok: verification.ok,
+    applied_count: totalApplied,
+    failed_count: totalFailed,
+    skipped_count: totalSkipped,
+    verification_status: verification.status,
+    verification_summary: verification.summary,
+    residual_plan_id: residualPlanId,
+    error: typeof finalWriteResult.error === "string" ? finalWriteResult.error : verificationError(verification),
     updated_at: nowIso()
   };
+  let actionState = applyActionState;
+  let repairPendingAction: Record<string, unknown> | undefined;
+  if (scopeExpansionRepair && typeof scopeExpansionRepair.plan_id === "string") {
+    await updateConversationActionState(db, job, applyActionState);
+    actionState = {
+      kind: "prepare_change",
+      plan_id: scopeExpansionRepair.plan_id,
+      status: typeof scopeExpansionRepair.status === "string"
+        ? scopeExpansionRepair.status
+        : "ready_for_confirmation",
+      valid: true,
+      requires_confirmation: true,
+      summary: scopeExpansionRepair.summary,
+      operations: scopeExpansionRepair.operations,
+      approved_change_envelope: scopeExpansionRepair.approved_change_envelope as Record<string, unknown>,
+      updated_at: nowIso()
+    };
+    repairPendingAction = await updateConversationActionState(db, job, actionState);
+  }
 
   await db.prepare(
     `UPDATE messages
@@ -760,28 +1581,109 @@ async function runApplyPendingActionJob(db: D1Database, env: Env, job: JobRow, s
   ).bind(
     answer,
     toJson(["app_builder_apply_change"]),
-    toJson(debugSteps),
-    toJson(actionState),
+    toJson(redactSensitiveData(debugSteps)),
+    toJson(redactSensitiveData(actionState)),
     nowIso(),
     job.assistant_message_id,
     job.user_key
   ).run();
 
-  await updateConversationActionState(db, job, actionState);
-  const succeeded = writeResult.ok === true;
+  if (!scopeExpansionRepair) {
+    await updateConversationActionState(db, job, actionState);
+  }
+  const succeeded = verification.ok;
+  const waitingConfirmation = Boolean(scopeExpansionRepair && repairPendingAction);
   await updateJob(db, job, {
-    status: succeeded ? "succeeded" : "failed",
-    stage: succeeded ? "succeeded" : "failed",
-    progress_text: succeeded ? "Apply plan đã hoàn tất." : "Apply plan thất bại.",
-    error: succeeded ? null : String(writeResult.error ?? "Apply plan thất bại."),
-    finished_at: nowIso(),
+    status: succeeded ? "succeeded" : waitingConfirmation ? "waiting_confirmation" : "failed",
+    stage: succeeded ? "succeeded" : waitingConfirmation ? "waiting_confirmation" : "failed",
+    progress_text: succeeded
+      ? "Apply plan đã hoàn tất."
+      : waitingConfirmation
+        ? "Repair cần mở rộng phạm vi và đang chờ người dùng xác nhận plan mới."
+        : "Apply plan thất bại.",
+    error: succeeded || waitingConfirmation
+      ? null
+      : String(finalWriteResult.error ?? verificationError(verification) ?? "Apply plan thất bại."),
+    finished_at: succeeded || !waitingConfirmation ? nowIso() : null,
     auth_context_json: null
   });
-  await insertJobEvent(db, job, succeeded ? "succeeded" : "failed", {
+  await insertJobEvent(db, job, succeeded ? "succeeded" : waitingConfirmation ? "waiting_confirmation" : "failed", {
     action_id: actionId,
     plan_id: planId,
-    result: writeResult
+    repair_pending_action: repairPendingAction,
+    result: redactSensitiveData(result)
   });
+}
+
+async function executeVerifiedApplyAttempt(
+  db: D1Database,
+  env: Env,
+  job: JobRow,
+  state: ZilcodeSessionState,
+  runId: string,
+  planId: string,
+  attempt: number,
+  debugSteps: DebugStep[],
+  verifiedOperations: Record<string, Record<string, unknown>> = {}
+): Promise<{ writeResult: Record<string, unknown>; verification: AppBuilderVerificationReport }> {
+  await updateJob(db, job, {
+    status: "running",
+    stage: "apply_change",
+    progress_text: attempt === 1
+      ? "Đang thực hiện pending App Builder plan."
+      : `Đang thực hiện residual repair lần ${attempt - 1}.`
+  });
+  const writeResult = await runAppBuilderWriteTool(
+    env,
+    state.session,
+    "app_builder_apply_change",
+    { plan_id: planId },
+    {
+      attempt,
+      verified_operations: verifiedOperations,
+      retain_pending_plan: true,
+      on_operation_event: event => persistOperationJournalEvent(db, job, runId, event)
+    }
+  );
+  addDebugStep(debugSteps, "pending_action.apply", "ok", "app_builder_apply_change đã trả kết quả.", {
+    attempt,
+    ok: writeResult.ok,
+    status: writeResult.status,
+    plan_id: writeResult.plan_id
+  });
+
+  await updateJob(db, job, {
+    status: "running",
+    stage: "verify_change",
+    progress_text: "Đang đọc lại graph và kiểm tra postcondition."
+  });
+  addDebugStep(debugSteps, "pending_action.verify", "start", "Bắt đầu verify trạng thái thật sau apply.", {
+    attempt,
+    expected_operations: Array.isArray(writeResult.expected_operations) ? writeResult.expected_operations.length : 0
+  });
+  const verification = await verifyAppBuilderWriteResult(env, state.session, writeResult);
+  await persistVerificationJournal(db, runId, planId, attempt, verification);
+  await persistPhaseCheckpoints(db, runId, verification);
+  addDebugStep(debugSteps, "pending_action.verify", verification.ok ? "ok" : "error", "Đã hoàn tất postcondition verification.", {
+    attempt,
+    status: verification.status,
+    summary: verification.summary,
+    cache_results: verification.cache_results
+  });
+  return { writeResult, verification };
+}
+
+function groupVerificationByPhase(report: AppBuilderVerificationReport): Record<string, boolean> {
+  const output: Record<string, boolean> = {};
+  for (const result of report.operation_results) {
+    const phase = result.phase || "cache_verification";
+    output[phase] = (output[phase] ?? true) && result.status === "passed";
+  }
+  if (report.cache_results.length) {
+    output.cache_verification = report.cache_results.every(result => result.status === "passed")
+      && (output.cache_verification ?? true);
+  }
+  return output;
 }
 
 export async function runConversationJob(env: Env, jobId: string): Promise<void> {
@@ -789,8 +1691,24 @@ export async function runConversationJob(env: Env, jobId: string): Promise<void>
   if (dbOrResponse instanceof Response) throw new Error("D1 database binding DB chưa được cấu hình.");
   const db = dbOrResponse;
 
-  const job = await getJobAnyOwner(db, jobId);
+  let job = await getJobAnyOwner(db, jobId);
   if (!job) throw new Error(`Không tìm thấy job ${jobId}.`);
+  if (job.status === "running") {
+    if (job.lease_expires_at && job.lease_expires_at > nowIso()) {
+      throw new ActiveJobLeaseError(job.job_id, job.lease_expires_at);
+    }
+    await updateJob(db, job, {
+      status: "queued",
+      stage: "lease_recovered",
+      progress_text: "Lease cũ đã hết; job được nhận lại để resume.",
+      lease_expires_at: null
+    });
+    await insertJobEvent(db, job, "lease_recovered", {
+      previous_attempts: job.attempt_count,
+      previous_lease_expires_at: job.lease_expires_at
+    });
+    job = { ...job, status: "queued", lease_expires_at: null };
+  }
   if (job.status !== "queued") return;
 
   const authState = safeJsonParse<ZilcodeSessionState | null>(job.auth_context_json, null);
@@ -823,6 +1741,9 @@ export async function runConversationJob(env: Env, jobId: string): Promise<void>
       await runMessageJob(db, env, claimedJob, authState);
     }
   } catch (error) {
+    if (isRetryableJobError(error) && await scheduleJobRetry(db, env, claimedJob, error)) {
+      return;
+    }
     await failJob(db, claimedJob, error);
   }
 }
@@ -1284,13 +2205,26 @@ export async function cleanupConversationJobs(env: Env): Promise<Record<string, 
      WHERE (
        status = 'queued' AND expires_at IS NOT NULL AND expires_at < ?1
      ) OR (
-       status = 'running' AND updated_at < ?2
+       status = 'running' AND (
+         (lease_expires_at IS NOT NULL AND lease_expires_at < ?1)
+         OR updated_at < ?2
+       )
      )
      LIMIT 100`
   ).bind(now, staleRunningBefore).all<JobRow>();
 
   let jobsExpired = 0;
+  let jobsRetried = 0;
   for (const job of expiredJobs.results ?? []) {
+    if (job.status === "running" && await scheduleJobRetry(
+      db,
+      env,
+      job,
+      new Error("Worker lease hết hạn trước khi job hoàn tất.")
+    )) {
+      jobsRetried += 1;
+      continue;
+    }
     const message = "Job đã hết hạn trước khi agent kịp xử lý. Hãy gửi lại yêu cầu để tạo job mới.";
     await setAssistantMessageFailed(db, job, message);
     await updateJob(db, job, {
@@ -1316,6 +2250,7 @@ export async function cleanupConversationJobs(env: Env): Promise<Record<string, 
   ).bind(addDays(new Date(), -JOB_EVENT_RETENTION_DAYS)).run();
 
   return {
+    jobs_retried: jobsRetried,
     jobs_expired: jobsExpired,
     pending_actions_expired: Number(expiredActions.meta?.changes ?? 0),
     job_events_deleted: Number(eventsDeleted.meta?.changes ?? 0)
