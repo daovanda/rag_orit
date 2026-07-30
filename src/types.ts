@@ -33,6 +33,7 @@ export interface RagQueryDebug {
   used: boolean;
   reason: string;
   model?: string;
+  batch_queries?: RagQueryDebug[];
 }
 
 export interface VectorMatch {
@@ -57,6 +58,8 @@ export interface StoredChunk {
 export interface RagCandidate extends StoredChunk {
   id: string;
   vector_score?: number;
+  fusion_score?: number;
+  matched_queries?: number;
   rerank_rank?: number;
   source_label: string;
 }

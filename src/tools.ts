@@ -26,6 +26,12 @@ export const TOOLS = [
         query: {
           type: "string",
           description: "Câu truy vấn tài liệu độc lập. Giữ nguyên tên sản phẩm, phân hệ, bộ phận, chức năng và thuật ngữ Zilcode/App Builder/Đại Việt quan trọng."
+        },
+        queries: {
+          type: "array",
+          items: { type: "string" },
+          maxItems: 2,
+          description: "Các truy vấn bổ sung chỉ khi chúng bao phủ những khía cạnh khác nhau của cùng mục tiêu. Backend sẽ fusion kết quả, khử trùng chunk và rerank một lần."
         }
       },
       required: ["query"]

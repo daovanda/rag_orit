@@ -10,7 +10,13 @@ import {
   type Env
 } from "./config";
 import { RAG_KNOWLEDGE_SCOPE, RAG_TOOL_ROUTING_GUIDANCE } from "./rag-knowledge";
-import { getActiveChatModelDebugInfo, runChatModel, searchRag } from "./ai";
+import {
+  dedupeRagQueries,
+  getActiveChatModelDebugInfo,
+  mergeRagSources,
+  runChatModel,
+  searchRagQueries
+} from "./ai";
 import { addDebugStep, type DebugStep } from "./debug";
 import {
   blockAgentRun,
@@ -81,6 +87,37 @@ export function parseAgentMode(value: unknown): AgentMode | null {
   if (value == null || value === "" || value === "default") return "default";
   if (value === "search") return "search";
   return null;
+}
+
+function getRagQueriesFromArguments(args: Record<string, unknown>): string[] {
+  const query = getStringArg(args, "query");
+  const queries = Array.isArray(args.queries)
+    ? args.queries.filter((value): value is string => typeof value === "string")
+    : [];
+  return dedupeRagQueries([query, ...queries]);
+}
+
+export function coalesceRagSearchToolCalls(toolCalls: ToolCall[]): ToolCall[] {
+  const ragCalls = toolCalls.filter(toolCall => toolCall.name === "rag_search");
+  if (ragCalls.length <= 1) return toolCalls;
+
+  const queries = dedupeRagQueries(
+    ragCalls.flatMap(toolCall => getRagQueriesFromArguments(toolCall.arguments))
+  );
+  if (!queries.length) return toolCalls;
+
+  const firstRagIndex = toolCalls.findIndex(toolCall => toolCall.name === "rag_search");
+  return toolCalls.flatMap((toolCall, index) => {
+    if (toolCall.name !== "rag_search") return [toolCall];
+    if (index !== firstRagIndex) return [];
+    return [{
+      ...toolCall,
+      arguments: {
+        query: queries[0],
+        ...(queries.length > 1 ? { queries: queries.slice(1, 3) } : {})
+      }
+    }];
+  });
 }
 
 function getToolsForAgentMode(mode: AgentMode): readonly ToolDefinition[] {
@@ -347,9 +384,9 @@ Không nhắc đến tool/function nội bộ.`
     }
 
     case "rag_search": {
-      const query = getStringArg(tool.arguments, "query");
-      if (!query) return { content: "Lỗi: bắt buộc phải có câu truy vấn." };
-      return searchRag(query, env, chatHistory, debugSteps);
+      const queries = getRagQueriesFromArguments(tool.arguments);
+      if (!queries.length) return { content: "Lỗi: bắt buộc phải có câu truy vấn." };
+      return searchRagQueries(queries, env, chatHistory, debugSteps);
     }
 
     case "app_builder_graph_overview":
@@ -1438,6 +1475,8 @@ Quy tắc điều phối:
 - Mục tiêu đã được làm rõ là nhiệm vụ duy nhất đang hoạt động. Lịch sử chỉ là dữ liệu tham chiếu; không gọi tool để xử lý lại câu hỏi cũ.
 - Mỗi tool result là một observation. Sau mỗi observation, hãy đánh giá lại mục tiêu rồi tự quyết định gọi tool tiếp, sửa tham số, hoặc kết thúc.
 - Không gọi lặp cùng tool với cùng tham số nếu không có evidence mới.
+- Nếu cần nhiều góc tìm kiếm tài liệu cho cùng mục tiêu, gọi một rag_search với query chính và queries bổ sung. Chỉ thêm query khi nó bao phủ một khía cạnh khác; backend sẽ fusion và rerank một lần.
+- Sau rag_search, đọc RAG_RETRIEVAL_SUMMARY. Chỉ tìm tiếp khi missing_queries còn nội dung hoặc evidence đã chọn chưa đủ cho một phần cụ thể của mục tiêu; không diễn đạt lại cùng ý thành query mới.
 - Với câu hỏi cần dữ liệu hệ thống hiện tại, phải lấy evidence từ graph tool trước khi kết thúc.
 - ${RAG_TOOL_ROUTING_GUIDANCE}
 - Với yêu cầu thay đổi thật, dùng các tool đọc/schema để xác minh target và contract khi cần, sau đó gọi app_builder_prepare_change.
@@ -1477,7 +1516,7 @@ ${JSON.stringify({
 
   const toolsCalled: string[] = [];
   const toolResults: ToolResultRecord[] = [];
-  const ragSources: RagSource[] = [];
+  let ragSources: RagSource[] = [];
   let embeddingDebug: EmbeddingDebug | undefined;
   let ragQueryDebug: RagQueryDebug | undefined;
   let incompleteGoalResponses = 0;
@@ -1566,7 +1605,8 @@ ${JSON.stringify({
       }, directAnswerIsUsable ? undefined : "failed");
     }
 
-    const supportedToolCalls = toolCalls.filter(toolCall => activeToolNames.has(toolCall.name));
+    const selectedSupportedToolCalls = toolCalls.filter(toolCall => activeToolNames.has(toolCall.name));
+    const supportedToolCalls = coalesceRagSearchToolCalls(selectedSupportedToolCalls);
     const skippedToolCalls = toolCalls
       .filter(toolCall => !activeToolNames.has(toolCall.name))
       .map(toolCall => toolCall.name);
@@ -1596,7 +1636,10 @@ ${JSON.stringify({
       model: response.model,
       tool_calls: toolCalls.map(toolCall => toolCall.name),
       executed_tool_calls: supportedToolCalls.map(toolCall => toolCall.name),
-      skipped_tool_calls: skippedToolCalls
+      skipped_tool_calls: skippedToolCalls,
+      coalesced_rag_calls:
+        selectedSupportedToolCalls.filter(toolCall => toolCall.name === "rag_search").length
+        - supportedToolCalls.filter(toolCall => toolCall.name === "rag_search").length
     });
 
     let executedToolCount = 0;
@@ -1648,7 +1691,7 @@ ${JSON.stringify({
 
       toolResults.push({ name: toolCall.name, content: toolExecution.content });
       if (toolCall.name === "rag_search" && toolExecution.sources?.length) {
-        ragSources.push(...toolExecution.sources);
+        ragSources = mergeRagSources(ragSources, toolExecution.sources);
       }
       if (toolCall.name === "rag_search" && toolExecution.embedding_debug) {
         embeddingDebug = toolExecution.embedding_debug;

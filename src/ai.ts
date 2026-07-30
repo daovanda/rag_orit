@@ -7,7 +7,9 @@ import {
   NVIDIA_DEFAULT_BASE_URL,
   NVIDIA_DEFAULT_CHAT_MODEL,
   QUERY_REWRITE_MODEL,
+  RAG_MAX_BATCH_QUERIES,
   RAG_MAX_CONTEXT_CHUNKS,
+  RAG_MAX_VISIBLE_SOURCES,
   RAG_MIN_SCORE,
   RAG_QUERY_REWRITE_MAX_TOKENS,
   RAG_RERANK_MAX_TOKENS,
@@ -559,7 +561,10 @@ function getStringArray(value: unknown): string[] {
 }
 
 function sortByVectorScore(candidates: RagCandidate[]): RagCandidate[] {
-  return [...candidates].sort((a, b) => (b.vector_score ?? -Infinity) - (a.vector_score ?? -Infinity));
+  return [...candidates].sort((a, b) =>
+    (b.fusion_score ?? b.vector_score ?? -Infinity)
+    - (a.fusion_score ?? a.vector_score ?? -Infinity)
+  );
 }
 
 function selectRagCandidatesByVectorScore(candidates: RagCandidate[]): RagCandidate[] {
@@ -568,9 +573,109 @@ function selectRagCandidatesByVectorScore(candidates: RagCandidate[]): RagCandid
     .map((candidate, index) => ({ ...candidate, rerank_rank: index + 1 }));
 }
 
-function shouldUseModelRerank(candidates: RagCandidate[], queryDebug: RagQueryDebug): boolean {
-  if (candidates.length <= RAG_MAX_CONTEXT_CHUNKS) return false;
-  return queryDebug.used === true;
+function shouldUseModelRerank(candidates: RagCandidate[]): boolean {
+  return candidates.length > RAG_MAX_CONTEXT_CHUNKS;
+}
+
+interface FusedVectorMatch extends VectorMatch {
+  fusion_score: number;
+  matched_queries: number;
+}
+
+function normalizeRagQuery(query: string): string {
+  return normalizeSpaces(query).toLocaleLowerCase("vi");
+}
+
+export function dedupeRagQueries(queries: string[]): string[] {
+  const seen = new Set<string>();
+  const deduped: string[] = [];
+
+  for (const query of queries) {
+    const cleaned = normalizeSpaces(String(query || ""));
+    const key = normalizeRagQuery(cleaned);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(cleaned);
+  }
+
+  return deduped;
+}
+
+export function fuseVectorMatchSets(
+  matchSets: VectorMatch[][],
+  limit = RAG_VECTOR_TOP_K
+): FusedVectorMatch[] {
+  const byId = new Map<string, {
+    id: string;
+    best_score?: number;
+    fusion_score: number;
+    query_indexes: Set<number>;
+  }>();
+  const rrfConstant = 60;
+
+  matchSets.forEach((matches, queryIndex) => {
+    matches.forEach((match, rankIndex) => {
+      if (!match?.id) return;
+      const current = byId.get(match.id) ?? {
+        id: match.id,
+        best_score: undefined,
+        fusion_score: 0,
+        query_indexes: new Set<number>()
+      };
+      current.fusion_score += 1 / (rrfConstant + rankIndex + 1);
+      current.query_indexes.add(queryIndex);
+      if (typeof match.score === "number"
+        && (current.best_score === undefined || match.score > current.best_score)) {
+        current.best_score = match.score;
+      }
+      byId.set(match.id, current);
+    });
+  });
+
+  return [...byId.values()]
+    .sort((a, b) =>
+      b.fusion_score - a.fusion_score
+      || (b.best_score ?? -Infinity) - (a.best_score ?? -Infinity)
+    )
+    .slice(0, Math.max(1, limit))
+    .map(item => ({
+      id: item.id,
+      score: item.best_score,
+      fusion_score: item.fusion_score,
+      matched_queries: item.query_indexes.size
+    }));
+}
+
+export function mergeRagSources(
+  current: RagSource[],
+  incoming: RagSource[],
+  limit = RAG_MAX_VISIBLE_SOURCES
+): RagSource[] {
+  const byId = new Map<string, RagSource>();
+
+  for (const source of [...current, ...incoming]) {
+    if (!source?.id) continue;
+    const existing = byId.get(source.id);
+    if (!existing) {
+      byId.set(source.id, source);
+      continue;
+    }
+
+    const sourceRank = source.rerank_rank ?? Number.MAX_SAFE_INTEGER;
+    const existingRank = existing.rerank_rank ?? Number.MAX_SAFE_INTEGER;
+    const sourceScore = source.vector_score ?? -Infinity;
+    const existingScore = existing.vector_score ?? -Infinity;
+    if (sourceRank < existingRank || (sourceRank === existingRank && sourceScore > existingScore)) {
+      byId.set(source.id, source);
+    }
+  }
+
+  return [...byId.values()]
+    .sort((a, b) =>
+      (a.rerank_rank ?? Number.MAX_SAFE_INTEGER) - (b.rerank_rank ?? Number.MAX_SAFE_INTEGER)
+      || (b.vector_score ?? -Infinity) - (a.vector_score ?? -Infinity)
+    )
+    .slice(0, Math.max(1, limit));
 }
 
 function normalizeSpaces(text: string): string {
@@ -757,6 +862,8 @@ async function rerankRagCandidates(
     id: candidate.id,
     source: candidate.source_label,
     vector_score: candidate.vector_score,
+    fusion_score: candidate.fusion_score,
+    matched_queries: candidate.matched_queries,
     text: truncateForRerank(candidate.text)
   }));
 
@@ -827,130 +934,200 @@ export async function searchRag(
   chatHistory: AIMessage[] = [],
   debugSteps?: DebugStep[]
 ): Promise<ToolExecutionResult> {
-  addDebugStep(debugSteps, "rag.search", "start", "Bắt đầu RAG search.", {
-    original_query: query,
+  return searchRagQueries([query], env, chatHistory, debugSteps);
+}
+
+export async function searchRagQueries(
+  inputQueries: string[],
+  env: Env,
+  chatHistory: AIMessage[] = [],
+  debugSteps?: DebugStep[]
+): Promise<ToolExecutionResult> {
+  const queries = dedupeRagQueries(inputQueries).slice(0, RAG_MAX_BATCH_QUERIES);
+  if (!queries.length) return { content: "Lỗi: bắt buộc phải có câu truy vấn." };
+
+  addDebugStep(debugSteps, "rag.search", "start", "Bắt đầu RAG retrieval có fusion.", {
+    original_queries: queries,
+    query_count: queries.length,
     history_messages: chatHistory.length
   });
 
-  const rewritten = await maybeRewriteRagQuery(query, chatHistory, env, debugSteps);
-  const retrievalQuery = rewritten.query;
+  const rewrittenResults = await Promise.all(
+    queries.map(query => maybeRewriteRagQuery(query, chatHistory, env, debugSteps))
+  );
+  const retrievalQueries = dedupeRagQueries(rewrittenResults.map(result => result.query));
 
-  addDebugStep(debugSteps, "rag.embedding", "start", "Embedding query dùng cho retrieval.", {
-    query: retrievalQuery,
+  addDebugStep(debugSteps, "rag.embedding", "start", "Embedding các query retrieval song song.", {
+    queries: retrievalQueries,
+    query_count: retrievalQueries.length,
     model: EMBEDDING_MODEL
   });
 
-  const embeddingResult = await embedQuery(retrievalQuery, env);
-  const queryVector = embeddingResult.vector;
-
-  addDebugStep(debugSteps, "rag.embedding", "ok", "Embedding query hoàn tất.", {
-    provider: embeddingResult.debug.provider,
-    model: embeddingResult.debug.model,
-    dimensions: embeddingResult.debug.dimensions,
-    fallback: embeddingResult.debug.fallback
-  });
-
-  addDebugStep(debugSteps, "rag.vectorize", "start", "Query Vectorize index.", {
-    top_k: RAG_VECTOR_TOP_K,
-    min_score: RAG_MIN_SCORE
-  });
-
-  const matches = await env.VECTORIZE.query(queryVector, {
-    topK: RAG_VECTOR_TOP_K,
-    returnMetadata: "all"
-  });
-
-  const vectorMatches = matches.matches as VectorMatch[];
-  addDebugStep(debugSteps, "rag.vectorize", "ok", "Vectorize trả kết quả.", {
-    matches: vectorMatches.length,
-    top_score: vectorMatches[0]?.score
-  });
-
-  if (!vectorMatches.length) {
+  const retrievalResults = await Promise.all(retrievalQueries.map(async retrievalQuery => {
+    const embedding = await embedQuery(retrievalQuery, env);
+    const matches = await env.VECTORIZE.query(embedding.vector, {
+      topK: RAG_VECTOR_TOP_K,
+      returnMetadata: "all"
+    });
     return {
-      content: "Không tìm thấy tài liệu liên quan.",
-      embedding_debug: embeddingResult.debug,
-      rag_query_debug: rewritten.debug
+      query: retrievalQuery,
+      embedding,
+      matches: matches.matches as VectorMatch[]
     };
-  }
+  }));
+  const embeddingResult = retrievalResults[0]?.embedding;
 
-  const filteredMatches = vectorMatches.filter(match =>
-    typeof match.score !== "number" || match.score >= RAG_MIN_SCORE
+  addDebugStep(debugSteps, "rag.embedding", "ok", "Embedding và Vectorize query hoàn tất.", {
+    query_count: retrievalResults.length,
+    provider: embeddingResult?.debug.provider,
+    model: embeddingResult?.debug.model,
+    dimensions: embeddingResult?.debug.dimensions,
+    matches_per_query: retrievalResults.map(result => result.matches.length)
+  });
+
+  const filteredMatchSets = retrievalResults.map(result =>
+    result.matches.filter(match =>
+      typeof match.score !== "number" || match.score >= RAG_MIN_SCORE
+    )
   );
+  const fusedMatches = fuseVectorMatchSets(filteredMatchSets, RAG_VECTOR_TOP_K);
 
-  addDebugStep(debugSteps, "rag.filter", "ok", "Lọc match theo ngưỡng score.", {
-    before: vectorMatches.length,
-    after: filteredMatches.length,
-    min_score: RAG_MIN_SCORE
+  addDebugStep(debugSteps, "rag.fusion", "ok", "Đã fusion và khử trùng ứng viên trước khi đọc KV.", {
+    query_count: retrievalResults.length,
+    raw_matches: retrievalResults.reduce((sum, result) => sum + result.matches.length, 0),
+    filtered_matches: filteredMatchSets.reduce((sum, matches) => sum + matches.length, 0),
+    unique_candidates: fusedMatches.length,
+    candidate_limit: RAG_VECTOR_TOP_K
   });
 
-  if (!filteredMatches.length) {
+  const primaryDebug: RagQueryDebug = {
+    ...(rewrittenResults[0]?.debug ?? {
+      original_query: queries[0],
+      rewritten_query: retrievalQueries[0] ?? queries[0],
+      used: false,
+      reason: "query được dùng trực tiếp"
+    }),
+    batch_queries: rewrittenResults.map(result => result.debug)
+  };
+
+  if (!fusedMatches.length) {
+    const scores = retrievalResults.flatMap(result =>
+      result.matches
+        .map(match => match.score)
+        .filter((score): score is number => typeof score === "number")
+    );
+    const topScore = scores.length ? Math.max(...scores) : undefined;
+    const detail = topScore !== undefined
+      ? ` Điểm liên quan cao nhất là ${formatScore(topScore)}, thấp hơn ngưỡng ${RAG_MIN_SCORE}.`
+      : "";
     return {
-      content: `Không tìm thấy tài liệu đủ liên quan. Điểm liên quan cao nhất là ${formatScore(vectorMatches[0]?.score)}, thấp hơn ngưỡng ${RAG_MIN_SCORE}.`,
-      embedding_debug: embeddingResult.debug,
-      rag_query_debug: rewritten.debug
+      content: `Không tìm thấy tài liệu đủ liên quan.${detail}`,
+      embedding_debug: embeddingResult?.debug,
+      rag_query_debug: primaryDebug
     };
   }
 
-  const candidates: RagCandidate[] = [];
-  addDebugStep(debugSteps, "rag.kv", "start", "Lấy nội dung chunk từ KV.", {
-    requested_chunks: filteredMatches.length
+  addDebugStep(debugSteps, "rag.kv", "start", "Đọc song song các chunk duy nhất từ KV.", {
+    requested_chunks: fusedMatches.length
   });
 
-  for (const match of filteredMatches) {
+  const chunkResults = await Promise.all(fusedMatches.map(async (match): Promise<RagCandidate | null> => {
     const raw = await env.CHUNKS.get(`chunk:${match.id}`);
-    if (!raw) continue;
-
+    if (!raw) return null;
     const chunk = JSON.parse(raw) as StoredChunk;
-    candidates.push({
+    return {
       ...chunk,
       id: match.id,
       vector_score: match.score,
+      fusion_score: match.fusion_score,
+      matched_queries: match.matched_queries,
       source_label: getSourceLabel(chunk)
-    });
-  }
+    };
+  }));
+  const candidates = chunkResults.filter((candidate): candidate is RagCandidate => candidate !== null);
 
-  addDebugStep(debugSteps, "rag.kv", "ok", "Đã tải nội dung chunk từ KV.", {
-    loaded_chunks: candidates.length
+  addDebugStep(debugSteps, "rag.kv", "ok", "Đã tải nội dung ứng viên duy nhất từ KV.", {
+    requested_chunks: fusedMatches.length,
+    loaded_chunks: candidates.length,
+    duplicate_reads_avoided: Math.max(
+      0,
+      filteredMatchSets.reduce((sum, matches) => sum + matches.length, 0) - fusedMatches.length
+    )
   });
 
   if (!candidates.length) {
     return {
       content: "Không tìm thấy nội dung chunk tương ứng trong KV.",
-      embedding_debug: embeddingResult.debug,
-      rag_query_debug: rewritten.debug
+      embedding_debug: embeddingResult?.debug,
+      rag_query_debug: primaryDebug
     };
   }
 
-  const useModelRerank = shouldUseModelRerank(candidates, rewritten.debug);
-  const reranked = useModelRerank
-    ? await rerankRagCandidates(retrievalQuery, candidates, env, debugSteps)
-    : selectRagCandidatesByVectorScore(candidates);
-
-  if (!useModelRerank) {
-    addDebugStep(debugSteps, "rag.rerank", "skip", "Query rõ; chọn chunk theo điểm Vectorize để giảm độ trễ.", {
-      selected_ids: reranked.map(candidate => candidate.id),
-      reason: candidates.length <= RAG_MAX_CONTEXT_CHUNKS
-        ? "số chunk không vượt giới hạn context"
-        : "query không cần rewrite theo lịch sử"
+  const useModelRerank = shouldUseModelRerank(candidates);
+  let selected: RagCandidate[];
+  if (useModelRerank) {
+    try {
+      selected = await rerankRagCandidates(
+        retrievalQueries.join("\n"),
+        candidates,
+        env,
+        debugSteps
+      );
+    } catch (error) {
+      selected = selectRagCandidatesByVectorScore(candidates);
+      addDebugStep(debugSteps, "rag.rerank", "error", "Rerank lỗi; fallback theo fusion score.", {
+        error: getErrorText(error),
+        selected_ids: selected.map(candidate => candidate.id)
+      });
+    }
+  } else {
+    selected = selectRagCandidatesByVectorScore(candidates);
+    addDebugStep(debugSteps, "rag.rerank", "skip", "Không cần rerank vì số ứng viên vừa với context.", {
+      candidates: candidates.length,
+      context_limit: RAG_MAX_CONTEXT_CHUNKS,
+      selected_ids: selected.map(candidate => candidate.id)
     });
   }
 
-  const content = reranked
+  const content = selected
     .map((candidate, index) => [
       `[Nguồn ${index + 1}: ${candidate.source_label}]`,
       `ID: ${candidate.id}`,
       `Điểm Vectorize: ${formatScore(candidate.vector_score)}`,
+      `Số query khớp: ${candidate.matched_queries ?? 1}`,
       `Thứ hạng chọn: ${candidate.rerank_rank ?? index + 1}`,
       "",
       candidate.text
     ].join("\n"))
     .join("\n\n---\n\n");
+  const selectedIds = new Set(selected.map(candidate => candidate.id));
+  const coverage = retrievalQueries.map((retrievalQuery, index) => {
+    const matches = filteredMatchSets[index] ?? [];
+    return {
+      query: retrievalQuery,
+      candidate_hits: matches.length,
+      selected_hits: matches.filter(match => selectedIds.has(match.id)).length
+    };
+  });
+  const missingQueries = coverage
+    .filter(item => item.selected_hits === 0)
+    .map(item => item.query);
+  const retrievalSummary = {
+    query_count: retrievalQueries.length,
+    unique_candidates: candidates.length,
+    selected_chunks: selected.length,
+    covered_queries: coverage.filter(item => item.selected_hits > 0).map(item => item.query),
+    missing_queries: missingQueries,
+    coverage
+  };
 
   return {
-    content,
-    sources: reranked.map(toRagSource),
-    embedding_debug: embeddingResult.debug,
-    rag_query_debug: rewritten.debug
+    content: [
+      `[RAG_RETRIEVAL_SUMMARY]${JSON.stringify(retrievalSummary)}[/RAG_RETRIEVAL_SUMMARY]`,
+      content
+    ].join("\n\n"),
+    sources: mergeRagSources([], selected.map(toRagSource), RAG_MAX_VISIBLE_SOURCES),
+    embedding_debug: embeddingResult?.debug,
+    rag_query_debug: primaryDebug
   };
 }
