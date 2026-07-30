@@ -4,6 +4,7 @@ import {
   GENERAL_CHAT_MODEL,
   MAX_HISTORY_CONTENT_CHARS,
   MAX_HISTORY_MESSAGES,
+  RAG_FAST_FINAL_MAX_TOKENS,
   RAG_FINAL_MAX_TOKENS,
   TOOL_RESULT_CONTEXT_MAX_CHARS,
   TOOL_SELECTION_MAX_TOKENS,
@@ -1337,6 +1338,78 @@ ${reasoning}`
   return answer;
 }
 
+function isRagOnlyToolResults(toolResults: ToolResultRecord[]): boolean {
+  return toolResults.length > 0
+    && toolResults.every(result => result.name === "rag_search");
+}
+
+async function createRagFastFinalAnswer(
+  userMessage: string,
+  toolResults: ToolResultRecord[],
+  env: Env,
+  chatHistory: AIMessage[] = [],
+  debugSteps?: DebugStep[]
+): Promise<string | null> {
+  const evidence = buildSupportingToolComprehensionContext(
+    toolResults,
+    COMPREHENSION_CONTEXT_MAX_CHARS
+  );
+  if (!evidence) return null;
+
+  addDebugStep(debugSteps, "tools.rag_fast_final", "start", "Tổng hợp câu trả lời RAG trong một lượt model.", {
+    ...getActiveChatModelDebugInfo(env, CHAT_MODEL),
+    context_chars: evidence.length,
+    history_messages: chatHistory.length,
+    max_tokens: RAG_FAST_FINAL_MAX_TOKENS
+  });
+
+  try {
+    const response = await runChatModel(CHAT_MODEL, {
+      max_tokens: RAG_FAST_FINAL_MAX_TOKENS,
+      temperature: 0.2,
+      messages: [
+        {
+          role: "system",
+          content: `Bạn là trợ lý hướng dẫn Zilcode và Phần mềm Quản lý Sản xuất Nhựa Đại Việt.
+Hãy trả lời trực tiếp bằng cùng ngôn ngữ với người dùng, dựa trên bằng chứng RAG được cung cấp.
+Kết hợp các đoạn tài liệu thành một câu trả lời mạch lạc theo đúng ý định của người dùng; không chép lại từng chunk và không nhắc tên tool, marker nội bộ hay quy trình suy nghĩ.
+Ưu tiên thao tác cụ thể, điều kiện cần và thứ tự thực hiện khi người dùng hỏi cách dùng.
+Không bịa thông tin ngoài bằng chứng. Nếu bằng chứng chưa đủ cho một phần của câu hỏi, nói rõ phần còn thiếu thay vì suy đoán.`
+        },
+        ...chatHistory,
+        {
+          role: "system",
+          content: `BẰNG CHỨNG RAG NỘI BỘ:\n${evidence}`
+        },
+        {
+          role: "user",
+          content: userMessage
+        }
+      ]
+    }, env);
+
+    const answer = cleanMarkdownArtifacts(response.response?.trim() ?? "");
+    if (isUnusableModelAnswer(answer)) {
+      addDebugStep(debugSteps, "tools.rag_fast_final", "error", "Fast final rỗng hoặc không dùng được; chuyển về pipeline chuẩn.", {
+        chars: answer.length,
+        model: response.model
+      });
+      return null;
+    }
+
+    addDebugStep(debugSteps, "tools.rag_fast_final", "ok", "Đã tạo câu trả lời RAG trong một lượt model.", {
+      answer_chars: answer.length,
+      model: response.model
+    });
+    return answer;
+  } catch (error) {
+    addDebugStep(debugSteps, "tools.rag_fast_final", "error", "Fast final lỗi; chuyển về pipeline chuẩn.", {
+      error: error instanceof Error ? error.message : String(error)
+    });
+    return null;
+  }
+}
+
 async function createFinalAnswerFromToolResults(
   userMessage: string,
   toolResults: ToolResultRecord[],
@@ -1350,6 +1423,17 @@ async function createFinalAnswerFromToolResults(
       answer_chars: deterministicAnswer.length
     });
     return deterministicAnswer;
+  }
+
+  if (isRagOnlyToolResults(toolResults)) {
+    const fastAnswer = await createRagFastFinalAnswer(
+      userMessage,
+      toolResults,
+      env,
+      chatHistory,
+      debugSteps
+    );
+    if (fastAnswer) return fastAnswer;
   }
 
   const toolContext = truncateToolContext(formatToolResultsForFinalAnswer(toolResults));
@@ -1644,6 +1728,8 @@ ${JSON.stringify({
 
     let executedToolCount = 0;
     let lastBlockedTool: { name: string; reason: string; fingerprint: string } | null = null;
+    let ragCoverageComplete = false;
+    const iterationIsRagOnly = supportedToolCalls.every(toolCall => toolCall.name === "rag_search");
 
     for (const toolCall of supportedToolCalls) {
       const executionGuard = guardToolExecution(runState, toolCall.name, toolCall.arguments);
@@ -1699,6 +1785,12 @@ ${JSON.stringify({
       if (toolCall.name === "rag_search" && toolExecution.rag_query_debug) {
         ragQueryDebug = toolExecution.rag_query_debug;
       }
+      if (toolCall.name === "rag_search"
+        && toolExecution.rag_retrieval_summary
+        && toolExecution.rag_retrieval_summary.selected_chunks > 0
+        && toolExecution.rag_retrieval_summary.missing_queries.length === 0) {
+        ragCoverageComplete = true;
+      }
 
       messages.push({
         role: "assistant",
@@ -1735,6 +1827,27 @@ ${JSON.stringify({
         embedding_debug: embeddingDebug,
         rag_query_debug: ragQueryDebug
       }, toolResults));
+    }
+
+    if (ragCoverageComplete && iterationIsRagOnly && isRagOnlyToolResults(toolResults)) {
+      addDebugStep(debugSteps, "agent.rag_goal_reached", "ok", "RAG đã phủ đủ các query; bỏ qua lượt tool-selection tiếp theo.", {
+        iteration: iteration + 1,
+        rag_tool_results: toolResults.length
+      });
+      const answer = await createFinalAnswerFromToolResults(
+        userMessage,
+        toolResults,
+        env,
+        chatHistory,
+        debugSteps
+      );
+      return finishRun({
+        answer,
+        toolsCalled,
+        sources: ragSources,
+        embedding_debug: embeddingDebug,
+        rag_query_debug: ragQueryDebug
+      });
     }
 
     if (executedToolCount === 0) {

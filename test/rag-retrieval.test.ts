@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   dedupeRagQueries,
   fuseVectorMatchSets,
+  getRagRerankDecision,
   mergeRagSources,
   searchRagQueries
 } from "../src/ai";
@@ -76,6 +77,24 @@ describe("RAG query planning", () => {
     expect(fused.find(match => match.id === "a")?.matched_queries).toBe(2);
     expect(fused.find(match => match.id === "b")?.matched_queries).toBe(2);
   });
+
+  it("uses deterministic ranking for a clear single query and model rerank for multi-query coverage", () => {
+    const candidates = Array.from({ length: 12 }, (_, index) => ({
+      ...makeChunk(`chunk-${index + 1}`),
+      id: `chunk-${index + 1}`,
+      vector_score: 0.95 - index * 0.01,
+      source_label: `Nguồn ${index + 1}`
+    }));
+
+    expect(getRagRerankDecision(candidates, {
+      query_count: 1,
+      query_was_rewritten: false
+    }).use_model).toBe(false);
+    expect(getRagRerankDecision(candidates, {
+      query_count: 2,
+      query_was_rewritten: false
+    }).use_model).toBe(true);
+  });
 });
 
 describe("RAG fused retrieval", () => {
@@ -129,14 +148,59 @@ describe("RAG fused retrieval", () => {
     ], env);
 
     expect(vectorQuery).toHaveBeenCalledTimes(3);
-    expect(kvGet).toHaveBeenCalledTimes(20);
-    expect(new Set(kvGet.mock.calls.map(call => call[0])).size).toBe(20);
+    expect(kvGet).toHaveBeenCalledTimes(16);
+    expect(new Set(kvGet.mock.calls.map(call => call[0])).size).toBe(16);
     expect(rerankCalls).toBe(1);
-    expect(result.sources).toHaveLength(8);
-    expect(new Set(result.sources?.map(source => source.id)).size).toBe(8);
+    expect(result.sources).toHaveLength(6);
+    expect(new Set(result.sources?.map(source => source.id)).size).toBe(6);
     expect(result.rag_query_debug?.batch_queries).toHaveLength(3);
+    expect(result.rag_retrieval_summary?.candidate_source).toBe("kv_fallback");
+    expect(result.rag_retrieval_summary?.used_model_rerank).toBe(true);
     expect(result.content).toContain("[RAG_RETRIEVAL_SUMMARY]");
     expect(result.content).toContain('"missing_queries":[]');
+  });
+
+  it("ranks from Vectorize excerpts and loads only final full-text chunks from KV", async () => {
+    const matches = Array.from({ length: 12 }, (_, index): VectorMatch => ({
+      id: `chunk-${index + 1}`,
+      score: 0.95 - index * 0.01,
+      metadata: {
+        excerpt: `Tóm tắt liên quan cho chunk ${index + 1}`,
+        module: "Đại Việt",
+        title: "Hướng dẫn Đại Việt",
+        heading: `Mục ${index + 1}`,
+        section_path: `Hướng dẫn > Mục ${index + 1}`
+      }
+    }));
+    let chatModelCalls = 0;
+    const aiRun = vi.fn(async (model: string) => {
+      if (model.includes("bge-m3")) {
+        return { data: Array.from({ length: 1024 }, () => 0.1) };
+      }
+      chatModelCalls += 1;
+      return { response: '{"ranked_ids":[]}' };
+    });
+    const kvGet = vi.fn(async (key: string) =>
+      JSON.stringify(makeChunk(key.replace(/^chunk:/, "")))
+    );
+    const env = {
+      AI: { run: aiRun },
+      VECTORIZE: { query: vi.fn(async () => ({ matches })) },
+      CHUNKS: { get: kvGet },
+      ZILCODE_API_TOKEN: "",
+      MODEL_PROVIDER: "cloudflare"
+    } as unknown as Env;
+
+    const result = await searchRagQueries(["Hướng dẫn sử dụng Đại Việt"], env);
+
+    expect(chatModelCalls).toBe(0);
+    expect(kvGet).toHaveBeenCalledTimes(8);
+    expect(result.rag_retrieval_summary).toMatchObject({
+      candidate_source: "vector_metadata_excerpt",
+      used_model_rerank: false,
+      selected_chunks: 8,
+      missing_queries: []
+    });
   });
 
   it("deduplicates sources and keeps the better-ranked record", () => {

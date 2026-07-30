@@ -13,6 +13,7 @@ export interface ToolExecutionResult {
   sources?: RagSource[];
   embedding_debug?: EmbeddingDebug;
   rag_query_debug?: RagQueryDebug;
+  rag_retrieval_summary?: RagRetrievalSummary;
 }
 
 export interface EmbeddingDebug {
@@ -39,6 +40,7 @@ export interface RagQueryDebug {
 export interface VectorMatch {
   id: string;
   score?: number;
+  metadata?: Record<string, unknown>;
 }
 
 export interface StoredChunk {
@@ -53,6 +55,23 @@ export interface StoredChunk {
   audience?: string;
   heading: string;
   section_path?: string;
+}
+
+export interface RagRetrievalCoverage {
+  query: string;
+  candidate_hits: number;
+  selected_hits: number;
+}
+
+export interface RagRetrievalSummary {
+  query_count: number;
+  unique_candidates: number;
+  selected_chunks: number;
+  covered_queries: string[];
+  missing_queries: string[];
+  coverage: RagRetrievalCoverage[];
+  candidate_source: "vector_metadata_excerpt" | "kv_fallback";
+  used_model_rerank: boolean;
 }
 
 export interface RagCandidate extends StoredChunk {

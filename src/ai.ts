@@ -12,6 +12,7 @@ import {
   RAG_MAX_VISIBLE_SOURCES,
   RAG_MIN_SCORE,
   RAG_QUERY_REWRITE_MAX_TOKENS,
+  RAG_RERANK_CANDIDATE_LIMIT,
   RAG_RERANK_MAX_TOKENS,
   RAG_RERANK_TEXT_MAX_CHARS,
   RAG_VECTOR_TOP_K,
@@ -20,7 +21,18 @@ import {
 } from "./config";
 import { RAG_KNOWLEDGE_SCOPE, RAG_TOOL_ROUTING_GUIDANCE } from "./rag-knowledge";
 import { addDebugStep, type DebugStep } from "./debug";
-import type { AIMessage, EmbeddingResult, RagCandidate, RagQueryDebug, RagSource, StoredChunk, ToolDefinition, ToolExecutionResult, VectorMatch } from "./types";
+import type {
+  AIMessage,
+  EmbeddingResult,
+  RagCandidate,
+  RagQueryDebug,
+  RagRetrievalSummary,
+  RagSource,
+  StoredChunk,
+  ToolDefinition,
+  ToolExecutionResult,
+  VectorMatch
+} from "./types";
 
 interface ChatModelRequest {
   messages: AIMessage[];
@@ -573,8 +585,117 @@ function selectRagCandidatesByVectorScore(candidates: RagCandidate[]): RagCandid
     .map((candidate, index) => ({ ...candidate, rerank_rank: index + 1 }));
 }
 
-function shouldUseModelRerank(candidates: RagCandidate[]): boolean {
-  return candidates.length > RAG_MAX_CONTEXT_CHUNKS;
+function getCandidateSectionKey(candidate: RagCandidate): string {
+  return normalizeSpaces(
+    candidate.section_path
+    || candidate.heading
+    || candidate.source_path
+    || candidate.id
+  ).toLowerCase();
+}
+
+export function selectDiverseRagCandidates(candidates: RagCandidate[]): RagCandidate[] {
+  const ranked = sortByVectorScore(candidates);
+  const selected: RagCandidate[] = [];
+  const selectedIds = new Set<string>();
+  const seenSections = new Set<string>();
+
+  for (const candidate of ranked) {
+    const sectionKey = getCandidateSectionKey(candidate);
+    if (seenSections.has(sectionKey)) continue;
+    selected.push(candidate);
+    selectedIds.add(candidate.id);
+    seenSections.add(sectionKey);
+    if (selected.length >= RAG_MAX_CONTEXT_CHUNKS) break;
+  }
+
+  for (const candidate of ranked) {
+    if (selected.length >= RAG_MAX_CONTEXT_CHUNKS) break;
+    if (selectedIds.has(candidate.id)) continue;
+    selected.push(candidate);
+    selectedIds.add(candidate.id);
+  }
+
+  return selected.map((candidate, index) => ({
+    ...candidate,
+    rerank_rank: index + 1
+  }));
+}
+
+export interface RagRerankDecision {
+  use_model: boolean;
+  reason:
+    | "within_context_limit"
+    | "multi_query"
+    | "rewritten_query"
+    | "low_section_diversity"
+    | "ambiguous_boundary"
+    | "deterministic_ranking_sufficient";
+  section_diversity: number;
+  boundary_gap?: number;
+}
+
+export function getRagRerankDecision(
+  candidates: RagCandidate[],
+  options: { query_count: number; query_was_rewritten: boolean }
+): RagRerankDecision {
+  const ranked = sortByVectorScore(candidates);
+  const top = ranked.slice(0, RAG_MAX_CONTEXT_CHUNKS);
+  const distinctSections = new Set(top.map(getCandidateSectionKey)).size;
+  const sectionDiversity = top.length ? distinctSections / top.length : 0;
+  const boundaryTop = ranked[RAG_MAX_CONTEXT_CHUNKS - 1]?.vector_score;
+  const boundaryNext = ranked[RAG_MAX_CONTEXT_CHUNKS]?.vector_score;
+  const boundaryGap = typeof boundaryTop === "number" && typeof boundaryNext === "number"
+    ? boundaryTop - boundaryNext
+    : undefined;
+
+  if (candidates.length <= RAG_MAX_CONTEXT_CHUNKS) {
+    return {
+      use_model: false,
+      reason: "within_context_limit",
+      section_diversity: sectionDiversity,
+      boundary_gap: boundaryGap
+    };
+  }
+  if (options.query_count > 1) {
+    return {
+      use_model: true,
+      reason: "multi_query",
+      section_diversity: sectionDiversity,
+      boundary_gap: boundaryGap
+    };
+  }
+  if (options.query_was_rewritten) {
+    return {
+      use_model: true,
+      reason: "rewritten_query",
+      section_diversity: sectionDiversity,
+      boundary_gap: boundaryGap
+    };
+  }
+  if (sectionDiversity < 0.65) {
+    return {
+      use_model: true,
+      reason: "low_section_diversity",
+      section_diversity: sectionDiversity,
+      boundary_gap: boundaryGap
+    };
+  }
+  if (sectionDiversity < 0.8 && boundaryGap !== undefined && boundaryGap < 0.005) {
+    return {
+      use_model: true,
+      reason: "ambiguous_boundary",
+      section_diversity: sectionDiversity,
+      boundary_gap: boundaryGap
+    };
+  }
+
+  return {
+    use_model: false,
+    reason: "deterministic_ranking_sufficient",
+    section_diversity: sectionDiversity,
+    boundary_gap: boundaryGap
+  };
 }
 
 interface FusedVectorMatch extends VectorMatch {
@@ -608,6 +729,7 @@ export function fuseVectorMatchSets(
   const byId = new Map<string, {
     id: string;
     best_score?: number;
+    metadata?: Record<string, unknown>;
     fusion_score: number;
     query_indexes: Set<number>;
   }>();
@@ -619,6 +741,7 @@ export function fuseVectorMatchSets(
       const current = byId.get(match.id) ?? {
         id: match.id,
         best_score: undefined,
+        metadata: match.metadata,
         fusion_score: 0,
         query_indexes: new Set<number>()
       };
@@ -627,6 +750,9 @@ export function fuseVectorMatchSets(
       if (typeof match.score === "number"
         && (current.best_score === undefined || match.score > current.best_score)) {
         current.best_score = match.score;
+        current.metadata = match.metadata;
+      } else if (!current.metadata && match.metadata) {
+        current.metadata = match.metadata;
       }
       byId.set(match.id, current);
     });
@@ -641,9 +767,95 @@ export function fuseVectorMatchSets(
     .map(item => ({
       id: item.id,
       score: item.best_score,
+      metadata: item.metadata,
       fusion_score: item.fusion_score,
       matched_queries: item.query_indexes.size
     }));
+}
+
+function getMetadataString(
+  metadata: Record<string, unknown> | undefined,
+  key: string
+): string | undefined {
+  const value = metadata?.[key];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function buildCandidateFromVectorMetadata(match: FusedVectorMatch): RagCandidate | null {
+  const excerpt = getMetadataString(match.metadata, "excerpt");
+  const module = getMetadataString(match.metadata, "module");
+  const heading = getMetadataString(match.metadata, "heading");
+  if (!excerpt || !module || !heading) return null;
+
+  return {
+    id: match.id,
+    text: excerpt,
+    module,
+    filename: getMetadataString(match.metadata, "filename"),
+    source_path: getMetadataString(match.metadata, "source_path"),
+    title: getMetadataString(match.metadata, "title"),
+    doc_type: getMetadataString(match.metadata, "doc_type"),
+    doc_group: getMetadataString(match.metadata, "doc_group"),
+    logic_area: getMetadataString(match.metadata, "logic_area"),
+    audience: getMetadataString(match.metadata, "audience"),
+    heading,
+    section_path: getMetadataString(match.metadata, "section_path"),
+    vector_score: match.score,
+    fusion_score: match.fusion_score,
+    matched_queries: match.matched_queries,
+    source_label: [
+      getMetadataString(match.metadata, "title") ?? module,
+      getMetadataString(match.metadata, "doc_group"),
+      getMetadataString(match.metadata, "logic_area"),
+      getMetadataString(match.metadata, "audience"),
+      getMetadataString(match.metadata, "section_path") ?? heading
+    ].filter(Boolean).join(" | ")
+  };
+}
+
+async function loadRagCandidatesFromKv(
+  matches: FusedVectorMatch[],
+  env: Env
+): Promise<RagCandidate[]> {
+  const chunkResults = await Promise.all(matches.map(async (match): Promise<RagCandidate | null> => {
+    const raw = await env.CHUNKS.get(`chunk:${match.id}`);
+    if (!raw) return null;
+    const chunk = JSON.parse(raw) as StoredChunk;
+    return {
+      ...chunk,
+      id: match.id,
+      vector_score: match.score,
+      fusion_score: match.fusion_score,
+      matched_queries: match.matched_queries,
+      source_label: getSourceLabel(chunk)
+    };
+  }));
+
+  return chunkResults.filter((candidate): candidate is RagCandidate => candidate !== null);
+}
+
+async function hydrateSelectedRagCandidates(
+  selected: RagCandidate[],
+  fusedMatches: FusedVectorMatch[],
+  env: Env
+): Promise<RagCandidate[]> {
+  const matchById = new Map(fusedMatches.map(match => [match.id, match]));
+  const matches = selected
+    .map(candidate => matchById.get(candidate.id))
+    .filter((match): match is FusedVectorMatch => Boolean(match));
+  const fullCandidates = await loadRagCandidatesFromKv(matches, env);
+  const fullById = new Map(fullCandidates.map(candidate => [candidate.id, candidate]));
+
+  const hydrated: RagCandidate[] = [];
+  for (const candidate of selected) {
+    const full = fullById.get(candidate.id);
+    if (!full) continue;
+    hydrated.push({
+      ...full,
+      rerank_rank: candidate.rerank_rank
+    });
+  }
+  return hydrated;
 }
 
 export function mergeRagSources(
@@ -1027,33 +1239,34 @@ export async function searchRagQueries(
     };
   }
 
-  addDebugStep(debugSteps, "rag.kv", "start", "Đọc song song các chunk duy nhất từ KV.", {
-    requested_chunks: fusedMatches.length
-  });
+  const metadataCandidates = fusedMatches
+    .map(buildCandidateFromVectorMetadata)
+    .filter((candidate): candidate is RagCandidate => candidate !== null);
+  const canRankFromMetadata = metadataCandidates.length === fusedMatches.length;
+  const candidateSource: RagRetrievalSummary["candidate_source"] = canRankFromMetadata
+    ? "vector_metadata_excerpt"
+    : "kv_fallback";
+  const candidates = canRankFromMetadata
+    ? metadataCandidates
+    : await loadRagCandidatesFromKv(fusedMatches, env);
 
-  const chunkResults = await Promise.all(fusedMatches.map(async (match): Promise<RagCandidate | null> => {
-    const raw = await env.CHUNKS.get(`chunk:${match.id}`);
-    if (!raw) return null;
-    const chunk = JSON.parse(raw) as StoredChunk;
-    return {
-      ...chunk,
-      id: match.id,
-      vector_score: match.score,
-      fusion_score: match.fusion_score,
-      matched_queries: match.matched_queries,
-      source_label: getSourceLabel(chunk)
-    };
-  }));
-  const candidates = chunkResults.filter((candidate): candidate is RagCandidate => candidate !== null);
-
-  addDebugStep(debugSteps, "rag.kv", "ok", "Đã tải nội dung ứng viên duy nhất từ KV.", {
-    requested_chunks: fusedMatches.length,
-    loaded_chunks: candidates.length,
-    duplicate_reads_avoided: Math.max(
-      0,
-      filteredMatchSets.reduce((sum, matches) => sum + matches.length, 0) - fusedMatches.length
-    )
-  });
+  addDebugStep(
+    debugSteps,
+    "rag.candidates",
+    "ok",
+    canRankFromMetadata
+      ? "Dùng excerpt trong Vectorize metadata để chọn chunk trước khi đọc KV."
+      : "Metadata cũ chưa có excerpt; đã đọc candidate từ KV để tương thích ngược.",
+    {
+      candidate_source: candidateSource,
+      requested_chunks: canRankFromMetadata ? 0 : fusedMatches.length,
+      loaded_chunks: candidates.length,
+      duplicate_reads_avoided: Math.max(
+        0,
+        filteredMatchSets.reduce((sum, matches) => sum + matches.length, 0) - fusedMatches.length
+      )
+    }
+  );
 
   if (!candidates.length) {
     return {
@@ -1063,30 +1276,67 @@ export async function searchRagQueries(
     };
   }
 
-  const useModelRerank = shouldUseModelRerank(candidates);
-  let selected: RagCandidate[];
-  if (useModelRerank) {
+  const rerankDecision = getRagRerankDecision(candidates, {
+    query_count: retrievalQueries.length,
+    query_was_rewritten: rewrittenResults.some(result => result.debug.used)
+  });
+  addDebugStep(debugSteps, "rag.rerank.decision", "ok", "Đã quyết định có cần model rerank hay không.", {
+    use_model: rerankDecision.use_model,
+    reason: rerankDecision.reason,
+    candidates: candidates.length,
+    candidate_source: candidateSource
+  });
+
+  let selectedBrief: RagCandidate[];
+  let usedModelRerank = false;
+  if (rerankDecision.use_model) {
+    const rerankCandidates = sortByVectorScore(candidates)
+      .slice(0, RAG_RERANK_CANDIDATE_LIMIT);
     try {
-      selected = await rerankRagCandidates(
+      selectedBrief = await rerankRagCandidates(
         retrievalQueries.join("\n"),
-        candidates,
+        rerankCandidates,
         env,
         debugSteps
       );
+      usedModelRerank = true;
     } catch (error) {
-      selected = selectRagCandidatesByVectorScore(candidates);
-      addDebugStep(debugSteps, "rag.rerank", "error", "Rerank lỗi; fallback theo fusion score.", {
+      selectedBrief = selectDiverseRagCandidates(candidates);
+      addDebugStep(debugSteps, "rag.rerank", "error", "Rerank lỗi; fallback chọn đa dạng theo fusion score.", {
         error: getErrorText(error),
-        selected_ids: selected.map(candidate => candidate.id)
+        selected_ids: selectedBrief.map(candidate => candidate.id)
       });
     }
   } else {
-    selected = selectRagCandidatesByVectorScore(candidates);
-    addDebugStep(debugSteps, "rag.rerank", "skip", "Không cần rerank vì số ứng viên vừa với context.", {
+    selectedBrief = selectDiverseRagCandidates(candidates);
+    addDebugStep(debugSteps, "rag.rerank", "skip", "Bỏ qua model rerank; tín hiệu Vectorize/fusion đã đủ rõ.", {
       candidates: candidates.length,
       context_limit: RAG_MAX_CONTEXT_CHUNKS,
-      selected_ids: selected.map(candidate => candidate.id)
+      reason: rerankDecision.reason,
+      selected_ids: selectedBrief.map(candidate => candidate.id)
     });
+  }
+
+  let selected = selectedBrief;
+  if (canRankFromMetadata) {
+    addDebugStep(debugSteps, "rag.kv", "start", "Chỉ đọc full text của các chunk đã được chọn.", {
+      requested_chunks: selectedBrief.length,
+      avoided_candidate_reads: Math.max(0, fusedMatches.length - selectedBrief.length)
+    });
+    selected = await hydrateSelectedRagCandidates(selectedBrief, fusedMatches, env);
+    addDebugStep(debugSteps, "rag.kv", "ok", "Đã tải full text cho context cuối.", {
+      requested_chunks: selectedBrief.length,
+      loaded_chunks: selected.length,
+      avoided_candidate_reads: Math.max(0, fusedMatches.length - selectedBrief.length)
+    });
+  }
+
+  if (!selected.length) {
+    return {
+      content: "Không tìm thấy nội dung chunk tương ứng trong KV.",
+      embedding_debug: embeddingResult?.debug,
+      rag_query_debug: primaryDebug
+    };
   }
 
   const content = selected
@@ -1112,13 +1362,15 @@ export async function searchRagQueries(
   const missingQueries = coverage
     .filter(item => item.selected_hits === 0)
     .map(item => item.query);
-  const retrievalSummary = {
+  const retrievalSummary: RagRetrievalSummary = {
     query_count: retrievalQueries.length,
     unique_candidates: candidates.length,
     selected_chunks: selected.length,
     covered_queries: coverage.filter(item => item.selected_hits > 0).map(item => item.query),
     missing_queries: missingQueries,
-    coverage
+    coverage,
+    candidate_source: candidateSource,
+    used_model_rerank: usedModelRerank
   };
 
   return {
@@ -1128,6 +1380,7 @@ export async function searchRagQueries(
     ].join("\n\n"),
     sources: mergeRagSources([], selected.map(toRagSource), RAG_MAX_VISIBLE_SOURCES),
     embedding_debug: embeddingResult?.debug,
-    rag_query_debug: primaryDebug
+    rag_query_debug: primaryDebug,
+    rag_retrieval_summary: retrievalSummary
   };
 }

@@ -42,6 +42,7 @@ const KV_NAMESPACE_ID = process.env.KV_NAMESPACE_ID!;
 
 const CHUNK_MAX_CHARS = 1800;
 const CHUNK_OVERLAP_CHARS = 160;
+const VECTOR_METADATA_EXCERPT_CHARS = 800;
 const REPLACE_CORPUS = process.argv.includes("--replace");
 const DRY_RUN = process.argv.includes("--dry-run");
 
@@ -77,6 +78,7 @@ interface ChunkMetadata {
   section_path: string;
   chunk_index: number;
   part_index: number;
+  excerpt: string;
 }
 
 interface Chunk {
@@ -138,7 +140,8 @@ function chunkMarkdown(text: string, filename: string, profileOverride?: Partial
         heading_level: section.headingLevel,
         section_path: section.sectionPath,
         chunk_index: chunkIndex,
-        part_index: partIndex
+        part_index: partIndex,
+        excerpt: parts[partIndex].slice(0, VECTOR_METADATA_EXCERPT_CHARS)
       };
 
       chunks.push({
