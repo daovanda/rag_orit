@@ -18,7 +18,7 @@ export interface Env {
 export type ModelProvider = "cloudflare" | "nvidia";
 
 export const DEFAULT_MODEL_PROVIDER: ModelProvider = "cloudflare";
-export const CHAT_MODEL = "@cf/zai-org/glm-4.7-flash"  // "@cf/openai/gpt-oss-120b";
+export const CHAT_MODEL = "@cf/openai/gpt-oss-120b"  // "@cf/openai/gpt-oss-120b";
 export const GENERAL_CHAT_MODEL = CHAT_MODEL;
 export const QUERY_REWRITE_MODEL = CHAT_MODEL;
 export const EMBEDDING_MODEL = "@cf/baai/bge-m3";
